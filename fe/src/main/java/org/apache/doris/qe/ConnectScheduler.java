@@ -18,6 +18,7 @@
 package org.apache.doris.qe;
 
 import org.apache.doris.catalog.Catalog;
+import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlProto;
 import org.apache.doris.mysql.nio.NConnectContext;
 import org.apache.doris.mysql.privilege.PrivPredicate;
@@ -34,6 +35,8 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 // 查询请求的调度器
@@ -60,6 +63,21 @@ public class ConnectScheduler {
         nextConnectionId = new AtomicInteger(0);
         checkTimer = new Timer("ConnectScheduler Check Timer", true);
         checkTimer.scheduleAtFixedRate(new TimeoutChecker(), 0, 1000);
+
+        ScheduledExecutorService pool = Executors.newScheduledThreadPool(1);
+        pool.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                LOG.info("==============login user==============");
+                for (ConnectContext ctx : connectionMap.values()) {
+                    MysqlChannel channel = ctx.getMysqlChannel();
+                    String remote = channel.getRemoteHostPortString();
+                    String user = ctx.getQualifiedUser();
+                    LOG.info("user=>{},remote=>{}", user, remote);
+                }
+                LOG.info("==============login user==============");
+            }
+        }, 120, 60, TimeUnit.SECONDS);
     }
 
     private class TimeoutChecker extends TimerTask {
@@ -140,7 +158,7 @@ public class ConnectScheduler {
                                                                            PrivPredicate.GRANT)) {
                 continue;
             }
-            
+
             infos.add(ctx.toThreadInfo());
         }
         return infos;
