@@ -74,7 +74,7 @@ public class ConnectScheduler {
                     MysqlChannel channel = ctx.getMysqlChannel();
                     String remote = channel.getRemoteHostPortString();
                     String user = ctx.getQualifiedUser();
-                    LOG.info("user=>{},remote=>{},starttime=", user, remote,new Date(ctx.getStartTime()));
+                    LOG.info("user=>{},remote=>{},starttime={}", user, remote,new Date(ctx.getStartTime()));
                 }
                 LOG.info("==============login user==============");
             }
