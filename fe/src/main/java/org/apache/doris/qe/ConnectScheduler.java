@@ -48,7 +48,7 @@ public class ConnectScheduler {
     private int maxConnections;
     private int numberConnection;
     private AtomicInteger nextConnectionId;
-    private Map<Long, ConnectContext> connectionMap = Maps.newHashMap();
+    private Map<Long, ConnectContext> connectionMap = Maps.newConcurrentMap();
     private Map<String, AtomicInteger> connByUser = Maps.newHashMap();
     private ExecutorService executor = Executors.newCachedThreadPool();
 
