@@ -212,7 +212,7 @@ TEST_F(TestNumBasedCumulativeCompactionPolicy, calc_cumulative_compaction_score)
     TabletSharedPtr _tablet(new Tablet(_tablet_meta, nullptr, CUMULATIVE_NUM_BASED_POLICY));
     _tablet->init();
 
-    const uint32_t score = _tablet->calc_cumulative_compaction_score();
+    const uint32_t score = _tablet->calc_compaction_score(CompactionType::CUMULATIVE_COMPACTION);
     
     ASSERT_EQ(15, score);
 }
@@ -675,7 +675,7 @@ TEST_F(TestSizeBasedCumulativeCompactionPolicy, calc_cumulative_compaction_score
     _tablet->init();
     _tablet->calculate_cumulative_point();
 
-    const uint32_t score = _tablet->calc_cumulative_compaction_score();
+    const uint32_t score = _tablet->calc_compaction_score(CompactionType::CUMULATIVE_COMPACTION);
 
     ASSERT_EQ(15, score);
 }
@@ -692,7 +692,7 @@ TEST_F(TestSizeBasedCumulativeCompactionPolicy, calc_cumulative_compaction_score
     TabletSharedPtr _tablet(new Tablet(_tablet_meta, nullptr, CUMULATIVE_SIZE_BASED_POLICY));
     _tablet->init();
     _tablet->calculate_cumulative_point();
-    const uint32_t score = _tablet->calc_cumulative_compaction_score();
+    const uint32_t score = _tablet->calc_compaction_score(CompactionType::CUMULATIVE_COMPACTION);
 
     ASSERT_EQ(7, score);
 }
@@ -1052,20 +1052,20 @@ TEST_F(TestSizeBasedCumulativeCompactionPolicy, _pick_missing_version_cumulative
     rowsets.push_back(_tablet->get_rowset_by_version({4, 4}));
     std::shared_ptr<MemTracker> mem_tracker(new MemTracker());
     CumulativeCompaction compaction(_tablet, "label", mem_tracker);
-    compaction.find_longest_consecutive_version(&rowsets);
+    compaction.find_longest_consecutive_version(&rowsets, nullptr);
     ASSERT_EQ(3, rowsets.size());
     ASSERT_EQ(2, rowsets[2]->end_version());
 
     // no miss version
     std::vector<RowsetSharedPtr> rowsets2;
     rowsets2.push_back(_tablet->get_rowset_by_version({0, 0}));
-    compaction.find_longest_consecutive_version(&rowsets2);
+    compaction.find_longest_consecutive_version(&rowsets2, nullptr);
     ASSERT_EQ(1, rowsets2.size());
     ASSERT_EQ(0, rowsets[0]->end_version());
 
     // no version
     std::vector<RowsetSharedPtr> rowsets3;
-    compaction.find_longest_consecutive_version(&rowsets3);
+    compaction.find_longest_consecutive_version(&rowsets3, nullptr);
     ASSERT_EQ(0, rowsets3.size());
 }
 }
