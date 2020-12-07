@@ -5,6 +5,8 @@ be/build
 output
 docs/.temp
 docs/.vuepress/dist
+docs/contents
+docs/build
 docs/node_modules
 gensrc/build
 fe/target
