@@ -27,7 +27,9 @@ cd incubator-doris
 ### build image
 
 ```shell
-
+cd my-script
+./build-all {version}
+example: ./build-all 0.12-10
 ```
 
 
