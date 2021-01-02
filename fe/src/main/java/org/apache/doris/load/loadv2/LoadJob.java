@@ -629,6 +629,7 @@ public abstract class LoadJob extends AbstractTxnStateChangeCallback implements 
         if (MetricRepo.isInit.get()) {
             MetricRepo.COUNTER_LOAD_FINISHED.increase(1L);
         }
+        idToTasks.clear();
     }
 
     protected boolean checkDataQuality() {
