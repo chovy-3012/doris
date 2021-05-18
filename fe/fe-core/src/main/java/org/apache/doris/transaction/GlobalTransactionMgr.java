@@ -19,13 +19,18 @@ package org.apache.doris.transaction;
 
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DuplicatedRequestException;
 import org.apache.doris.common.LabelAlreadyUsedException;
+import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.Pair;
+import org.apache.doris.common.QuotaExceedException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.util.MetaLockUtils;
+import org.apache.doris.persist.BatchRemoveTransactionsOperation;
 import org.apache.doris.persist.EditLog;
 import org.apache.doris.thrift.TUniqueId;
 import org.apache.doris.transaction.TransactionState.LoadJobSourceType;
@@ -34,6 +39,8 @@ import org.apache.doris.transaction.TransactionState.TxnCoordinator;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.time.StopWatch;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -93,7 +100,8 @@ public class GlobalTransactionMgr implements Writable {
 
     public long beginTransaction(long dbId, List<Long> tableIdList, String label, TxnCoordinator coordinator, LoadJobSourceType sourceType,
             long timeoutSecond)
-            throws AnalysisException, LabelAlreadyUsedException, BeginTransactionException, DuplicatedRequestException {
+            throws AnalysisException, LabelAlreadyUsedException, BeginTransactionException, DuplicatedRequestException,
+            QuotaExceedException, MetaNotFoundException {
         return beginTransaction(dbId, tableIdList, label, null, coordinator, sourceType, -1, timeoutSecond);
     }
     
@@ -112,7 +120,8 @@ public class GlobalTransactionMgr implements Writable {
      */
     public long beginTransaction(long dbId, List<Long> tableIdList, String label, TUniqueId requestId,
                                  TxnCoordinator coordinator, LoadJobSourceType sourceType, long listenerId, long timeoutSecond)
-            throws AnalysisException, LabelAlreadyUsedException, BeginTransactionException, DuplicatedRequestException {
+            throws AnalysisException, LabelAlreadyUsedException, BeginTransactionException, DuplicatedRequestException,
+            QuotaExceedException, MetaNotFoundException {
 
         if (Config.disable_load_job) {
             throw new AnalysisException("disable_load_job is set to true, all load jobs are prevented");
@@ -150,9 +159,9 @@ public class GlobalTransactionMgr implements Writable {
 
     }
 
-    public void commitTransaction(long dbId, long transactionId, List<TabletCommitInfo> tabletCommitInfos)
+    public void commitTransaction(long dbId, List<Table> tableList, long transactionId, List<TabletCommitInfo> tabletCommitInfos)
             throws UserException {
-        commitTransaction(dbId, transactionId, tabletCommitInfos, null);
+        commitTransaction(dbId, tableList, transactionId, tabletCommitInfos, null);
     }
     
     /**
@@ -164,7 +173,7 @@ public class GlobalTransactionMgr implements Writable {
      * @note it is necessary to optimize the `lock` mechanism and `lock` scope resulting from wait lock long time
      * @note callers should get db.write lock before call this api
      */
-    public void commitTransaction(long dbId, long transactionId, List<TabletCommitInfo> tabletCommitInfos,
+    public void commitTransaction(long dbId, List<Table> tableList, long transactionId, List<TabletCommitInfo> tabletCommitInfos,
                                   TxnCommitAttachment txnCommitAttachment)
             throws UserException {
         if (Config.disable_load_job) {
@@ -173,29 +182,38 @@ public class GlobalTransactionMgr implements Writable {
         
         LOG.debug("try to commit transaction: {}", transactionId);
         DatabaseTransactionMgr dbTransactionMgr = getDatabaseTransactionMgr(dbId);
-        dbTransactionMgr.commitTransaction(transactionId, tabletCommitInfos, txnCommitAttachment);
+        dbTransactionMgr.commitTransaction(tableList, transactionId, tabletCommitInfos, txnCommitAttachment);
     }
     
-    public boolean commitAndPublishTransaction(Database db, long transactionId,
+    public boolean commitAndPublishTransaction(Database db, List<Table> tableList, long transactionId,
                                                List<TabletCommitInfo> tabletCommitInfos, long timeoutMillis)
             throws UserException {
-        return commitAndPublishTransaction(db, transactionId, tabletCommitInfos, timeoutMillis, null);
+        return commitAndPublishTransaction(db, tableList, transactionId, tabletCommitInfos, timeoutMillis, null);
     }
     
-    public boolean commitAndPublishTransaction(Database db, long transactionId,
+    public boolean commitAndPublishTransaction(Database db, List<Table> tableList, long transactionId,
             List<TabletCommitInfo> tabletCommitInfos, long timeoutMillis,
             TxnCommitAttachment txnCommitAttachment)
             throws UserException {
-        if (!db.tryWriteLock(timeoutMillis, TimeUnit.MILLISECONDS)) {
-            throw new UserException("get database write lock timeout, database=" + db.getFullName());
+        StopWatch stopWatch = new StopWatch();
+        stopWatch.start();
+        if (!MetaLockUtils.tryWriteLockTables(tableList, timeoutMillis, TimeUnit.MILLISECONDS)) {
+            throw new UserException("get tableList write lock timeout, tableList=(" + StringUtils.join(tableList, ",") + ")");
         }
         try {
-            commitTransaction(db.getId(), transactionId, tabletCommitInfos, txnCommitAttachment);
+            commitTransaction(db.getId(), tableList, transactionId, tabletCommitInfos, txnCommitAttachment);
         } finally {
-            db.writeUnlock();
+           MetaLockUtils.writeUnlockTables(tableList);
         }
+        stopWatch.stop();
+        long publishTimeoutMillis = timeoutMillis - stopWatch.getTime();
         DatabaseTransactionMgr dbTransactionMgr = getDatabaseTransactionMgr(db.getId());
-        return dbTransactionMgr.publishTransaction(db, transactionId, timeoutMillis);
+        if (publishTimeoutMillis < 0) {
+            // here commit transaction successfully cost too much time to cause that publishTimeoutMillis is less than zero,
+            // so we just return false to indicate publish timeout
+            return false;
+        }
+        return dbTransactionMgr.publishTransaction(db, transactionId, publishTimeoutMillis);
    }
 
     public void abortTransaction(long dbId, long transactionId, String reason) throws UserException {
@@ -312,15 +330,28 @@ public class GlobalTransactionMgr implements Writable {
         } catch (AnalysisException e) {
             LOG.warn("replay upsert transaction [" + transactionState.getTransactionId() + "] failed", e);
         }
-
     }
-    
+
+    @Deprecated
+    // Use replayBatchDeleteTransactions instead
     public void replayDeleteTransactionState(TransactionState transactionState) {
         try {
             DatabaseTransactionMgr dbTransactionMgr = getDatabaseTransactionMgr(transactionState.getDbId());
-            dbTransactionMgr.deleteTransaction(transactionState);
+            dbTransactionMgr.replayDeleteTransaction(transactionState);
         } catch (AnalysisException e) {
             LOG.warn("replay delete transaction [" + transactionState.getTransactionId() + "] failed", e);
+        }
+    }
+
+    public void replayBatchRemoveTransactions(BatchRemoveTransactionsOperation operation) {
+        Map<Long, List<Long>> dbTxnIds = operation.getDbTxnIds();
+        for (Long dbId : dbTxnIds.keySet()) {
+            try {
+                DatabaseTransactionMgr dbTransactionMgr = getDatabaseTransactionMgr(dbId);
+                dbTransactionMgr.replayBatchRemoveTransaction(dbTxnIds.get(dbId));
+            } catch (AnalysisException e) {
+                LOG.warn("replay batch remove transactions failed. db " + dbId, e);
+            }
         }
     }
 

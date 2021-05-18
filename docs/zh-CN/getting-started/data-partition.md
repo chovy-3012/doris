@@ -57,7 +57,9 @@ Doris 的建表是一个同步命令，命令返回成功，即表示建表成�
 本小节通过一个例子，来介绍 Doris 的建表方式。
 
 ```
-CREATE TABLE IF NOT EXISTS example_db.expamle_tbl
+-- Range Partition
+
+CREATE TABLE IF NOT EXISTS example_db.expamle_range_tbl
 (
     `user_id` LARGEINT NOT NULL COMMENT "用户id",
     `date` DATE NOT NULL COMMENT "数据灌入日期时间",
@@ -77,6 +79,38 @@ PARTITION BY RANGE(`date`)
     PARTITION `p201701` VALUES LESS THAN ("2017-02-01"),
     PARTITION `p201702` VALUES LESS THAN ("2017-03-01"),
     PARTITION `p201703` VALUES LESS THAN ("2017-04-01")
+)
+DISTRIBUTED BY HASH(`user_id`) BUCKETS 16
+PROPERTIES
+(
+    "replication_num" = "3",
+    "storage_medium" = "SSD",
+    "storage_cooldown_time" = "2018-01-01 12:00:00"
+);
+
+
+-- List Partition
+
+CREATE TABLE IF NOT EXISTS example_db.expamle_list_tbl
+(
+    `user_id` LARGEINT NOT NULL COMMENT "用户id",
+    `date` DATE NOT NULL COMMENT "数据灌入日期时间",
+    `timestamp` DATETIME NOT NULL COMMENT "数据灌入的时间戳",
+    `city` VARCHAR(20) COMMENT "用户所在城市",
+    `age` SMALLINT COMMENT "用户年龄",
+    `sex` TINYINT COMMENT "用户性别",
+    `last_visit_date` DATETIME REPLACE DEFAULT "1970-01-01 00:00:00" COMMENT "用户最后一次访问时间",
+    `cost` BIGINT SUM DEFAULT "0" COMMENT "用户总消费",
+    `max_dwell_time` INT MAX DEFAULT "0" COMMENT "用户最大停留时间",
+    `min_dwell_time` INT MIN DEFAULT "99999" COMMENT "用户最小停留时间"
+)
+ENGINE=olap
+AGGREGATE KEY(`user_id`, `date`, `timestamp`, `city`, `age`, `sex`)
+PARTITION BY LIST(`city`)
+(
+    PARTITION `p_cn` VALUES IN ("Beijing", "Shanghai", "Hong Kong"),
+    PARTITION `p_usa` VALUES IN ("New York", "San Francisco"),
+    PARTITION `p_jp` VALUES IN ("Tokyo")
 )
 DISTRIBUTED BY HASH(`user_id`) BUCKETS 16
 PROPERTIES
@@ -106,7 +140,7 @@ AGGREGATE KEY 数据模型中，所有没有指定聚合方式（SUM、REPLACE�
 
 ### 分区与分桶
 
-Doris 支持两层的数据划分。第一层是 Partition，仅支持 Range 的划分方式。第二层是 Bucket（Tablet），仅支持 Hash 的划分方式。
+Doris 支持两层的数据划分。第一层是 Partition，支持 Range 和 List 的划分方式。第二层是 Bucket（Tablet），仅支持 Hash 的划分方式。
 
 也可以仅使用一层分区。使用一层分区时，只支持 Bucket 划分。
 
@@ -114,14 +148,17 @@ Doris 支持两层的数据划分。第一层是 Partition，仅支持 Range 的
 
     * Partition 列可以指定一列或多列。分区类必须为 KEY 列。多列分区的使用方式在后面 **多列分区** 小结介绍。
     * 不论分区列是什么类型，在写分区值时，都需要加双引号。
-    * 分区列通常为时间列，以方便的管理新旧数据。
     * 分区数量理论上没有上限。
     * 当不使用 Partition 建表时，系统会自动生成一个和表名同名的，全值范围的 Partition。该 Partition 对用户不可见，并且不可删改。
+  
+    #### Range 分区
+
+    * 分区列通常为时间列，以方便的管理新旧数据。
     * Partition 支持通过 `VALUES LESS THAN (...)` 仅指定上界，系统会将前一个分区的上界作为该分区的下界，生成一个左闭右开的区间。通过，也支持通过 `VALUES [...)` 指定同时指定上下界，生成一个左闭右开的区间。
 
     * 通过 `VALUES [...)` 同时指定上下界比较容易理解。这里举例说明，当使用 `VALUES LESS THAN (...)` 语句进行分区的增删操作时，分区范围的变化情况：
     
-        * 如上示例，当建表完成后，会自动生成如下3个分区：
+        * 如上 `expamle_range_tbl` 示例，当建表完成后，会自动生成如下3个分区：
 
             ```
             p201701: [MIN_VALUE,  2017-02-01)
@@ -180,6 +217,39 @@ Doris 支持两层的数据划分。第一层是 Partition，仅支持 Range 的
     
     不可添加范围重叠的分区。
 
+    #### List 分区
+
+    * 分区列支持 `BOOLEAN, TINYINT, SMALLINT, INT, BIGINT, LARGEINT, DATE, DATETIME, CHAR, VARCHAR` 数据类型，分区值为枚举值。只有当数据为目标分区枚举值其中之一时，才可以命中分区。
+    * Partition 支持通过 `VALUES IN (...)` 来指定每个分区包含的枚举值。
+    * 下面通过示例说明，进行分区的增删操作时，分区的变化。
+      
+        * 如上 `example_list_tbl` 示例，当建表完成后，会自动生成如下3个分区：
+
+            ```
+            p_cn: ("Beijing", "Shanghai", "Hong Kong")
+            p_usa: ("New York", "San Francisco")
+            p_jp: ("Tokyo")
+            ```
+
+        * 当我们增加一个分区 p_uk VALUES IN ("London")，分区结果如下：
+        
+            ```
+            p_cn: ("Beijing", "Shanghai", "Hong Kong")
+            p_usa: ("New York", "San Francisco")
+            p_jp: ("Tokyo")
+            p_uk: ("London")
+            ```
+        
+        * 当我们删除分区 p_jp，分区结果如下：
+
+            ```
+            p_cn: ("Beijing", "Shanghai", "Hong Kong")
+            p_usa: ("New York", "San Francisco")
+            p_uk: ("London")
+            ```
+
+    不可添加范围重叠的分区。
+
 2. Bucket
 
     * 如果使用了 Partition，则 `DISTRIBUTED ...` 语句描述的是数据在**各个分区内**的划分规则。如果不使用 Partition，则描述的是对整个表的数据的划分规则。
@@ -206,37 +276,70 @@ Doris 支持两层的数据划分。第一层是 Partition，仅支持 Range 的
 
 Doris 支持指定多列作为分区列，示例如下：
 
-```
-PARTITION BY RANGE(`date`, `id`)
-(
-    PARTITION `p201701_1000` VALUES LESS THAN ("2017-02-01", "1000"),
-    PARTITION `p201702_2000` VALUES LESS THAN ("2017-03-01", "2000"),
-    PARTITION `p201703_all`  VALUES LESS THAN ("2017-04-01")
-)
-```
+##### Range 分区
 
-在以上示例中，我们指定 `date`(DATE 类型) 和 `id`(INT 类型) 作为分区列。以上示例最终得到的分区如下：
+    ```
+    PARTITION BY RANGE(`date`, `id`)
+    (
+        PARTITION `p201701_1000` VALUES LESS THAN ("2017-02-01", "1000"),
+        PARTITION `p201702_2000` VALUES LESS THAN ("2017-03-01", "2000"),
+        PARTITION `p201703_all`  VALUES LESS THAN ("2017-04-01")
+    )
+    ```
 
-```
-* p201701_1000:    [(MIN_VALUE,  MIN_VALUE), ("2017-02-01", "1000")   )
-* p201702_2000:    [("2017-02-01", "1000"),  ("2017-03-01", "2000")   )
-* p201703_all:     [("2017-03-01", "2000"),  ("2017-04-01", MIN_VALUE)) 
-```
+    在以上示例中，我们指定 `date`(DATE 类型) 和 `id`(INT 类型) 作为分区列。以上示例最终得到的分区如下：
 
-注意，最后一个分区用户缺省只指定了 `date` 列的分区值，所以 `id` 列的分区值会默认填充 `MIN_VALUE`。当用户插入数据时，分区列值会按照顺序依次比较，最终得到对应的分区。举例如下：
+    ```
+    * p201701_1000:    [(MIN_VALUE,  MIN_VALUE), ("2017-02-01", "1000")   )
+    * p201702_2000:    [("2017-02-01", "1000"),  ("2017-03-01", "2000")   )
+    * p201703_all:     [("2017-03-01", "2000"),  ("2017-04-01", MIN_VALUE)) 
+    ```
 
-```
-* 数据  -->  分区
-* 2017-01-01, 200     --> p201701_1000
-* 2017-01-01, 2000    --> p201701_1000
-* 2017-02-01, 100     --> p201701_1000
-* 2017-02-01, 2000    --> p201702_2000
-* 2017-02-15, 5000    --> p201702_2000
-* 2017-03-01, 2000    --> p201703_all
-* 2017-03-10, 1       --> p201703_all
-* 2017-04-01, 1000    --> 无法导入
-* 2017-05-01, 1000    --> 无法导入
-```
+    注意，最后一个分区用户缺省只指定了 `date` 列的分区值，所以 `id` 列的分区值会默认填充 `MIN_VALUE`。当用户插入数据时，分区列值会按照顺序依次比较，最终得到对应的分区。举例如下：
+
+    ```
+    * 数据  -->  分区
+    * 2017-01-01, 200     --> p201701_1000
+    * 2017-01-01, 2000    --> p201701_1000
+    * 2017-02-01, 100     --> p201701_1000
+    * 2017-02-01, 2000    --> p201702_2000
+    * 2017-02-15, 5000    --> p201702_2000
+    * 2017-03-01, 2000    --> p201703_all
+    * 2017-03-10, 1       --> p201703_all
+    * 2017-04-01, 1000    --> 无法导入
+    * 2017-05-01, 1000    --> 无法导入
+    ```
+
+##### List 分区
+
+    ```
+    PARTITION BY LIST(`id`, `city`)
+    (
+        PARTITION `p1_city` VALUES IN (("1", "Beijing"), ("1", "Shanghai")),
+        PARTITION `p2_city` VALUES IN (("2", "Beijing"), ("2", "Shanghai")),
+        PARTITION `p3_city` VALUES IN (("3", "Beijing"), ("3", "Shanghai"))
+    )
+    ```
+
+    在以上示例中，我们指定 `id`(INT 类型) 和 `city`(VARCHAR 类型) 作为分区列。以上示例最终得到的分区如下：
+
+    ```
+    * p1_city: [("1", "Beijing"), ("1", "Shanghai")]
+    * p2_city: [("2", "Beijing"), ("2", "Shanghai")]
+    * p3_city: [("3", "Beijing"), ("3", "Shanghai")]
+    ```
+
+    当用户插入数据时，分区列值会按照顺序依次比较，最终得到对应的分区。举例如下：
+
+    ```
+    * 数据  --->  分区
+    * 1, Beijing     ---> p1_city
+    * 1, Shanghai    ---> p1_city
+    * 2, Shanghai    ---> p2_city
+    * 3, Beijing     ---> p3_city
+    * 1, Tianjin     ---> 无法导入
+    * 4, Beijing     ---> 无法导入
+    ```
 
 ### PROPERTIES
 
@@ -254,9 +357,9 @@ PARTITION BY RANGE(`date`, `id`)
     * BE 的数据存储目录可以显式的指定为 SSD 或者 HDD（通过 .SSD 或者 .HDD 后缀区分）。建表时，可以统一指定所有 Partition 初始存储的介质。注意，后缀作用是显式指定磁盘介质，而不会检查是否与实际介质类型相符。
     * 默认初始存储介质可通过fe的配置文件 `fe.conf` 中指定 `default_storage_medium=xxx`，如果没有指定，则默认为 HDD。如果指定为 SSD，则数据初始存放在 SSD 上。
     * 如果没有指定 storage\_cooldown\_time，则默认 30 天后，数据会从 SSD 自动迁移到 HDD 上。如果指定了 storage\_cooldown\_time，则在到达 storage_cooldown_time 时间后，数据才会迁移。
-    * 注意，当指定 storage_medium 时，如果FE参数 `enable_strict_storage_medium_check` 为 `True` 该参数只是一个“尽力而为”的设置。即使集群内没有设置 SSD 存储介质，也不会报错，而是自动存储在可用的数据目录中。
+    * 注意，当指定 storage_medium 时，如果FE参数 `enable_strict_storage_medium_check` 为 `False` 该参数只是一个“尽力而为”的设置。即使集群内没有设置 SSD 存储介质，也不会报错，而是自动存储在可用的数据目录中。
       同样，如果 SSD 介质不可访问、空间不足，都可能导致数据初始直接存储在其他可用介质上。而数据到期迁移到 HDD 时，如果 HDD 介质不可访问、空间不足，也可能迁移失败（但是会不断尝试）。
-      如果FE参数 `enable_strict_storage_medium_check` 为 `False` 则当集群内没有设置 SSD 存储介质时，会报错 `Failed to find enough host in all backends with storage medium is SSD`。
+      如果FE参数 `enable_strict_storage_medium_check` 为 `True` 则当集群内没有设置 SSD 存储介质时，会报错 `Failed to find enough host in all backends with storage medium is SSD`。
 
 ### ENGINE
 

@@ -105,7 +105,22 @@ enum TFileFormatType {
     FORMAT_PARQUET,
     FORMAT_CSV_DEFLATE,
     FORMAT_ORC,
-    FORMAT_JSON
+    FORMAT_JSON,
+}
+
+struct THdfsConf {
+    1: required string key
+    2: required string value
+}
+
+struct THdfsParams {
+    1: optional string host
+    2: optional i32 port
+    3: optional string user
+    4: optional string kerb_principal
+    5: optional string kerb_ticket_cache_path
+    6: optional string token
+    7: optional list<THdfsConf> hdfs_conf
 }
 
 // One broker range information.
@@ -131,6 +146,11 @@ struct TBrokerRangeDesc {
     11: optional bool strip_outer_array;
     12: optional string jsonpaths;
     13: optional string json_root;
+    //  it's usefull when format_type == FORMAT_JSON
+    14: optional bool num_as_string;
+    15: optional bool fuzzy_parse;
+    16: optional THdfsParams hdfs_params
+    17: optional bool read_json_by_line;
 }
 
 struct TBrokerScanRangeParams {
@@ -163,6 +183,12 @@ struct TBrokerScanRangeParams {
     // strictMode is a boolean
     // if strict mode is true, the incorrect data (the result of cast is null) will not be loaded
     10: optional bool strict_mode
+    // for multibytes separators
+    11: optional i32 column_separator_length = 1;
+    12: optional i32 line_delimiter_length = 1;
+    13: optional string column_separator_str;
+    14: optional string line_delimiter_str;
+
 }
 
 // Broker scan range
@@ -221,6 +247,7 @@ struct TBrokerScanNode {
     // Partition info used to process partition select in broker load
     2: optional list<Exprs.TExpr> partition_exprs
     3: optional list<Partitions.TRangePartition> partition_infos
+	4: optional list<Exprs.TExpr> pre_filter_exprs
 }
 
 struct TEsScanNode {
@@ -314,7 +341,9 @@ struct TOlapScanNode {
   3: required list<Types.TPrimitiveType> key_column_type
   4: required bool is_preaggregation
   5: optional string sort_column
+  6: optional Types.TKeysType keyType
 }
+
 struct TEqJoinCondition {
   // left-hand side of "<a> = <b>"
   1: required Exprs.TExpr left;

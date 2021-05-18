@@ -16,17 +16,17 @@
 // under the License.
 
 #include "agent/topic_subscriber.h"
+
 #include "common/logging.h"
 
 namespace doris {
 
-TopicSubscriber::TopicSubscriber() {
-}
+TopicSubscriber::TopicSubscriber() {}
 
 TopicSubscriber::~TopicSubscriber() {
     // Delete all listeners in the register
-    std::map<TTopicType::type, std::vector<TopicListener*>>::iterator it 
-        = _registered_listeners.begin();
+    std::map<TTopicType::type, std::vector<TopicListener*>>::iterator it =
+            _registered_listeners.begin();
     for (; it != _registered_listeners.end(); ++it) {
         std::vector<TopicListener*>& listeners = it->second;
         std::vector<TopicListener*>::iterator listener_it = listeners.begin();
@@ -38,13 +38,13 @@ TopicSubscriber::~TopicSubscriber() {
 
 void TopicSubscriber::register_listener(TTopicType::type topic_type, TopicListener* listener) {
     // Unique lock here to prevent access to listeners
-    boost::unique_lock<boost::shared_mutex> lock(_listener_mtx);
+    std::unique_lock<std::shared_mutex> lock(_listener_mtx);
     this->_registered_listeners[topic_type].push_back(listener);
 }
 
 void TopicSubscriber::handle_updates(const TAgentPublishRequest& agent_publish_request) {
     // Shared lock here in order to avoid updates in listeners' map
-    boost::shared_lock<boost::shared_mutex> lock(_listener_mtx);
+    std::shared_lock<std::shared_mutex> lock(_listener_mtx);
     // Currently, not deal with protocol version, the listener should deal with protocol version
     const std::vector<TTopicUpdate>& topic_updates = agent_publish_request.updates;
     std::vector<TTopicUpdate>::const_iterator topic_update_it = topic_updates.begin();
@@ -53,9 +53,8 @@ void TopicSubscriber::handle_updates(const TAgentPublishRequest& agent_publish_r
         std::vector<TopicListener*>::iterator listener_it = listeners.begin();
         // Send the update to all listeners with protocol version.
         for (; listener_it != listeners.end(); ++listener_it) {
-            (*listener_it)->handle_update(agent_publish_request.protocol_version, 
-                                          *topic_update_it); 
-        }    
+            (*listener_it)->handle_update(agent_publish_request.protocol_version, *topic_update_it);
+        }
     }
 }
 } // namespace doris

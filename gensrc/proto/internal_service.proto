@@ -112,6 +112,7 @@ message PTabletWriterCancelResult {
 };
 
 message PExecPlanFragmentRequest {
+    optional bytes request = 1;
 };
 
 message PExecPlanFragmentResult {
@@ -137,6 +138,7 @@ message PCancelPlanFragmentResult {
 
 message PFetchDataRequest {
     required PUniqueId finst_id = 1;
+    optional bool resp_in_attachment = 2;
 };
 
 message PFetchDataResult {
@@ -145,6 +147,8 @@ message PFetchDataResult {
     optional int64 packet_seq = 2;
     optional bool eos = 3;
     optional PQueryStatistics query_statistics = 4;
+    optional bytes row_batch = 5;
+    optional bool empty_batch = 6;
 };
 
 //Add message definition to fetch and update cache
@@ -190,6 +194,7 @@ message PFetchCacheRequest {
 message PFetchCacheResult {
     required PCacheStatus status = 1;
     repeated PCacheValue values = 2;
+    optional int64 all_count = 3 [default = 0];
 };
 
 enum PClearType {
@@ -205,14 +210,6 @@ message PClearCacheRequest {
     optional PUniqueId sql_key = 3;
 };
 //End cache proto definition
-
-message PTriggerProfileReportRequest {
-    repeated PUniqueId instance_ids = 1;
-};
-
-message PTriggerProfileReportResult {
-    required PStatus status = 1;
-};
 
 message PStringPair {
     required string key = 1;
@@ -252,7 +249,6 @@ service PBackendService {
     rpc tablet_writer_open(PTabletWriterOpenRequest) returns (PTabletWriterOpenResult);
     rpc tablet_writer_add_batch(PTabletWriterAddBatchRequest) returns (PTabletWriterAddBatchResult);
     rpc tablet_writer_cancel(PTabletWriterCancelRequest) returns (PTabletWriterCancelResult);
-    rpc trigger_profile_report(PTriggerProfileReportRequest) returns (PTriggerProfileReportResult);
     rpc get_info(PProxyRequest) returns (PProxyResult); 
     rpc update_cache(PUpdateCacheRequest) returns (PCacheResponse);
     rpc fetch_cache(PFetchCacheRequest) returns (PFetchCacheResult);

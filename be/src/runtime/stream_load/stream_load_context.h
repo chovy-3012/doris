@@ -17,16 +17,16 @@
 
 #pragma once
 
-#include <future>
-#include <sstream>
 #include <rapidjson/prettywriter.h>
 
+#include <future>
+#include <sstream>
+
+#include "common/logging.h"
+#include "common/status.h"
+#include "common/utils.h"
 #include "gen_cpp/BackendService_types.h"
 #include "gen_cpp/FrontendService_types.h"
-
-#include "common/status.h"
-#include "common/logging.h"
-#include "common/utils.h"
 #include "runtime/exec_env.h"
 #include "runtime/stream_load/load_stream_mgr.h"
 #include "runtime/stream_load/stream_load_executor.h"
@@ -40,21 +40,23 @@ namespace doris {
 // kafka related info
 class KafkaLoadInfo {
 public:
-    KafkaLoadInfo(const TKafkaLoadInfo& t_info):
-        brokers(t_info.brokers),
-        topic(t_info.topic),
-        begin_offset(t_info.partition_begin_offset),
-        properties(t_info.properties) {
-
+    KafkaLoadInfo(const TKafkaLoadInfo& t_info)
+            : brokers(t_info.brokers),
+              topic(t_info.topic),
+              begin_offset(t_info.partition_begin_offset),
+              properties(t_info.properties) {
+        // The offset(begin_offset) sent from FE is the starting offset,
+        // and the offset(cmt_offset) reported by BE to FE is the consumed offset,
+        // so we need to minus 1 here.
         for (auto& p : t_info.partition_begin_offset) {
-            cmt_offset[p.first] = p.second -1;
+            cmt_offset[p.first] = p.second - 1;
         }
     }
 
     void reset_offset() {
         // reset the commit offset
         for (auto& p : begin_offset) {
-            cmt_offset[p.first] = p.second -1;
+            cmt_offset[p.first] = p.second - 1;
         }
     }
 
@@ -80,11 +82,8 @@ class MessageBodySink;
 
 class StreamLoadContext {
 public:
-    StreamLoadContext(ExecEnv* exec_env) :
-        id(UniqueId::gen_uid()),
-        _exec_env(exec_env),
-        _refs(0) {
-        start_nanos = MonotonicNanos();
+    StreamLoadContext(ExecEnv* exec_env) : id(UniqueId::gen_uid()), _exec_env(exec_env), _refs(0) {
+        start_millis = UnixMillis();
     }
 
     ~StreamLoadContext() {
@@ -97,6 +96,10 @@ public:
     }
 
     std::string to_json() const;
+
+    std::string prepare_stream_load_record(const std::string& stream_load_record);
+    static void parse_stream_load_record(const std::string& stream_load_record, TStreamLoadRecord& stream_load_item);
+
     // the old mini load result format is not same as stream load.
     // add this function for compatible with old mini load result format.
     std::string to_json_for_mini_load() const;
@@ -170,9 +173,9 @@ public:
     int64_t number_filtered_rows = 0;
     int64_t number_unselected_rows = 0;
     int64_t loaded_bytes = 0;
-    int64_t start_nanos = 0;
+    int64_t start_millis = 0;
     int64_t start_write_data_nanos = 0;
-    int64_t load_cost_nanos = 0;
+    int64_t load_cost_millis = 0;
     int64_t begin_txn_cost_nanos = 0;
     int64_t stream_load_put_cost_nanos = 0;
     int64_t commit_and_publish_txn_cost_nanos = 0;
@@ -198,4 +201,4 @@ private:
     std::atomic<int> _refs;
 };
 
-} // end namespace
+} // namespace doris

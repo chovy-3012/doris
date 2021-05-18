@@ -17,6 +17,7 @@
 
 package org.apache.doris.task;
 
+import org.apache.doris.analysis.StorageBackend;
 import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.FsBroker;
 import org.apache.doris.common.AnalysisException;
@@ -145,15 +146,17 @@ public class ExportExportingTask extends MasterTask {
             return;
         }
 
-        // move tmp file to final destination
-        Status mvStatus = moveTmpFiles();
-        if (!mvStatus.ok()) {
-            String failMsg = "move tmp file to final destination fail.";
-            failMsg += mvStatus.getErrorMsg();
-            job.cancel(ExportFailMsg.CancelType.RUN_FAIL, failMsg);
-            LOG.warn("move tmp file to final destination fail. job:{}", job);
-            registerProfile();
-            return;
+        if (job.getBrokerDesc().getStorageType() == StorageBackend.StorageType.BROKER) {
+            // move tmp file to final destination
+            Status mvStatus = moveTmpFiles();
+            if (!mvStatus.ok()) {
+                String failMsg = "move tmp file to final destination fail.";
+                failMsg += mvStatus.getErrorMsg();
+                job.cancel(ExportFailMsg.CancelType.RUN_FAIL, failMsg);
+                LOG.warn("move tmp file to final destination fail. job:{}", job);
+                registerProfile();
+                return;
+            }
         }
 
         // release snapshot
@@ -257,7 +260,7 @@ public class ExportExportingTask extends MasterTask {
 
         summaryProfile.addInfoString(ProfileManager.QUERY_TYPE, "Query");
         summaryProfile.addInfoString(ProfileManager.QUERY_STATE, job.getState().toString());
-        summaryProfile.addInfoString("Doris Version", Version.DORIS_BUILD_VERSION);
+        summaryProfile.addInfoString(ProfileManager.DORIS_VERSION, Version.DORIS_BUILD_VERSION);
         summaryProfile.addInfoString(ProfileManager.USER, "xxx");
         summaryProfile.addInfoString(ProfileManager.DEFAULT_DB, String.valueOf(job.getDbId()));
         summaryProfile.addInfoString(ProfileManager.SQL_STATEMENT, job.getSql());

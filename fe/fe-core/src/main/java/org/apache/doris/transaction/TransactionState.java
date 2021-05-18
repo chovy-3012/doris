@@ -100,7 +100,8 @@ public class TransactionState implements Writable {
         DB_DROPPED,
         TIMEOUT,
         OFFSET_OUT_OF_RANGE,
-        PAUSE;
+        PAUSE,
+        NO_PARTITIONS;
 
         public static TxnStatusChangeReason fromString(String reasonString) {
             for (TxnStatusChangeReason txnStatusChangeReason : TxnStatusChangeReason.values()) {
@@ -116,6 +117,8 @@ public class TransactionState implements Writable {
             switch (this) {
                 case OFFSET_OUT_OF_RANGE:
                     return "Offset out of range";
+                case NO_PARTITIONS:
+                    return "all partitions have no load data";
                 default:
                     return this.name();
             }
@@ -482,7 +485,21 @@ public class TransactionState implements Writable {
     
     // return true if txn is in final status and label is expired
     public boolean isExpired(long currentMillis) {
-        return transactionStatus.isFinalStatus() && (currentMillis - finishTime) / 1000 > Config.label_keep_max_second;
+        if (!transactionStatus.isFinalStatus()) {
+            return false;
+        }
+        long expireTime = Config.label_keep_max_second;
+        if (isShortTxn()) {
+            expireTime = Config.stream_load_default_timeout_second;
+        }
+        return (currentMillis - finishTime) / 1000 > expireTime;
+    }
+
+    // Return true if this txn is related to streaming load/insert/routine load task.
+    // We call these tasks "Short" tasks because they will be cleaned up in a short time after they are finished.
+    public boolean isShortTxn() {
+        return sourceType == LoadJobSourceType.BACKEND_STREAMING || sourceType == LoadJobSourceType.INSERT_STREAMING
+                || sourceType == LoadJobSourceType.ROUTINE_LOAD_TASK;
     }
 
     // return true if txn is running but timeout
@@ -490,12 +507,7 @@ public class TransactionState implements Writable {
         return transactionStatus == TransactionStatus.PREPARE && currentMillis - prepareTime > timeoutMs;
     }
 
-    /*
-     * Add related table indexes to the transaction.
-     * If function should always be called before adding this transaction state to transaction manager,
-     * No other thread will access this state. So no need to lock
-     */
-    public void addTableIndexes(OlapTable table) {
+    public synchronized void addTableIndexes(OlapTable table) {
         Set<Long> indexIds = loadedTblIndexes.get(table.getId());
         if (indexIds == null) {
             indexIds = Sets.newHashSet();

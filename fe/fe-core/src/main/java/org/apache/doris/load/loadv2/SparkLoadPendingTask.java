@@ -33,14 +33,18 @@ import org.apache.doris.catalog.HiveTable;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PartitionKey;
 import org.apache.doris.catalog.PartitionType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.SparkResource;
+import org.apache.doris.catalog.Table;
 import org.apache.doris.common.LoadException;
+import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.MetaLockUtils;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.BrokerFileGroupAggInfo.FileGroupAggKey;
 import org.apache.doris.load.FailMsg;
@@ -133,13 +137,18 @@ public class SparkLoadPendingTask extends LoadTask {
         }
 
         Map<Long, EtlTable> tables = Maps.newHashMap();
-        db.readLock();
+        Map<Long, Set<Long>> tableIdToPartitionIds = Maps.newHashMap();
+        Set<Long> allPartitionsTableIds = Sets.newHashSet();
+        prepareTablePartitionInfos(db, tableIdToPartitionIds, allPartitionsTableIds);
+        List<Table> tableList = null;
         try {
-            Map<Long, Set<Long>> tableIdToPartitionIds = Maps.newHashMap();
-            Set<Long> allPartitionsTableIds = Sets.newHashSet();
-            prepareTablePartitionInfos(db, tableIdToPartitionIds, allPartitionsTableIds);
+            tableList = db.getTablesOnIdOrderOrThrowException(Lists.newArrayList(allPartitionsTableIds));
+        } catch (MetaNotFoundException e) {
+            throw new LoadException(e.getMessage());
+        }
 
-
+        MetaLockUtils.readLockTables(tableList);
+        try {
             for (Map.Entry<FileGroupAggKey, List<BrokerFileGroup>> entry : aggKeyToBrokerFileGroups.entrySet()) {
                 FileGroupAggKey aggKey = entry.getKey();
                 long tableId = aggKey.getTableId();
@@ -176,14 +185,14 @@ public class SparkLoadPendingTask extends LoadTask {
                 }
             }
         } finally {
-            db.readUnlock();
+            MetaLockUtils.readUnlockTables(tableList);
         }
 
         String outputFilePattern = EtlJobConfig.getOutputFilePattern(loadLabel, FilePatternVersion.V1);
         // strictMode timezone properties
         EtlJobProperty properties = new EtlJobProperty();
-        properties.strictMode = ((LoadJob) callback).strictMode;
-        properties.timezone = ((LoadJob) callback).timezone;
+        properties.strictMode = ((LoadJob) callback).isStrictMode();
+        properties.timezone = ((LoadJob) callback).getTimeZone();
         etlJobConfig = new EtlJobConfig(tables, outputFilePattern, loadLabel, properties);
     }
 
@@ -199,25 +208,29 @@ public class SparkLoadPendingTask extends LoadTask {
             if (table == null) {
                 throw new LoadException("table does not exist. id: " + tableId);
             }
-
-            Set<Long> partitionIds = null;
-            if (tableIdToPartitionIds.containsKey(tableId)) {
-                partitionIds = tableIdToPartitionIds.get(tableId);
-            } else {
-                partitionIds = Sets.newHashSet();
-                tableIdToPartitionIds.put(tableId, partitionIds);
-            }
-
-            Set<Long> groupPartitionIds = aggKey.getPartitionIds();
-            // if not assign partition, use all partitions
-            if (groupPartitionIds == null || groupPartitionIds.isEmpty()) {
-                for (Partition partition : table.getPartitions()) {
-                    partitionIds.add(partition.getId());
+            table.readLock();
+            try {
+                Set<Long> partitionIds = null;
+                if (tableIdToPartitionIds.containsKey(tableId)) {
+                    partitionIds = tableIdToPartitionIds.get(tableId);
+                } else {
+                    partitionIds = Sets.newHashSet();
+                    tableIdToPartitionIds.put(tableId, partitionIds);
                 }
 
-                allPartitionsTableIds.add(tableId);
-            } else {
-                partitionIds.addAll(groupPartitionIds);
+                Set<Long> groupPartitionIds = aggKey.getPartitionIds();
+                // if not assign partition, use all partitions
+                if (groupPartitionIds == null || groupPartitionIds.isEmpty()) {
+                    for (Partition partition : table.getPartitions()) {
+                        partitionIds.add(partition.getId());
+                    }
+
+                    allPartitionsTableIds.add(tableId);
+                } else {
+                    partitionIds.addAll(groupPartitionIds);
+                }
+            } finally {
+                table.readUnlock();
             }
         }
     }
@@ -327,7 +340,7 @@ public class SparkLoadPendingTask extends LoadTask {
                 partitionColumnRefs.add(column.getName());
             }
 
-            for (Map.Entry<Long, Range<PartitionKey>> entry : rangePartitionInfo.getSortedRangeMap(false)) {
+            for (Map.Entry<Long, PartitionItem> entry : rangePartitionInfo.getSortedItemMap(false)) {
                 long partitionId = entry.getKey();
                 if (!partitionIds.contains(partitionId)) {
                     continue;
@@ -342,7 +355,7 @@ public class SparkLoadPendingTask extends LoadTask {
                 int bucketNum = partition.getDistributionInfo().getBucketNum();
 
                 // is max partition
-                Range<PartitionKey> range = entry.getValue();
+                Range<PartitionKey> range = entry.getValue().getItems();
                 boolean isMaxPartition = range.upperEndpoint().isMaxValue();
 
                 // start keys
@@ -368,8 +381,7 @@ public class SparkLoadPendingTask extends LoadTask {
 
                 etlPartitions.add(new EtlPartition(partitionId, startKeys, endKeys, isMaxPartition, bucketNum));
             }
-        } else {
-            Preconditions.checkState(type == PartitionType.UNPARTITIONED);
+        } else if (type == PartitionType.UNPARTITIONED) {
             Preconditions.checkState(partitionIds.size() == 1);
 
             for (Long partitionId : partitionIds) {
@@ -382,8 +394,10 @@ public class SparkLoadPendingTask extends LoadTask {
                 int bucketNum = partition.getDistributionInfo().getBucketNum();
 
                 etlPartitions.add(new EtlPartition(partitionId, Lists.newArrayList(), Lists.newArrayList(),
-                                                   true, bucketNum));
+                        true, bucketNum));
             }
+        } else {
+            throw new LoadException("Spark Load does not support list partition yet");
         }
 
         // distribution column refs

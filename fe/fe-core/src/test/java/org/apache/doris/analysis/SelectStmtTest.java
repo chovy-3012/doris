@@ -531,6 +531,17 @@ public class SelectStmtTest {
                 "where datekey=20200726 group by 1";
         planner = dorisAssert.query(sql).internalExecuteOneAndGetPlan();
         Assert.assertEquals(8589934592L, planner.getPlannerContext().getQueryOptions().mem_limit);
+
+        int queryTimeOut = dorisAssert.getSessionVariable().getQueryTimeoutS();
+        long execMemLimit = dorisAssert.getSessionVariable().getMaxExecMemByte();
+        sql = "select /*+ SET_VAR(exec_mem_limit = 8589934592, query_timeout = 1) */ 1 + 2;";
+        planner = dorisAssert.query(sql).internalExecuteOneAndGetPlan();
+        // session variable have been changed
+        Assert.assertEquals(1, planner.getPlannerContext().getQueryOptions().query_timeout);
+        Assert.assertEquals(8589934592L, planner.getPlannerContext().getQueryOptions().mem_limit);
+        // session variable change have been reverted
+        Assert.assertEquals(queryTimeOut, dorisAssert.getSessionVariable().getQueryTimeoutS());
+        Assert.assertEquals(execMemLimit, dorisAssert.getSessionVariable().getMaxExecMemByte());
     }
 
     @Test
@@ -543,6 +554,12 @@ public class SelectStmtTest {
                 "select a.siteid, b.citycode, a.siteid from (select siteid, citycode from tmp) a " +
                 "left join (select siteid, citycode from tmp) b on a.siteid = b.siteid;";
         dorisAssert.withoutUseDatabase();
+        dorisAssert.query(sql).explainQuery();
+    }
+
+    @Test
+    public void testWithInNestedQueryStmt() throws Exception {
+        String sql = "select 1 from (with w as (select 1 from db1.table1) select 1 from w) as tt";
         dorisAssert.query(sql).explainQuery();
     }
 }

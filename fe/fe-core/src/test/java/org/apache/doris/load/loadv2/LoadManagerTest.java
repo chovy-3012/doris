@@ -30,13 +30,13 @@ import org.apache.doris.common.jmockit.Deencapsulation;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.meta.MetaContext;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -128,7 +128,7 @@ public class LoadManagerTest {
                 result = "tablename";
                 Catalog.getCurrentCatalogJournalVersion();
                 minTimes = 0;
-                result = FeMetaVersion.VERSION_56;
+                result = FeMetaVersion.VERSION_CURRENT;
             }
         };
 
@@ -161,6 +161,9 @@ public class LoadManagerTest {
                 table.getName();
                 minTimes = 0;
                 result = "tablename";
+                Catalog.getCurrentCatalogJournalVersion();
+                minTimes = 0;
+                result = FeMetaVersion.VERSION_CURRENT;
             }
         };
 
@@ -169,7 +172,7 @@ public class LoadManagerTest {
         Deencapsulation.invoke(loadManager, "addLoadJob", job1);
 
         //make job1 don't serialize
-        Config.label_keep_max_second = 1;
+        Config.streaming_label_keep_max_second = 1;
         Thread.sleep(2000);
 
         File file = serializeToFile(loadManager);

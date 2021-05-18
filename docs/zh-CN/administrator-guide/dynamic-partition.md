@@ -30,6 +30,8 @@ under the License.
 
 目前实现了动态添加分区及动态删除分区的功能。
 
+动态分区只支持 Range 分区。
+
 ## 名词解释
 
 * FE：Frontend，Doris 的前端节点。负责元数据管理和请求接入。
@@ -81,7 +83,7 @@ under the License.
 
     动态分区调度的单位。可指定为 `HOUR`、`DAY`、`WEEK`、`MONTH`。分别表示按天、按星期、按月进行分区创建或删除。
     
-    当指定为 `HOUR` 时，动态创建的分区名后缀格式为 `yyyyMMddHH`，例如`2020032501`。
+    当指定为 `HOUR` 时，动态创建的分区名后缀格式为 `yyyyMMddHH`，例如`2020032501`。小时为单位的分区列数据类型不能为 DATE。
 
     当指定为 `DAY` 时，动态创建的分区名后缀格式为 `yyyyMMdd`，例如`20200325`。
     
@@ -108,7 +110,7 @@ under the License.
 * `dynamic_partition.buckets`
 
     动态创建的分区所对应的分桶数量。
-  
+
 * `dynamic_partition.replication_num`
 
     动态创建的分区所对应的副本数量，如果不填写，则默认为该表创建时指定的副本数量。
@@ -120,6 +122,12 @@ under the License.
 * `dynamic_partition.start_day_of_month`
 
     当 `time_unit` 为 `MONTH` 时，该参数用于指定每月的起始日期。取值为 1 到 28。其中 1 表示每月1号，28 表示每月28号。默认为 1，即表示每月以1号位起始点。暂不支持以29、30、31号为起始日，以避免因闰年或闰月带来的歧义。
+
+* `dynamic_partition.create_history_partition`
+
+    默认为 false。当置为 true 时，Doris 会自动创建由 start 到 end 的所有分区。同时，FE 的参数 `max_dynamic_partition_num` 会限制总分区数量，以避免一次性创建过多分区。当 end - start 的值大于 `max_dynamic_partition_num` 值时，操作将被禁止。
+
+    当不指定 `start` 属性时，该参数不生效。
   
 ### 注意事项 
  
@@ -257,7 +265,7 @@ ALTER TABLE tbl1 SET
 );
 ```
 
-某些属性的修改可能会可能会产生冲突。假设之前分区粒度为 DAY，并且已经创建了如下分区：
+某些属性的修改可能会产生冲突。假设之前分区粒度为 DAY，并且已经创建了如下分区：
 
 ```
 p20200519: ["2020-05-19", "2020-05-20")
@@ -321,3 +329,29 @@ mysql> SHOW DYNAMIC PARTITION TABLES;
     HTTP 协议：
     
     `curl --location-trusted -u username:password -XGET http://fe_host:fe_http_port/api/_set_config?dynamic_partition_check_interval_seconds=432000`
+
+### 动态分区表与手动分区表相互转换
+
+对于一个表来说，动态分区和手动分区可以自由转换，但二者不能同时存在，有且只有一种状态。
+
+#### 手动分区转换为动态分区
+
+如果一个表在创建时未指定动态分区，可以通过 `ALTER TABLE` 在运行时修改动态分区相关属性来转化为动态分区，具体示例可以通过 `HELP ALTER TABLE` 查看。
+
+开启动态分区功能后，Doris 将不再允许用户手动管理分区，会根据动态分区属性来自动管理分区。
+
+**注意**：如果已设定 `dynamic_partition.start`，分区范围在动态分区起始偏移之前的历史分区将会被删除。
+
+#### 动态分区转换为手动分区
+
+通过执行 `ALTER TABLE tbl_name SET ("dynamic_partition.enable" = "false")` 即可关闭动态分区功能，将其转换为手动分区表。
+
+关闭动态分区功能后，Doris 将不再自动管理分区，需要用户手动通过 `ALTER TABLE` 的方式创建或删除分区。
+
+## 常见问题
+
+1. 创建动态分区表后提示 ```Could not create table with dynamic partition when fe config dynamic_partition_enable is false```
+
+    由于动态分区的总开关，也就是 FE 的配置 ```dynamic_partition_enable``` 为 false，导致无法创建动态分区表。
+
+    这时候请修改 FE 的配置文件，增加一行 ```dynamic_partition_enable=true```，并重启 FE。或者执行命令 ADMIN SET FRONTEND CONFIG ("dynamic_partition_enable" = "true") 将动态分区开关打开即可。

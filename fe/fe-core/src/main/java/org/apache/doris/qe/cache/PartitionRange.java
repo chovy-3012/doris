@@ -26,11 +26,13 @@ import org.apache.doris.analysis.Expr;
 import org.apache.doris.analysis.LiteralExpr;
 import org.apache.doris.analysis.IntLiteral;
 import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.PartitionKey;
+import org.apache.doris.catalog.RangePartitionItem;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.Config;
 import org.apache.doris.planner.PartitionColumnFilter;
@@ -38,7 +40,6 @@ import org.apache.doris.planner.PartitionColumnFilter;
 import org.apache.doris.common.AnalysisException;
 
 import com.google.common.collect.Lists;
-import com.google.common.collect.Range;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -371,15 +372,15 @@ public class PartitionRange {
         if (end < begin) {
             hitRange = Cache.HitRange.Full;
             return hitRange;
-        }
-
-        if (end == partitionSingleList.size() - 1) {
+        } else if (begin > 0 && end == partitionSingleList.size() - 1) {
             hitRange = Cache.HitRange.Left;
-        }
-        if (begin == 0) {
+        } else if (begin == 0 && end < partitionSingleList.size() - 1) {
             hitRange = Cache.HitRange.Right;
+        } else if (begin > 0 && end < partitionSingleList.size() - 1) {
+            hitRange = Cache.HitRange.Middle;
+        } else {
+            hitRange = Cache.HitRange.None;
         }
-
         rangeList.add(partitionSingleList.get(begin));
         rangeList.add(partitionSingleList.get(end));
         LOG.info("the new range for scan be is [{},{}], hit range", rangeList.get(0).getCacheKey().realValue(),
@@ -479,11 +480,11 @@ public class PartitionRange {
      * PARTITION p20200102 VALUES [("20200102"), ("20200103")) )
      */
     private void getTablePartitionList(OlapTable table) {
-        Map<Long, Range<PartitionKey>> range = rangePartitionInfo.getIdToRange(false);
-        for (Map.Entry<Long, Range<PartitionKey>> entry : range.entrySet()) {
+        Map<Long, PartitionItem> range = rangePartitionInfo.getIdToItem(false);
+        for (Map.Entry<Long, PartitionItem> entry : range.entrySet()) {
             Long partId = entry.getKey();
             for (PartitionSingle single : partitionSingleList) {
-                if (entry.getValue().contains(single.getPartitionKey())) {
+                if (((RangePartitionItem) entry.getValue()).getItems().contains(single.getPartitionKey())) {
                     if (single.getPartitionId() == 0) {
                         single.setPartitionId(partId);
                     }
