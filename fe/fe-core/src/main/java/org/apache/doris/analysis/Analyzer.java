@@ -38,9 +38,11 @@ import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.rewrite.BetweenToCompoundRule;
 import org.apache.doris.rewrite.ExprRewriteRule;
 import org.apache.doris.rewrite.ExprRewriter;
+import org.apache.doris.rewrite.ExtractCommonFactorsRule;
 import org.apache.doris.rewrite.FoldConstantsRule;
 import org.apache.doris.rewrite.RewriteFromUnixTimeRule;
 import org.apache.doris.rewrite.NormalizeBinaryPredicatesRule;
+import org.apache.doris.rewrite.SimplifyInvalidDateBinaryPredicatesDateRule;
 import org.apache.doris.rewrite.mvrewrite.CountDistinctToBitmap;
 import org.apache.doris.rewrite.mvrewrite.CountDistinctToBitmapOrHLLRule;
 import org.apache.doris.rewrite.mvrewrite.CountFieldToSum;
@@ -257,7 +259,10 @@ public class Analyzer {
             rules.add(NormalizeBinaryPredicatesRule.INSTANCE);
             rules.add(FoldConstantsRule.INSTANCE);
             rules.add(RewriteFromUnixTimeRule.INSTANCE);
-            exprRewriter_ = new ExprRewriter(rules);
+            rules.add(SimplifyInvalidDateBinaryPredicatesDateRule.INSTANCE);
+            List<ExprRewriteRule> onceRules = Lists.newArrayList();
+            onceRules.add(ExtractCommonFactorsRule.INSTANCE);
+            exprRewriter_ = new ExprRewriter(rules, onceRules);
             // init mv rewriter
             List<ExprRewriteRule> mvRewriteRules = Lists.newArrayList();
             mvRewriteRules.add(ToBitmapToSlotRefRule.INSTANCE);
@@ -1246,6 +1251,14 @@ public class Analyzer {
                         } else {
                             hasEmptySpjResultSet_ = true;
                         }
+                    }
+                    markConjunctAssigned(conjunct);
+                }
+                if (newConjunct instanceof NullLiteral) {
+                    if (fromHavingClause) {
+                        hasEmptyResultSet_ = true;
+                    } else {
+                        hasEmptySpjResultSet_ = true;
                     }
                     markConjunctAssigned(conjunct);
                 }

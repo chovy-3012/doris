@@ -102,7 +102,9 @@ public class RowBatchBuilder {
 
     public InternalService.PUpdateCacheRequest buildSqlUpdateRequest(String sql, long partitionKey, long lastVersion, long lastestTime) {
         if (updateRequest == null) {
-            updateRequest = InternalService.PUpdateCacheRequest.newBuilder().setSqlKey(CacheProxy.getMd5(sql)).build();
+            updateRequest = InternalService.PUpdateCacheRequest.newBuilder()
+                    .setSqlKey(CacheProxy.getMd5(sql))
+                    .setCacheType(InternalService.CacheType.SQL_CACHE).build();
         }
         updateRequest = updateRequest.toBuilder()
                 .addValues(InternalService.PCacheValue.newBuilder()
@@ -139,7 +141,9 @@ public class RowBatchBuilder {
      */
     public InternalService.PUpdateCacheRequest buildPartitionUpdateRequest(String sql) {
         if (updateRequest == null) {
-            updateRequest = InternalService.PUpdateCacheRequest.newBuilder().setSqlKey(CacheProxy.getMd5(sql)).build();
+            updateRequest = InternalService.PUpdateCacheRequest.newBuilder()
+                    .setSqlKey(CacheProxy.getMd5(sql))
+                    .setCacheType(InternalService.CacheType.PARTITION_CACHE).build();
         }
         HashMap<Long, List<byte[]>> partRowMap = new HashMap<>();
         List<byte[]> partitionRowList;
@@ -163,13 +167,17 @@ public class RowBatchBuilder {
             Long key = entry.getKey();
             PartitionRange.PartitionSingle partition = cachePartMap.get(key);
             partitionRowList = entry.getValue();
+            int data_size = 0;
+            for (byte[] buf : partitionRowList) {
+                data_size += buf.length;
+            }
             updateRequest = updateRequest.toBuilder()
                     .addValues(InternalService.PCacheValue.newBuilder()
                             .setParam(InternalService.PCacheParam.newBuilder()
                                     .setPartitionKey(key)
                                     .setLastVersion(partition.getPartition().getVisibleVersion())
                                     .setLastVersionTime(partition.getPartition().getVisibleVersionTime())
-                                    .build()).addAllRows(
+                                    .build()).setDataSize(dataSize).addAllRows(
                                     partitionRowList.stream().map(row -> ByteString.copyFrom(row))
                                             .collect(Collectors.toList()))).build();
         }

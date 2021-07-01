@@ -29,6 +29,7 @@ import org.apache.doris.thrift.TPlanFragment;
 import org.apache.doris.thrift.TResultSinkType;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
@@ -95,7 +96,18 @@ public class PlanFragment extends TreeNode<PlanFragment> {
     // specification of the partition of the input of this fragment;
     // an UNPARTITIONED fragment is executed on only a single node
     // TODO: improve this comment, "input" is a bit misleading
-    private final DataPartition dataPartition;
+    private DataPartition dataPartition;
+
+    // specification of the actually input partition of this fragment when transmitting to be.
+    // By default, the value of the data partition in planner and the data partition transmitted to be are the same.
+    // So this attribute is empty.
+    // But sometimes the planned value and the serialized value are inconsistent. You need to set this value.
+    // At present, this situation only occurs in the fragment where the scan node is located.
+    // Since the data partition expression of the scan node is actually constructed from the schema of the table,
+    //   the expression is not analyzed.
+    // This will cause this expression to not be serialized correctly and transmitted to be.
+    // In this case, you need to set this attribute to DataPartition RANDOM to avoid the problem.
+    private DataPartition dataPartitionForThrift;
 
     // specification of how the output of this fragment is partitioned (i.e., how
     // it's sent to its destination);
@@ -126,6 +138,11 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         this.transferQueryStatisticsWithEveryBatch = false;
         setParallelExecNumIfExists();
         setFragmentInPlanTree(planRoot);
+    }
+
+    public PlanFragment(PlanFragmentId id, PlanNode root, DataPartition partition, DataPartition partitionForThrift) {
+        this(id, root, partition);
+        this.dataPartitionForThrift = partitionForThrift;
     }
 
     /**
@@ -212,7 +229,11 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         if (sink != null) {
             result.setOutputSink(sink.toThrift());
         }
-        result.setPartition(dataPartition.toThrift());
+        if (dataPartitionForThrift == null) {
+            result.setPartition(dataPartition.toThrift());
+        } else {
+            result.setPartition(dataPartitionForThrift.toThrift());
+        }
 
         // TODO chenhao , calculated by cost
         result.setMinReservationBytes(0);
@@ -246,6 +267,13 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         return (dataPartition.getType() != TPartitionType.UNPARTITIONED);
     }
 
+    public void updateDataPartition(DataPartition dataPartition) {
+        if (this.dataPartition == DataPartition.UNPARTITIONED) {
+            return;
+        }
+        this.dataPartition = dataPartition;
+    }
+
     public PlanFragmentId getId() { return fragmentId; }
 
     public PlanFragment getDestFragment() {
@@ -258,6 +286,15 @@ public class PlanFragment extends TreeNode<PlanFragment> {
         PlanFragment dest = getDestFragment();
         Preconditions.checkNotNull(dest);
         dest.addChild(this);
+    }
+
+    public List<DataPartition> getInputDataPartition() {
+        List<DataPartition> result = Lists.newArrayList();
+        result.add(getDataPartition());
+        for (PlanFragment child : children) {
+            result.add(child.getOutputPartition());
+        }
+        return result;
     }
 
     public DataPartition getDataPartition() {

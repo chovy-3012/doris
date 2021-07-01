@@ -43,14 +43,17 @@ OlapScanner::OlapScanner(RuntimeState* runtime_state, OlapScanNode* parent, bool
           _tuple_desc(parent->_tuple_desc),
           _profile(parent->runtime_profile()),
           _string_slots(parent->_string_slots),
+          _id(-1),
           _is_open(false),
           _aggregation(aggregation),
           _need_agg_finalize(need_agg_finalize),
           _tuple_idx(parent->_tuple_idx),
-          _direct_conjunct_size(parent->_direct_conjunct_size) {
-    _reader.reset(new Reader());
-    DCHECK(_reader.get() != NULL);
-
+          _direct_conjunct_size(parent->_direct_conjunct_size),
+          _reader(new Reader()),
+          _version(-1),
+          _mem_tracker(MemTracker::CreateTracker(
+                  runtime_state->fragment_mem_tracker()->limit(), "OlapScanner",
+                  runtime_state->fragment_mem_tracker(), true, true, MemTrackerLevel::VERBOSE)) {
     _rows_read_counter = parent->rows_read_counter();
     _rows_pushed_cond_filtered_counter = parent->_rows_pushed_cond_filtered_counter;
 }
@@ -90,7 +93,7 @@ Status OlapScanner::prepare(const TPaloScanRange& scan_range,
             // the rowsets maybe compacted when the last olap scanner starts
             Version rd_version(0, _version);
             OLAPStatus acquire_reader_st =
-                    _tablet->capture_rs_readers(rd_version, &_params.rs_readers);
+                    _tablet->capture_rs_readers(rd_version, &_params.rs_readers, _mem_tracker);
             if (acquire_reader_st != OLAP_SUCCESS) {
                 LOG(WARNING) << "fail to init reader.res=" << acquire_reader_st;
                 std::stringstream ss;
@@ -248,11 +251,7 @@ Status OlapScanner::get_batch(RuntimeState* state, RowBatch* batch, bool* eof) {
     bzero(tuple_buf, state->batch_size() * _tuple_desc->byte_size());
     Tuple* tuple = reinterpret_cast<Tuple*>(tuple_buf);
 
-    auto tracker = MemTracker::CreateTracker(state->fragment_mem_tracker()->limit(),
-                                             "OlapScanner:" + print_id(state->query_id()),
-                                             state->fragment_mem_tracker());
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
-
+    std::unique_ptr<MemPool> mem_pool(new MemPool(_mem_tracker.get()));
     int64_t raw_rows_threshold = raw_rows_read() + config::doris_scanner_row_num;
     {
         SCOPED_TIMER(_parent->_scan_timer);
@@ -358,9 +357,10 @@ Status OlapScanner::get_batch(RuntimeState* state, RowBatch* batch, bool* eof) {
                             config::doris_max_pushdown_conjuncts_return_rate) {
                             _use_pushdown_conjuncts = false;
                             VLOG_CRITICAL << "Stop Using PushDown Conjuncts. "
-                                    << "PushDownReturnRate: " << pushdown_return_rate << "%"
-                                    << " MaxPushDownReturnRate: "
-                                    << config::doris_max_pushdown_conjuncts_return_rate << "%";
+                                          << "PushDownReturnRate: " << pushdown_return_rate << "%"
+                                          << " MaxPushDownReturnRate: "
+                                          << config::doris_max_pushdown_conjuncts_return_rate
+                                          << "%";
                         }
                     }
                 }

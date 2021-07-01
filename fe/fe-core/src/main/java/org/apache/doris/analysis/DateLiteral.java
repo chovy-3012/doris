@@ -28,10 +28,6 @@ import org.apache.doris.thrift.TDateLiteral;
 import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.joda.time.DateTime;
@@ -39,6 +35,10 @@ import org.joda.time.DateTimeZone;
 import org.joda.time.LocalDateTime;
 import org.joda.time.format.DateTimeFormatter;
 import org.joda.time.format.DateTimeFormatterBuilder;
+
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -63,8 +63,12 @@ public class DateLiteral extends LiteralExpr {
 
     private static final int DATEKEY_LENGTH = 8;
     private static final int MAX_MICROSECOND = 999999;
+    private static final int DATETIME_TO_MINUTE_STRING_LENGTH = 16;
+    private static final int DATETIME_TO_HOUR_STRING_LENGTH = 13;
 
     private static DateTimeFormatter DATE_TIME_FORMATTER = null;
+    private static DateTimeFormatter DATE_TIME_FORMATTER_TO_HOUR = null;
+    private static DateTimeFormatter DATE_TIME_FORMATTER_TO_MINUTE = null;
     private static DateTimeFormatter DATE_FORMATTER = null;
     /* 
      * Dates containing two-digit year values are ambiguous because the century is unknown. 
@@ -90,6 +94,8 @@ public class DateLiteral extends LiteralExpr {
     static {
         try {
             DATE_TIME_FORMATTER = formatBuilder("%Y-%m-%d %H:%i:%s").toFormatter();
+            DATE_TIME_FORMATTER_TO_HOUR = formatBuilder("%Y-%m-%d %H").toFormatter();
+            DATE_TIME_FORMATTER_TO_MINUTE = formatBuilder("%Y-%m-%d %H:%i").toFormatter();
             DATE_FORMATTER = formatBuilder("%Y-%m-%d").toFormatter();
             DATEKEY_FORMATTER = formatBuilder("%Y%m%d").toFormatter();
             DATE_TIME_FORMATTER_TWO_DIGIT = formatBuilder("%y-%m-%d %H:%i:%s").toFormatter();
@@ -259,7 +265,8 @@ public class DateLiteral extends LiteralExpr {
             if (type.equals(Type.DATE)) {
                 if (s.split("-")[0].length() == 2) {
                     dateTime = DATE_FORMATTER_TWO_DIGIT.parseLocalDateTime(s);
-                } else if(s.length() == DATEKEY_LENGTH) {
+                } else if (s.length() == DATEKEY_LENGTH && !s.contains("-")) {
+                    // handle format like 20210106, but should not handle 2021-1-6
                     dateTime = DATEKEY_FORMATTER.parseLocalDateTime(s);
                 } else {
                     dateTime = DATE_FORMATTER.parseLocalDateTime(s);
@@ -268,7 +275,14 @@ public class DateLiteral extends LiteralExpr {
                 if (s.split("-")[0].length() == 2) {
                     dateTime = DATE_TIME_FORMATTER_TWO_DIGIT.parseLocalDateTime(s);
                 } else {
-                    dateTime = DATE_TIME_FORMATTER.parseLocalDateTime(s);
+                    // parse format '%Y-%m-%d %H:%i' and '%Y-%m-%d %H'
+                    if (s.length() == DATETIME_TO_MINUTE_STRING_LENGTH) {
+                        dateTime = DATE_TIME_FORMATTER_TO_MINUTE.parseLocalDateTime(s);
+                    } else if (s.length() == DATETIME_TO_HOUR_STRING_LENGTH) {
+                        dateTime = DATE_TIME_FORMATTER_TO_HOUR.parseLocalDateTime(s);
+                    } else {
+                        dateTime = DATE_TIME_FORMATTER.parseLocalDateTime(s);
+                    }
                 }
             }
 

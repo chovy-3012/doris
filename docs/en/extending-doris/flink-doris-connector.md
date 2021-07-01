@@ -47,6 +47,18 @@ sh build.sh
 
 After successful compilation, the file `doris-flink-1.0.0-SNAPSHOT.jar` will be generated in the `output/` directory. Copy this file to `ClassPath` in `Flink` to use `Flink-Doris-Connector`. For example, `Flink` running in `Local` mode, put this file in the `jars/` folder. `Flink` running in `Yarn` cluster mode, put this file in the pre-deployment package.
 
+**Remarks:** 
+
+1. Doris FE should be configured to enable http v2 in the configuration
+2. Scala version currently only supports 2.12.x version
+
+conf/fe.conf
+
+```
+enable_http_server_v2 = true
+```
+
+
 ## How to use
 The purpose of this step is to register the Doris data source on Flink. 
 This step is operated on Flink.
@@ -118,6 +130,7 @@ INSERT INTO flink_doris_sink select name,age,price,sale from flink_doris_source
 | doris.filter.query          | --            | Filter expression of the query, which is transparently transmitted to Doris. Doris uses this expression to complete source-side data filtering. |
 | sink.batch.size                        | 100            | Maximum number of lines in a single write BE                                             |
 | sink.max-retries                        | 1            | Number of retries after writing BE failed                                              |
+| sink.batch.interval                         | 1s            | The flush interval, after which the asynchronous thread will write the data in the cache to BE. The default value is 1 second, and the time units are ms, s, min, h, and d. Set to 0 to turn off periodic writing. |
 
 
 ## Doris & Flink Column Type Mapping

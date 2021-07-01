@@ -783,7 +783,7 @@ public class OlapScanNode extends ScanNode {
         return expr instanceof SlotRef;
     }
 
-    private void filterDeletedRows(Analyzer analyzer) throws AnalysisException{
+    private void filterDeletedRows(Analyzer analyzer) throws AnalysisException {
         if (!Util.showHiddenColumns() && olapTable.hasDeleteSign()) {
             SlotRef deleteSignSlot = new SlotRef(desc.getAliasAsName(), Column.DELETE_SIGN);
             deleteSignSlot.analyze(analyzer);
@@ -791,6 +791,30 @@ public class OlapScanNode extends ScanNode {
             Expr conjunct = new BinaryPredicate(BinaryPredicate.Operator.EQ, deleteSignSlot, new IntLiteral(0));
             conjunct.analyze(analyzer);
             conjuncts.add(conjunct);
+        }
+    }
+
+    /*
+    Although sometimes the scan range only involves one instance,
+        the data distribution cannot be set to UNPARTITION here.
+    The reason is that @coordicator will not set the scan range for the fragment,
+        when data partition of fragment is UNPARTITION.
+     */
+    public DataPartition constructInputPartitionByDistributionInfo() {
+        if (Catalog.getCurrentColocateIndex().isColocateTable(olapTable.getId())
+                || olapTable.getPartitionInfo().getType() == PartitionType.UNPARTITIONED
+                || olapTable.getPartitions().size() == 1) {
+            DistributionInfo distributionInfo = olapTable.getDefaultDistributionInfo();
+            Preconditions.checkState(distributionInfo instanceof HashDistributionInfo);
+            List<Column> distributeColumns = ((HashDistributionInfo) distributionInfo).getDistributionColumns();
+            List<Expr> dataDistributeExprs = Lists.newArrayList();
+            for (Column column : distributeColumns) {
+                SlotRef slotRef = new SlotRef(desc.getRef().getName(), column.getName());
+                dataDistributeExprs.add(slotRef);
+            }
+            return DataPartition.hashPartitioned(dataDistributeExprs);
+        } else {
+            return DataPartition.RANDOM;
         }
     }
 }

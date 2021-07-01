@@ -218,7 +218,8 @@ public class Config extends ConfigBase {
      * If the network is experiencing transient problems, of some unexpected long java GC annoying you,
      * you can try to increase this value to decrease the chances of false timeouts
      */
-    @ConfField public static int bdbje_heartbeat_timeout_second = 30;
+    @ConfField
+    public static int bdbje_heartbeat_timeout_second = 30;
 
     /**
      * The lock timeout of bdbje operation
@@ -226,6 +227,14 @@ public class Config extends ConfigBase {
      */
     @ConfField
     public static int bdbje_lock_timeout_second = 1;
+
+    /**
+     * The replica ack timeout when writing to bdbje
+     * When writing some relatively large logs, the ack time may time out, resulting in log writing failure.
+     * At this time, you can increase this value appropriately.
+     */
+    @ConfField
+    public static int bdbje_replica_ack_timeout_second = 10;
 
     /**
      * num of thread to handle heartbeat events in heartbeat_mgr.
@@ -315,6 +324,12 @@ public class Config extends ConfigBase {
      * the linux /proc/sys/net/core/somaxconn file at the same time
      */
     @ConfField public static int http_backlog_num = 1024;
+
+    /**
+     *Maximum file limit for single upload of web request, default value: 100MB
+     */
+    @ConfField public static String http_max_file_size = "100MB";
+    @ConfField public static String http_max_request_size = "100MB";
 
     /**
      * The backlog_num for mysql nio server
@@ -1387,4 +1402,10 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true, masterOnly = true)
     public static int max_dynamic_partition_num = 500;
+
+    /*
+     * Control the max num of backup/restore job per db
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static int max_backup_restore_job_num_per_db = 10;
 }

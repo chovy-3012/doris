@@ -116,14 +116,17 @@ public:
                                            vector<Version>* version_path) const;
     OLAPStatus check_version_integrity(const Version& version);
     bool check_version_exist(const Version& version) const;
-    void list_versions(std::vector<Version>* versions) const;
+    void acquire_version_and_rowsets(std::vector<std::pair<Version, RowsetSharedPtr>>* version_rowsets) const;
 
     OLAPStatus capture_consistent_rowsets(const Version& spec_version,
                                           vector<RowsetSharedPtr>* rowsets) const;
     OLAPStatus capture_rs_readers(const Version& spec_version,
-                                  vector<RowsetReaderSharedPtr>* rs_readers) const;
+                                  vector<RowsetReaderSharedPtr>* rs_readers,
+                                  std::shared_ptr<MemTracker> parent_tracker = nullptr) const;
+
     OLAPStatus capture_rs_readers(const vector<Version>& version_path,
-                                  vector<RowsetReaderSharedPtr>* rs_readers) const;
+                                  vector<RowsetReaderSharedPtr>* rs_readers,
+                                  std::shared_ptr<MemTracker> parent_tracker = nullptr) const;
 
     DelPredicateArray delete_predicates() { return _tablet_meta->delete_predicates(); }
     void add_delete_predicate(const DeletePredicatePB& delete_predicate, int64_t version);
@@ -268,6 +271,10 @@ private:
     const uint32_t _calc_cumulative_compaction_score(
             std::shared_ptr<CumulativeCompactionPolicy> cumulative_compaction_policy);
     const uint32_t _calc_base_compaction_score() const;
+
+    // When the proportion of empty edges in the adjacency matrix used to represent the version graph
+    // in the version tracker is greater than the threshold, rebuild the version tracker
+    bool _reconstruct_version_tracker_if_necessary();
 
 public:
     static const int64_t K_INVALID_CUMULATIVE_POINT = -1;

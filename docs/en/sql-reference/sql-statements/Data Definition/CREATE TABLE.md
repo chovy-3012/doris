@@ -88,9 +88,10 @@ Syntax:
             BITMAP type, No need to specify length. Represent a set of unsigned bigint numbers, the largest element could be 2^64 - 1
     ```
     agg_type: Aggregation type. If not specified, the column is key column. Otherwise, the column   is value column.
+
        * SUM、MAX、MIN、REPLACE
        * HLL_UNION: Only for HLL type
-       * REPLACE_IF_NOT_NULL: The meaning of this aggregation type is that substitution will   occur if and only if the newly imported data is a non-null value. If the newly imported   data is null, Doris will still retain the original value. Note: if NOT NULL is specified  in the REPLACE_IF_NOT_NULL column when the user creates the table, Doris will convert it     to NULL and will not report an error to the user. Users can leverage this aggregate type    to achieve importing some of columns.
+       * REPLACE_IF_NOT_NULL: The meaning of this aggregation type is that substitution will occur if and only if the newly imported data is a non-null value. If the newly imported data is null, Doris will still retain the original value. Note: if NOT NULL is specified in the REPLACE_IF_NOT_NULL column when the user creates the table, Doris will convert it to NULL and will not report an error to the user. Users can leverage this aggregate type to achieve importing some of columns.
        * BITMAP_UNION: Only for BITMAP type
     Allow NULL: Default is NOT NULL. NULL value should be represented as `\N` in load source file.
     Notice: The origin value of BITMAP_UNION column should be TINYINT, SMALLINT, INT, BIGINT.
@@ -343,8 +344,7 @@ Syntax:
     ENGINE=olap
     AGGREGATE KEY(k1, k2)
     COMMENT "my first doris table"
-    DISTRIBUTED BY HASH(k1) BUCKETS 32
-    PROPERTIES ("storage_type"="column");
+    DISTRIBUTED BY HASH(k1) BUCKETS 32;
     ```
 
 2. Create an olap table, distributed by hash, with aggregation type. Also set storage medium and cooldown time.
@@ -358,10 +358,9 @@ Syntax:
     v2 SMALLINT SUM DEFAULT "10"
     )
     ENGINE=olap
-    UNIQUE KEY(k1, k2)
+    AGGREGATE KEY(k1, k2)
     DISTRIBUTED BY HASH (k1, k2) BUCKETS 32
     PROPERTIES(
-    "storage_type"="column",
     "storage_medium" = "SSD",
     "storage_cooldown_time" = "2015-06-04 00:00:00"
     );
@@ -406,6 +405,7 @@ Syntax:
     Data outside these ranges will not be loaded.
 
 2) Fixed Range
+    ```
     CREATE TABLE table_range
     (
     k1 DATE,
@@ -425,7 +425,7 @@ Syntax:
     PROPERTIES(
     "storage_medium" = "SSD"
     );
-   
+    ```
 4. Create an olap table, with list partitioned, distributed by hash. Records with the same key exist at the same time, set the initial storage medium and cooling time, use default column storage.
 
     1) Single column partition
@@ -661,8 +661,7 @@ Syntax:
     ENGINE=olap
     AGGREGATE KEY(k1, k2)
     COMMENT "my first doris table"
-    DISTRIBUTED BY HASH(k1) BUCKETS 32
-    PROPERTIES ("storage_type"="column");
+    DISTRIBUTED BY HASH(k1) BUCKETS 32;
     ```
     
 12. Create a dynamic partitioning table (dynamic partitioning needs to be enabled in FE configuration), which creates partitions 3 days in advance every day. For example, if today is' 2020-01-08 ', partitions named 'p20200108', 'p20200109', 'p20200110', 'p20200111' will be created.

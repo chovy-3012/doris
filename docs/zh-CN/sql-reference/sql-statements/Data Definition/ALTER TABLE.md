@@ -149,7 +149,7 @@ under the License.
             1) 聚合模型如果修改 value 列，需要指定 agg_type
             2) 非聚合类型如果修改key列，需要指定KEY关键字
             3) 只能修改列的类型，列的其他属性维持原样（即其他属性需在语句中按照原属性显式的写出，参见 example 8）
-            4) 分区列不能做任何修改
+            4) 分区列和分桶列不能做任何修改
             5) 目前支持以下类型的转换（精度损失由用户保证）
                 TINYINT/SMALLINT/INT/BIGINT/LARGEINT/FLOAT/DOUBLE 类型向范围更大的数字类型转换
                 TINTINT/SMALLINT/INT/BIGINT/LARGEINT/FLOAT/DOUBLE/DECIMAL 转换成 VARCHAR
@@ -266,8 +266,7 @@ under the License.
     [rollup]
     1. 创建 index: example_rollup_index，基于 base index（k1,k2,k3,v1,v2）。列式存储。
         ALTER TABLE example_db.my_table
-        ADD ROLLUP example_rollup_index(k1, k3, v1, v2)
-        PROPERTIES("storage_type"="column");
+        ADD ROLLUP example_rollup_index(k1, k3, v1, v2);
         
     2. 创建 index: example_rollup_index2，基于 example_rollup_index（k1,k3,v1,v2）
         ALTER TABLE example_db.my_table
@@ -277,7 +276,7 @@ under the License.
     3. 创建 index: example_rollup_index3, 基于 base index (k1,k2,k3,v1), 自定义 rollup 超时时间一小时。
         ALTER TABLE example_db.my_table
         ADD ROLLUP example_rollup_index(k1, k3, v1)
-        PROPERTIES("storage_type"="column", "timeout" = "3600");
+        PROPERTIES("timeout" = "3600");
 
     4. 删除 index: example_rollup_index2
         ALTER TABLE example_db.my_table

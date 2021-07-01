@@ -67,7 +67,7 @@ import com.google.gson.annotations.SerializedName;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
-import sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl;
+import  org.apache.commons.lang3.reflect.TypeUtils;
 
 /*
  * Some utilities about Gson.
@@ -132,8 +132,12 @@ public class GsonUtils {
             .registerTypeAdapter(ImmutableMap.class, new ImmutableMapDeserializer())
             .registerTypeAdapter(AtomicBoolean.class, new AtomicBooleanAdapter());
 
+    private static final GsonBuilder GSON_BUILDER_PRETTY_PRINTING = GSON_BUILDER.setPrettyPrinting();
+
     // this instance is thread-safe.
     public static final Gson GSON = GSON_BUILDER.create();
+
+    public static final Gson GSON_PRETTY_PRINTING = GSON_BUILDER_PRETTY_PRINTING.create();
 
     /*
      * The exclusion strategy of GSON serialization.
@@ -359,7 +363,7 @@ public class GsonUtils {
                                              final JsonDeserializationContext context) throws JsonParseException
         {
             final Type type2 =
-                    ParameterizedTypeImpl.make(Map.class, ((ParameterizedType) type).getActualTypeArguments(), null);
+                    TypeUtils.parameterize(Map.class, ((ParameterizedType) type).getActualTypeArguments());
             final Map<?,?> map = context.deserialize(json, type2);
             return ImmutableMap.copyOf(map);
         }

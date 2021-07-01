@@ -205,7 +205,7 @@ public class RoutineLoadManager implements Writable {
         return false;
     }
 
-    private RoutineLoadJob checkPrivAndGetJob(String dbName, String jobName)
+    public RoutineLoadJob checkPrivAndGetJob(String dbName, String jobName)
             throws MetaNotFoundException, DdlException, AnalysisException {
         RoutineLoadJob routineLoadJob = getJob(dbName, jobName);
         if (routineLoadJob == null) {
@@ -511,10 +511,10 @@ public class RoutineLoadManager implements Writable {
                                                                               routineLoadJob.getState());
                     Catalog.getCurrentCatalog().getEditLog().logRemoveRoutineLoadJob(operation);
                     LOG.info(new LogBuilder(LogKey.ROUTINE_LOAD_JOB, routineLoadJob.getId())
-                                     .add("end_timestamp", routineLoadJob.getEndTimestamp())
-                                     .add("current_timestamp", currentTimestamp)
-                                     .add("job_state", routineLoadJob.getState())
-                                     .add("msg", "old job has been cleaned")
+                            .add("end_timestamp", routineLoadJob.getEndTimestamp())
+                            .add("current_timestamp", currentTimestamp)
+                            .add("job_state", routineLoadJob.getState())
+                            .add("msg", "old job has been cleaned")
                     );
                 }
             }

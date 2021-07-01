@@ -99,7 +99,7 @@ SegmentIterator::SegmentIterator(std::shared_ptr<Segment> segment, const Schema&
           _lazy_materialization_read(false),
           _inited(false) {
     // use for count the mem use of ColumnIterator
-    _mem_tracker = MemTracker::CreateTracker(-1, "SegmentIterator", std::move(parent), 0);
+    _mem_tracker = MemTracker::CreateTracker(-1, "SegmentIterator", std::move(parent), false);
 }
 
 SegmentIterator::~SegmentIterator() {
@@ -189,12 +189,12 @@ Status SegmentIterator::_prepare_seek(const StorageReadOptions::KeyRange& key_ra
         }
     }
     _seek_schema.reset(new Schema(key_fields, key_fields.size()));
-    _seek_block.reset(new RowBlockV2(*_seek_schema, 1));
+    _seek_block.reset(new RowBlockV2(*_seek_schema, 1, _mem_tracker));
 
     // create used column iterator
     for (auto cid : _seek_schema->column_ids()) {
         if (_column_iterators[cid] == nullptr) {
-            RETURN_IF_ERROR(_segment->new_column_iterator(cid, &_column_iterators[cid]));
+            RETURN_IF_ERROR(_segment->new_column_iterator(cid, _mem_tracker, &_column_iterators[cid]));
             ColumnIteratorOptions iter_opts;
             iter_opts.stats = _opts.stats;
             iter_opts.rblock = _rblock.get();
@@ -322,7 +322,7 @@ Status SegmentIterator::_init_return_column_iterators() {
     }
     for (auto cid : _schema.column_ids()) {
         if (_column_iterators[cid] == nullptr) {
-            RETURN_IF_ERROR(_segment->new_column_iterator(cid, &_column_iterators[cid]));
+            RETURN_IF_ERROR(_segment->new_column_iterator(cid, _mem_tracker, &_column_iterators[cid]));
             ColumnIteratorOptions iter_opts;
             iter_opts.stats = _opts.stats;
             iter_opts.use_page_cache = _opts.use_page_cache;

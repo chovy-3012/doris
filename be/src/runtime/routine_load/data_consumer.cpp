@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "common/status.h"
+#include "gen_cpp/internal_service.pb.h"
 #include "gutil/strings/split.h"
 #include "runtime/small_file_mgr.h"
 #include "service/backend_options.h"
@@ -293,6 +294,48 @@ Status KafkaDataConsumer::get_partition_meta(std::vector<int32_t>* partition_ids
     return Status::OK();
 }
 
+// get offsets of each partition for times.
+// The input parameter "times" holds <partition, timestamps>
+// The output parameter "offsets" returns <partition, offsets>
+//
+// The returned offset for each partition is the earliest offset whose
+// timestamp is greater than or equal to the given timestamp in the
+// corresponding partition.
+// See librdkafka/rdkafkacpp.h##offsetsForTimes()
+Status KafkaDataConsumer::get_offsets_for_times(const std::vector<PIntegerPair>& times,
+        std::vector<PIntegerPair>* offsets) {
+    // create topic partition
+    std::vector<RdKafka::TopicPartition*> topic_partitions;
+    for (const auto& entry : times) {
+        RdKafka::TopicPartition* tp1 =
+                RdKafka::TopicPartition::create(_topic, entry.key(), entry.val());
+        topic_partitions.push_back(tp1);
+    }
+    // delete TopicPartition finally
+    Defer delete_tp{[&topic_partitions]() {
+        std::for_each(topic_partitions.begin(), topic_partitions.end(),
+                      [](RdKafka::TopicPartition* tp1) { delete tp1; });
+    }};
+
+    // get offsets for times
+    RdKafka::ErrorCode err = _k_consumer->offsetsForTimes(topic_partitions, 5000);
+    if (err != RdKafka::ERR_NO_ERROR) {
+        std::stringstream ss;
+        ss << "failed to get offsets for times: " << RdKafka::err2str(err);
+        LOG(WARNING) << ss.str();
+        return Status::InternalError(ss.str());
+    }
+
+    for (const auto& topic_partition : topic_partitions) {
+        PIntegerPair pair;
+        pair.set_key(topic_partition->partition());
+        pair.set_val(topic_partition->offset());
+        offsets->push_back(pair);
+    }
+
+    return Status::OK();
+}
+
 Status KafkaDataConsumer::cancel(StreamLoadContext* ctx) {
     std::unique_lock<std::mutex> l(_lock);
     if (!_init) {
@@ -334,7 +377,12 @@ bool KafkaDataConsumer::match(StreamLoadContext* ctx) {
         return false;
     }
     for (auto& item : ctx->kafka_info->properties) {
-        if (_custom_properties.find(item.first) == _custom_properties.end()) {
+        std::unordered_map<std::string, std::string>::const_iterator itr =_custom_properties.find(item.first);
+        if (itr == _custom_properties.end()) {
+            return false;
+        }
+
+        if (itr->second != item.second) {
             return false;
         }
     }

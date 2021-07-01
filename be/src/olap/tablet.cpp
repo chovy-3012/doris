@@ -532,15 +532,28 @@ void Tablet::delete_expired_stale_rowset() {
         }
         to_delete_iter++;
     }
+
+    bool reconstructed = _reconstruct_version_tracker_if_necessary();
+
     LOG(INFO) << "delete stale rowset _stale_rs_version_map tablet=" << full_name()
               << " current_size=" << _stale_rs_version_map.size() << " old_size=" << old_size
               << " current_meta_size=" << _tablet_meta->all_stale_rs_metas().size()
               << " old_meta_size=" << old_meta_size << " sweep endtime " << std::fixed
-              << expired_stale_sweep_endtime;
+              << expired_stale_sweep_endtime  << ", reconstructed=" << reconstructed;
 
 #ifndef BE_TEST
     save_meta();
 #endif
+}
+
+bool Tablet::_reconstruct_version_tracker_if_necessary() {
+    double orphan_vertex_ratio = _timestamped_version_tracker.get_orphan_vertex_ratio();
+    if (orphan_vertex_ratio >= config::tablet_version_graph_orphan_vertex_ratio) {
+        _timestamped_version_tracker.construct_versioned_tracker(_tablet_meta->all_rs_metas(),
+                _tablet_meta->all_stale_rs_metas());
+        return true;
+    }
+    return false;
 }
 
 OLAPStatus Tablet::capture_consistent_versions(const Version& spec_version,
@@ -578,13 +591,10 @@ bool Tablet::check_version_exist(const Version& version) const {
     return false;
 }
 
-void Tablet::list_versions(vector<Version>* versions) const {
-    DCHECK(versions != nullptr && versions->empty());
-
-    versions->reserve(_rs_version_map.size());
-    // versions vector is not sorted.
+// The meta read lock should be held before calling
+void Tablet::acquire_version_and_rowsets(std::vector<std::pair<Version, RowsetSharedPtr>>* version_rowsets) const {
     for (const auto& it : _rs_version_map) {
-        versions->push_back(it.first);
+        version_rowsets->emplace_back(it.first, it.second);
     }
 }
 
@@ -628,15 +638,17 @@ OLAPStatus Tablet::_capture_consistent_rowsets_unlocked(
 }
 
 OLAPStatus Tablet::capture_rs_readers(const Version& spec_version,
-                                      std::vector<RowsetReaderSharedPtr>* rs_readers) const {
+                                      std::vector<RowsetReaderSharedPtr>* rs_readers,
+                                      std::shared_ptr<MemTracker> parent_tracker) const {
     std::vector<Version> version_path;
     RETURN_NOT_OK(capture_consistent_versions(spec_version, &version_path));
-    RETURN_NOT_OK(capture_rs_readers(version_path, rs_readers));
+    RETURN_NOT_OK(capture_rs_readers(version_path, rs_readers, parent_tracker));
     return OLAP_SUCCESS;
 }
 
 OLAPStatus Tablet::capture_rs_readers(const std::vector<Version>& version_path,
-                                      std::vector<RowsetReaderSharedPtr>* rs_readers) const {
+                                      std::vector<RowsetReaderSharedPtr>* rs_readers,
+                                      std::shared_ptr<MemTracker> parent_tracker) const {
     DCHECK(rs_readers != nullptr && rs_readers->empty());
     for (auto version : version_path) {
         auto it = _rs_version_map.find(version);
@@ -653,7 +665,7 @@ OLAPStatus Tablet::capture_rs_readers(const std::vector<Version>& version_path,
             }
         }
         RowsetReaderSharedPtr rs_reader;
-        auto res = it->second->create_reader(&rs_reader);
+        auto res = it->second->create_reader(parent_tracker, &rs_reader);
         if (res != OLAP_SUCCESS) {
             LOG(WARNING) << "failed to create reader for rowset:" << it->second->rowset_id();
             return OLAP_ERR_CAPTURE_ROWSET_READER_ERROR;
@@ -932,8 +944,6 @@ OLAPStatus Tablet::split_range(const OlapTuple& start_key_strings, const OlapTup
 // NOTE: only used when create_table, so it is sure that there is no concurrent reader and writer.
 void Tablet::delete_all_files() {
     // Release resources like memory and disk space.
-    // we have to call list_versions first, or else error occurs when
-    // removing hash_map item and iterating hash_map concurrently.
     ReadLock rdlock(&_meta_lock);
     for (auto it : _rs_version_map) {
         it.second->remove();

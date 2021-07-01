@@ -34,6 +34,52 @@ curdir=`cd "$curdir"; pwd`
 export DORIS_HOME=$curdir/..
 export TP_DIR=$curdir
 
+# Check args
+usage() {
+  echo "
+Usage: $0 <options>
+  Optional options:
+     -j                 build thirdparty parallel
+  "
+  exit 1
+}
+
+OPTS=$(getopt \
+  -n $0 \
+  -o '' \
+  -o 'h' \
+  -l 'help' \
+  -o 'j:' \
+  -- "$@")
+
+if [ $? != 0 ] ; then
+    usage
+fi
+
+eval set -- "$OPTS"
+
+PARALLEL=$[$(nproc)/4+1]
+if [[ $# -ne 1 ]] ; then
+    while true; do
+        case "$1" in
+            -j) PARALLEL=$2; shift 2 ;;
+            -h) HELP=1; shift ;;
+            --help) HELP=1; shift ;;
+            --) shift ;  break ;;
+            *) echo "Internal error" ; exit 1 ;;
+        esac
+    done
+fi
+
+if [[ ${HELP} -eq 1 ]]; then
+    usage
+    exit
+fi
+
+echo "Get params:
+    PARALLEL            -- $PARALLEL
+"
+
 # include custom environment variables
 if [[ -f ${DORIS_HOME}/env.sh ]]; then
     . ${DORIS_HOME}/env.sh
@@ -683,6 +729,13 @@ build_fmt() {
     ${BUILD_SYSTEM} -j$PARALLEL && ${BUILD_SYSTEM} install
 }
 
+# parallel_hashmap
+build_parallel_hashmap() {
+    check_if_source_exist $PARALLEL_HASHMAP_SOURCE
+    cd $TP_SOURCE_DIR/$PARALLEL_HASHMAP_SOURCE
+    cp -r parallel_hashmap $TP_INSTALL_DIR/include/
+}
+
 #orc
 build_orc() {
     check_if_source_exist $ORC_SOURCE
@@ -882,6 +935,7 @@ build_s2
 build_bitshuffle
 build_croaringbitmap
 build_fmt
+build_parallel_hashmap
 build_orc
 build_cctz
 build_tsan_header

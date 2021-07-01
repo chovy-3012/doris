@@ -457,7 +457,7 @@ public class QueryPlanTest {
     public void testBitmapQuery() throws Exception {
         testBitmapQueryPlan(
                 "select * from test.bitmap_table;",
-                "OUTPUT EXPRS:`default_cluster:test.bitmap_table`.`id` | `default_cluster:test.bitmap_table`.`id2`"
+                "OUTPUT EXPRS:`default_cluster:test`.`bitmap_table`.`id` | `default_cluster:test`.`bitmap_table`.`id2`"
         );
 
         testBitmapQueryPlan(
@@ -511,7 +511,7 @@ public class QueryPlanTest {
     public void testHLLTypeQuery() throws Exception {
         testHLLQueryPlan(
                 "select * from test.hll_table;",
-                "OUTPUT EXPRS:`default_cluster:test.hll_table`.`id` | `default_cluster:test.hll_table`.`id2`"
+                "OUTPUT EXPRS:`default_cluster:test`.`hll_table`.`id` | `default_cluster:test`.`hll_table`.`id2`"
         );
 
         testHLLQueryPlan(
@@ -1315,12 +1315,14 @@ public class QueryPlanTest {
         sqls.add("explain select * from baseall join bigtable as b limit 0");
 
         sqls.add("explain select * from baseall where 1 = 2");
+        sqls.add("explain select * from baseall where null = null");
         sqls.add("explain select count(*) from baseall where 1 = 2;");
         sqls.add("explain select k3, dense_rank() OVER () AS rank FROM baseall where 1 =2;");
         sqls.add("explain select rank from (select k3, dense_rank() OVER () AS rank FROM baseall) a where 1 =2;");
         sqls.add("explain select * from baseall join bigtable as b where 1 = 2");
+        sqls.add("explain select * from baseall join bigtable as b on null = 2");
 
-        for(String sql: sqls) {
+        for (String sql: sqls) {
             String explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, sql);
             System.out.println(explainString);
             Assert.assertTrue(explainString.contains(emptyNode));
@@ -1357,7 +1359,7 @@ public class QueryPlanTest {
         sql = "SELECT dt, dis_key, COUNT(1) FROM table_partitioned  group by dt, dis_key";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
         System.out.println(explainString);
-        Assert.assertTrue(explainString.contains("AGGREGATE (update finalize)"));
+        Assert.assertTrue(explainString.contains("AGGREGATE (update serialize)"));
     }
 
     public void testLeadAndLagFunction() throws Exception {
@@ -1430,6 +1432,19 @@ public class QueryPlanTest {
         sql = "SELECT a.aid, b.bid FROM (SELECT 3 AS aid) a JOIN (SELECT 4 AS bid) b ON (a.aid=b.bid)";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
         Assert.assertTrue(explainString.contains("OUTPUT EXPRS:3 | 4"));
+
+        sql = "SELECT a.k1, b.k2 FROM (SELECT k1 from baseall) a LEFT OUTER JOIN (select k1, 999 as k2 from baseall) b ON (a.k1=b.k1)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("if(TupleIsNull(2), NULL, 999)"));
+
+        sql = "SELECT a.k1, b.k2 FROM (SELECT 1 as k1 from baseall) a RIGHT OUTER JOIN (select k1, 999 as k2 from baseall) b ON (a.k1=b.k1)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("if(TupleIsNull(0), NULL, 1)"));
+
+        sql = "SELECT a.k1, b.k2 FROM (SELECT 1 as k1 from baseall) a FULL JOIN (select k1, 999 as k2 from baseall) b ON (a.k1=b.k1)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("if(TupleIsNull(0), NULL, 1)"));
+        Assert.assertTrue(explainString.contains("if(TupleIsNull(2), NULL, 999)"));
     }
 
     @Test
@@ -1467,9 +1482,125 @@ public class QueryPlanTest {
         //format less than
         sql = "select * from test1 where from_unixtime(query_time, 'yyyy-MM-dd') < '2021-03-02 10:01:28'";
         explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
-        System.out.println("wangxixu-explain:"+explainString);
         Assert.assertTrue(explainString.contains("PREDICATES: `query_time` < 1614614400, `query_time` >= 0"));
 
     }
 
+    @Test
+    public void testCheckInvalidDate() throws Exception {
+        FeConstants.runningUnitTest = true;
+        connectContext.setDatabase("default_cluster:test");
+        //valid date
+        String sql = "select day from tbl_int_date where day = '2020-10-30'";
+        String explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `day` = '2020-10-30 00:00:00'"));
+        sql = "select day from tbl_int_date where day = from_unixtime(1196440219)";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `day` = '2007-12-01 00:30:19'"));
+        sql = "select day from tbl_int_date where day = str_to_date('2014-12-21 12:34:56', '%Y-%m-%d %H:%i:%s');";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `day` = '2014-12-21 12:34:56'"));
+        //valid date
+        sql = "select day from tbl_int_date where day = 20201030";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `day` = '2020-10-30 00:00:00'"));
+        //valid date
+        sql = "select day from tbl_int_date where day = '20201030'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `day` = '2020-10-30 00:00:00'"));
+        //valid date contains micro second
+        sql = "select day from tbl_int_date where day = '2020-10-30 10:00:01.111111'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `day` = '2020-10-30 10:00:01.111111'"));
+        //invalid date
+        sql = "select day from tbl_int_date where day = '2020-10-32'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid date
+        sql = "select day from tbl_int_date where day = '20201032'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid date
+        sql = "select day from tbl_int_date where day = 20201032";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid date
+        sql = "select day from tbl_int_date where day = 'hello'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid date
+        sql = "select day from tbl_int_date where day = 2020-10-30";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid date
+        sql = "select day from tbl_int_date where day = 10-30";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+
+
+        //valid datetime
+        sql = "select day from tbl_int_date where date = '2020-10-30 12:12:30'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `date` = '2020-10-30 12:12:30'"));
+        //valid datetime, support parsing to minute
+        sql = "select day from tbl_int_date where date = '2020-10-30 12:12'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `date` = '2020-10-30 12:12:00'"));
+        //valid datetime, support parsing to hour
+        sql = "select day from tbl_int_date where date = '2020-10-30 12'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `date` = '2020-10-30 12:00:00'"));
+        //valid datetime
+        sql = "select day from tbl_int_date where date = 20201030";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `date` = '2020-10-30 00:00:00'"));
+        //valid datetime
+        sql = "select day from tbl_int_date where date = '20201030'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `date` = '2020-10-30 00:00:00'"));
+        //valid datetime
+        sql = "select day from tbl_int_date where date = '2020-10-30'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `date` = '2020-10-30 00:00:00'"));
+        //valid datetime contains micro second
+        sql = "select day from tbl_int_date where date = '2020-10-30 10:00:01.111111'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("PREDICATES: `date` = '2020-10-30 10:00:01.111111'"));
+        //invalid datetime
+        sql = "select day from tbl_int_date where date = '2020-10-32'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid datetime
+        sql = "select day from tbl_int_date where date = 'hello'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid datetime
+        sql = "select day from tbl_int_date where date = 2020-10-30";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid datetime
+        sql = "select day from tbl_int_date where date = 10-30";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid datetime
+        sql = "select day from tbl_int_date where date = '2020-10-12 12:23:76'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //invalid datetime with timestamp
+        sql = "select day from tbl_int_date where date = '1604031150'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+        //valid datetime with timestamp in micro second
+        sql = "select day from tbl_int_date where date = '1604031150000'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, "EXPLAIN " + sql);
+        Assert.assertTrue(explainString.contains("EMPTYSET"));
+
+        String queryStr = "explain select count(*) from test.baseall where k11 > to_date(now())";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, queryStr);
+        Assert.assertTrue(explainString.contains("PREDICATES: `k11` > to_date"));
+
+        queryStr = "explain select count(*) from test.baseall where k11 > '2021-6-1'";
+        explainString = UtFrameUtils.getSQLPlanOrErrorMsg(connectContext, queryStr);
+        Assert.assertTrue(explainString.contains("PREDICATES: `k11` > '2021-06-01 00:00:00'"));
+    }
 }

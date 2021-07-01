@@ -1338,7 +1338,7 @@ bool SchemaChangeWithSorting::_external_sorting(vector<RowsetSharedPtr>& src_row
     std::vector<RowsetReaderSharedPtr> rs_readers;
     for (auto& rowset : src_rowsets) {
         RowsetReaderSharedPtr rs_reader;
-        auto res = rowset->create_reader(&rs_reader);
+        auto res = rowset->create_reader(_mem_tracker, &rs_reader);
         if (res != OLAP_SUCCESS) {
             LOG(WARNING) << "failed to create rowset reader.";
             return false;
@@ -1361,7 +1361,7 @@ bool SchemaChangeWithSorting::_external_sorting(vector<RowsetSharedPtr>& src_row
 }
 
 SchemaChangeHandler::SchemaChangeHandler()
-        : _mem_tracker(MemTracker::CreateTracker(-1, "SchemaChange")) {
+        : _mem_tracker(MemTracker::CreateTracker(-1, "SchemaChange", StorageEngine::instance()->schema_change_mem_tracker())) {
     REGISTER_HOOK_METRIC(schema_change_mem_consumption,
                          [this]() { return _mem_tracker->consumption(); });
 }
@@ -1473,6 +1473,9 @@ OLAPStatus SchemaChangeHandler::_do_process_alter_tablet_v2(const TAlterTabletRe
     // for schema change, seek_columns is the same to return_columns
     reader_context.seek_columns = &return_columns;
 
+    auto mem_tracker = MemTracker::CreateTracker(-1, "AlterTablet:" + std::to_string(base_tablet->tablet_id()) + "-"
+        + std::to_string(new_tablet->tablet_id()), _mem_tracker, true, false, MemTrackerLevel::TASK);
+
     do {
         // get history data to be converted and it will check if there is hold in base tablet
         res = _get_versions_to_be_changed(base_tablet, &versions_to_be_changed);
@@ -1495,12 +1498,11 @@ OLAPStatus SchemaChangeHandler::_do_process_alter_tablet_v2(const TAlterTabletRe
         LOG(INFO) << "begin to remove all data from new tablet to prevent rewrite."
                   << " new_tablet=" << new_tablet->full_name();
         std::vector<RowsetSharedPtr> rowsets_to_delete;
-        std::vector<Version> new_tablet_versions;
-        new_tablet->list_versions(&new_tablet_versions);
-        for (auto& version : new_tablet_versions) {
-            if (version.second <= max_rowset->end_version()) {
-                RowsetSharedPtr rowset = new_tablet->get_rowset_by_version(version);
-                rowsets_to_delete.push_back(rowset);
+        std::vector<std::pair<Version, RowsetSharedPtr>> version_rowsets;
+        new_tablet->acquire_version_and_rowsets(&version_rowsets);
+        for (auto& pair : version_rowsets) {
+            if (pair.first.second <= max_rowset->end_version()) {
+                rowsets_to_delete.push_back(pair.second);
             }
         }
         std::vector<RowsetSharedPtr> empty_vec;
@@ -1535,7 +1537,7 @@ OLAPStatus SchemaChangeHandler::_do_process_alter_tablet_v2(const TAlterTabletRe
         }
 
         // acquire data sources correspond to history versions
-        base_tablet->capture_rs_readers(versions_to_be_changed, &rs_readers);
+        base_tablet->capture_rs_readers(versions_to_be_changed, &rs_readers, mem_tracker);
         if (rs_readers.size() < 1) {
             LOG(WARNING) << "fail to acquire all data sources. "
                          << "version_num=" << versions_to_be_changed.size()
@@ -1688,7 +1690,7 @@ OLAPStatus SchemaChangeHandler::schema_version_convert(TabletSharedPtr base_tabl
     reader_context.seek_columns = &return_columns;
 
     RowsetReaderSharedPtr rowset_reader;
-    RETURN_NOT_OK((*base_rowset)->create_reader(&rowset_reader));
+    RETURN_NOT_OK((*base_rowset)->create_reader(_mem_tracker, &rowset_reader));
     rowset_reader->init(&reader_context);
 
     RowsetWriterContext writer_context;
@@ -2190,11 +2192,22 @@ OLAPStatus SchemaChangeHandler::_validate_alter_result(TabletSharedPtr new_table
     LOG(INFO) << "find max continuous version of tablet=" << new_tablet->full_name()
               << ", start_version=" << max_continuous_version.first
               << ", end_version=" << max_continuous_version.second;
-    if (max_continuous_version.second >= request.alter_version) {
-        return OLAP_SUCCESS;
-    } else {
+    if (max_continuous_version.second < request.alter_version) {
         return OLAP_ERR_VERSION_NOT_EXIST;
     }
+
+    std::vector<std::pair<Version, RowsetSharedPtr>> version_rowsets;
+    {
+        ReadLock rdlock(new_tablet->get_header_lock_ptr());
+        new_tablet->acquire_version_and_rowsets(&version_rowsets);
+    }
+    for (auto& pair : version_rowsets) {
+        RowsetSharedPtr rowset = pair.second;
+        if (!rowset->check_file_exist()) {
+            return OLAP_ERR_FILE_NOT_EXIST;
+        }
+    }
+    return OLAP_SUCCESS;
 }
 
 } // namespace doris
