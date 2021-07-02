@@ -2,7 +2,7 @@
 
 当前分支版本0.12.x
 
-0.12.x版本官方不在维护，线上基于这个版本，在使用过程中遇到一些问题，继续维护该分支。
+0.12.x版本官方不再维护，线上基于这个版本，在使用过程中遇到一些问题，继续维护该分支。
 
 ## Compile
 
@@ -19,7 +19,7 @@ apachedoris/doris-dev:build-env-1.2
 
 ```shell
 cd incubator-doris
-./mybuild.sh
+./my-script/mybuild.sh
 ```
 
 ## Run with docker
@@ -69,6 +69,20 @@ docker run --name doris-broker \
 | 2021-01-02 | 修复brokerload 内存泄漏问题    | 0.13.x       |
 | 2020-12-07 | 修复没有帮助文档的问题         | 0.13.x       |
 | 2020-10-20 | 修复fe管理超时连接线程安全问题 | 0.13.x |
+
+## My-Script
+
+my-script文件夹中写了自定义开发编译的脚本
+
+| 脚本                   | 说明                                   | 使用方法                 |
+| ---------------------- | -------------------------------------- | ------------------------ |
+| build-all.sh           | 编译+打包+构建镜像                     | ./build-all {version}    |
+| docker-build-source.sh | 使用镜像编译源码                       | ./docker-build-source.sh |
+| mybuild.sh             | 编译源码，镜像中会运行这个命令进行编译 | ./mybuild.sh             |
+| package.sh             | 打包                                   | ./package                |
+| build-img.sh           | 构建镜像                               | ./build-img.sh {version} |
+
+
 
 
 
