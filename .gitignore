@@ -48,3 +48,10 @@ be/src/gen_cpp/opcode
 
 #ignore vscode project file
 .vscode
+
+#fe
+fe/log
+fe/webroot
+fe/conf
+fe/doris-meta
+fe/fe.pid
