@@ -214,7 +214,7 @@ public class PaloAuth implements Writable {
             }
             return true;
         }
-        
+
         readLock();
         try {
             return userPrivTable.checkPassword(remoteUser, remoteHost, remotePasswd, randomString, currentUser);
@@ -455,7 +455,7 @@ public class PaloAuth implements Writable {
                     throw new DdlException("Role: " + roleName + " does not exist");
                 }
             }
-            
+
             // 2. check if user already exist
             if (userPrivTable.doesUserExist(userIdent)) {
                 throw new DdlException("User " + userIdent + " already exist");
@@ -1103,8 +1103,17 @@ public class PaloAuth implements Writable {
     public void readFields(DataInput in) throws IOException {
         roleManager = RoleManager.read(in);
         userPrivTable = (UserPrivTable) PrivTable.read(in);
-        dbPrivTable = (DbPrivTable) PrivTable.read(in);
-        tablePrivTable = (TablePrivTable) PrivTable.read(in);
+
+        if (ExternalAclProvider.getInstance() != null) {
+            PrivTable.read(in);
+            PrivTable.read(in);
+            dbPrivTable = ExternalAclProvider.getInstance().getDbPrivTable();
+            tablePrivTable = ExternalAclProvider.getInstance().getTablePrivTable();
+        } else {
+            dbPrivTable = (DbPrivTable) PrivTable.read(in);
+            tablePrivTable = (TablePrivTable) PrivTable.read(in);
+        }
+
         propertyMgr = UserPropertyMgr.read(in);
 
         if (userPrivTable.isEmpty()) {
