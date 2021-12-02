@@ -18,7 +18,6 @@
 #ifndef DORIS_BE_SRC_QUERY_EXEC_HASH_TABLE_H
 #define DORIS_BE_SRC_QUERY_EXEC_HASH_TABLE_H
 
-#include <boost/cstdint.hpp>
 #include <vector>
 
 #include "codegen/doris_ir.h"
@@ -118,6 +117,8 @@ public:
         }
     }
 
+    bool IR_ALWAYS_INLINE emplace_key(TupleRow* row, TupleRow** key_addr);
+
     // Returns the start iterator for all rows that match 'probe_row'.  'probe_row' is
     // evaluated with _probe_expr_ctxs.  The iterator can be iterated until HashTable::end()
     // to find all the matching rows.
@@ -135,6 +136,14 @@ public:
     // Returns the number of buckets
     int64_t num_buckets() { return _buckets.size(); }
 
+    // Returns the number of filled buckets
+    int64_t num_filled_buckets() { return _num_filled_buckets; }
+
+    // Check the hash table should be shrink
+    bool should_be_shrink(int64_t valid_row) {
+        return valid_row < MAX_BUCKET_OCCUPANCY_FRACTION * (_buckets.size() / 2.0);
+    }
+
     // true if any of the MemTrackers was exceeded
     bool exceeded_limit() const { return _exceeded_limit; }
 
@@ -148,14 +157,14 @@ public:
 
     // Returns the results of the exprs at 'expr_idx' evaluated over the last row
     // processed by the HashTable.
-    // This value is invalid if the expr evaluated to NULL.
+    // This value is invalid if the expr evaluated to nullptr.
     // TODO: this is an awkward abstraction but aggregation node can take advantage of
     // it and save some expr evaluation calls.
     void* last_expr_value(int expr_idx) const {
         return _expr_values_buffer + _expr_values_buffer_offsets[expr_idx];
     }
 
-    // Returns if the expr at 'expr_idx' evaluated to NULL for the last row.
+    // Returns if the expr at 'expr_idx' evaluated to nullptr for the last row.
     bool last_expr_value_null(int expr_idx) const { return _expr_value_null_bits[expr_idx]; }
 
     // Return beginning of hash table.  Advancing this iterator will traverse all
@@ -170,10 +179,16 @@ public:
     // just the build row addresses.
     std::string debug_string(bool skip_empty, const RowDescriptor* build_desc);
 
+    inline std::pair<int64_t, int64_t> minmax_node();
+
+    // Load factor that will trigger growing the hash table on insert.  This is
+    // defined as the number of non-empty buckets / total_buckets
+    static constexpr float MAX_BUCKET_OCCUPANCY_FRACTION = 0.75f;
+
     // stl-like iterator interface.
     class Iterator {
     public:
-        Iterator() : _table(NULL), _bucket_idx(-1), _node(nullptr) {}
+        Iterator() : _table(nullptr), _bucket_idx(-1), _node(nullptr) {}
 
         // Iterates to the next element.  In the case where the iterator was
         // from a Find, this will lazily evaluate that bucket, only returning
@@ -181,10 +196,10 @@ public:
         template <bool check_match>
         void IR_ALWAYS_INLINE next();
 
-        // Returns the current row or NULL if at end.
+        // Returns the current row or nullptr if at end.
         TupleRow* get_row() {
             if (_node == nullptr) {
-                return NULL;
+                return nullptr;
             }
             return _node->data();
         }
@@ -233,6 +248,27 @@ public:
         uint32_t _scan_hash;
     };
 
+    template <class Func>
+    void for_each_row(Func&& func) {
+        size_t sz = _alloc_list.size();
+        DCHECK_GT(sz, 0);
+        for (size_t i = 0; i < sz - 1; ++i) {
+            uint8_t* start = _alloc_list[i];
+            uint8_t* end = _end_list[i];
+            while (start < end) {
+                auto node = reinterpret_cast<Node*>(start);
+                func(node->data());
+                start += _node_byte_size;
+            }
+        }
+        uint8_t* last_st = _alloc_list[sz - 1];
+        for (size_t i = 0; i < _current_used; ++i) {
+            auto node = reinterpret_cast<Node*>(last_st);
+            func(node->data());
+            last_st += _node_byte_size;
+        }
+    }
+
 private:
     friend class Iterator;
     friend class HashTableTest;
@@ -254,12 +290,13 @@ private:
     };
 
     struct Bucket {
-        Bucket() { _node = nullptr; }
+        Bucket() : _node(nullptr), _size(0) {}
         Node* _node;
+        uint64_t _size;
     };
 
     // Returns the next non-empty bucket and updates idx to be the index of that bucket.
-    // If there are no more buckets, returns NULL and sets idx to -1
+    // If there are no more buckets, returns nullptr and sets idx to -1
     Bucket* next_bucket(int64_t* bucket_idx);
 
     // Resize the hash table to 'num_buckets'
@@ -277,7 +314,7 @@ private:
     void move_node(Bucket* from_bucket, Bucket* to_bucket, Node* node, Node* previous_node);
 
     // Evaluate the exprs over row and cache the results in '_expr_values_buffer'.
-    // Returns whether any expr evaluated to NULL
+    // Returns whether any expr evaluated to nullptr
     // This will be replaced by codegen
     bool eval_row(TupleRow* row, const std::vector<ExprContext*>& exprs);
 
@@ -321,10 +358,6 @@ private:
     // allocation_size is the attempted size of the allocation that would have
     // brought us over the mem limit.
     void mem_limit_exceeded(int64_t allocation_size);
-
-    // Load factor that will trigger growing the hash table on insert.  This is
-    // defined as the number of non-empty buckets / total_buckets
-    static const float MAX_BUCKET_OCCUPANCY_FRACTION;
 
     const std::vector<ExprContext*>& _build_expr_ctxs;
     const std::vector<ExprContext*>& _probe_expr_ctxs;
@@ -389,6 +422,8 @@ private:
     uint8_t* _expr_value_null_bits;
     // node buffer list
     std::vector<uint8_t*> _alloc_list;
+    // node buffer end pointer
+    std::vector<uint8_t*> _end_list;
 };
 
 } // namespace doris
