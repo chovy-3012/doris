@@ -17,19 +17,18 @@
 
 package org.apache.doris.catalog;
 
-import static org.apache.doris.common.io.IOUtils.writeOptionString;
-
 import org.apache.doris.analysis.FunctionName;
-import org.apache.doris.analysis.HdfsURI;
+import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.io.IOUtils;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
+import org.apache.doris.common.util.URI;
 import org.apache.doris.thrift.TFunction;
 import org.apache.doris.thrift.TFunctionBinaryType;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -37,7 +36,6 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.util.List;
-
 
 /**
  * Base class for all functions.
@@ -113,12 +111,12 @@ public class Function implements Writable {
 
     // Absolute path in HDFS for the binary that contains this function.
     // e.g. /udfs/udfs.jar
-    private HdfsURI location;
+    private URI location;
     private TFunctionBinaryType binaryType;
 
     protected NullableMode nullableMode = NullableMode.DEPEND_ON_ARGUMENT;
 
-    private boolean vectorized = false;
+    protected boolean vectorized = false;
 
     // library's checksum to make sure all backends use one library to serve user's request
     protected String checksum = "";
@@ -135,7 +133,8 @@ public class Function implements Writable {
         this(0, name, args, retType, varArgs, vectorized, NullableMode.DEPEND_ON_ARGUMENT);
     }
 
-    public Function(FunctionName name, List<Type> args, Type retType, boolean varArgs, boolean vectorized, NullableMode mode) {
+    public Function(FunctionName name, List<Type> args, Type retType,
+            boolean varArgs, boolean vectorized, NullableMode mode) {
         this(0, name, args, retType, varArgs, vectorized, mode);
     }
 
@@ -190,11 +189,11 @@ public class Function implements Writable {
         return argTypes.length;
     }
 
-    public HdfsURI getLocation() {
+    public URI getLocation() {
         return location;
     }
 
-    public void setLocation(HdfsURI loc) {
+    public void setLocation(URI loc) {
         location = loc;
     }
 
@@ -230,10 +229,21 @@ public class Function implements Writable {
         hasVarArgs = v;
     }
 
-    public void setId(long functionId) { this.id = functionId; }
-    public long getId() { return id; }
-    public void setChecksum(String checksum) { this.checksum = checksum; }
-    public String getChecksum() { return checksum; }
+    public void setId(long functionId) {
+        this.id = functionId;
+    }
+
+    public long getId() {
+        return id;
+    }
+
+    public void setChecksum(String checksum) {
+        this.checksum = checksum;
+    }
+
+    public String getChecksum() {
+        return checksum;
+    }
 
     // TODO(cmy): Currently we judge whether it is UDF by wheter the 'location' is set.
     // Maybe we should use a separate variable to identify,
@@ -442,16 +452,28 @@ public class Function implements Writable {
         }
     }
 
-    public TFunction toThrift() {
+    public TFunction toThrift(Type realReturnType, Type[] realArgTypes) {
         TFunction fn = new TFunction();
         fn.setSignature(signatureString());
         fn.setName(name.toThrift());
         fn.setBinaryType(binaryType);
         if (location != null) {
-            fn.setHdfsLocation(location.toString());
+            fn.setHdfsLocation(location.getLocation());
         }
-        fn.setArgTypes(Type.toThrift(argTypes));
-        fn.setRetType(getReturnType().toThrift());
+        // `realArgTypes.length != argTypes.length` is true iff this is an aggregation function.
+        // For aggregation functions, `argTypes` here is already its real type with true precision and scale.
+        if (realArgTypes.length != argTypes.length) {
+            fn.setArgTypes(Type.toThrift(Lists.newArrayList(argTypes)));
+        } else {
+            fn.setArgTypes(Type.toThrift(Lists.newArrayList(argTypes), Lists.newArrayList(realArgTypes)));
+        }
+        // For types with different precisions and scales, return type only indicates a type with default
+        // precision and scale so we need to transform it to the correct type.
+        if (PrimitiveType.typeWithPrecision.contains(realReturnType.getPrimitiveType())) {
+            fn.setRetType(realReturnType.toThrift());
+        } else {
+            fn.setRetType(getReturnType().toThrift());
+        }
         fn.setHasVarArgs(hasVarArgs);
         // TODO: Comment field is missing?
         // fn.setComment(comment)
@@ -486,18 +508,30 @@ public class Function implements Writable {
                 return "float_val";
             case DOUBLE:
             case TIME:
+            case TIMEV2:
                 return "double_val";
             case VARCHAR:
             case CHAR:
             case HLL:
             case BITMAP:
+            case QUANTILE_STATE:
             case STRING:
                 return "string_val";
             case DATE:
             case DATETIME:
                 return "datetime_val";
+            case DATEV2:
+                return "datev2_val";
+            case DATETIMEV2:
+                return "datetimev2_val";
             case DECIMALV2:
                 return "decimalv2_val";
+            case DECIMAL32:
+                return "decimal32_val";
+            case DECIMAL64:
+                return "decimal64_val";
+            case DECIMAL128:
+                return "decimal128_val";
             default:
                 Preconditions.checkState(false, t.toString());
                 return "";
@@ -524,18 +558,30 @@ public class Function implements Writable {
                 return "FloatVal";
             case DOUBLE:
             case TIME:
+            case TIMEV2:
                 return "DoubleVal";
             case VARCHAR:
             case CHAR:
             case HLL:
             case BITMAP:
+            case QUANTILE_STATE:
             case STRING:
                 return "StringVal";
             case DATE:
             case DATETIME:
                 return "DateTimeVal";
+            case DATEV2:
+                return "DateV2Val";
+            case DATETIMEV2:
+                return "DateTimeV2Val";
             case DECIMALV2:
                 return "DecimalV2Val";
+            case DECIMAL32:
+                return "Decimal32Val";
+            case DECIMAL64:
+                return "Decimal64Val";
+            case DECIMAL128:
+                return "Decimal128Val";
             default:
                 Preconditions.checkState(false, t.toString());
                 return "";
@@ -595,12 +641,13 @@ public class Function implements Writable {
         FunctionType(int code) {
             this.code = code;
         }
+
         public int getCode() {
             return code;
         }
 
         public static FunctionType fromCode(int code) {
-            switch (code) {
+            switch (code) { // CHECKSTYLE IGNORE THIS LINE: missing switch default
                 case 0:
                     return ORIGIN;
                 case 1:
@@ -616,10 +663,11 @@ public class Function implements Writable {
         public void write(DataOutput output) throws IOException {
             output.writeInt(code);
         }
+
         public static FunctionType read(DataInput input) throws IOException {
             return fromCode(input.readInt());
         }
-    };
+    }
 
     protected void writeFields(DataOutput output) throws IOException {
         output.writeLong(id);
@@ -635,10 +683,10 @@ public class Function implements Writable {
         // write library URL
         String libUrl = "";
         if (location != null) {
-            libUrl = location.toString();
+            libUrl = location.getLocation();
         }
-        writeOptionString(output, libUrl);
-        writeOptionString(output, checksum);
+        IOUtils.writeOptionString(output, libUrl);
+        IOUtils.writeOptionString(output, checksum);
     }
 
     @Override
@@ -661,7 +709,13 @@ public class Function implements Writable {
 
         boolean hasLocation = input.readBoolean();
         if (hasLocation) {
-            location = new HdfsURI(Text.readString(input));
+            String locationStr = Text.readString(input);
+            try {
+                location = URI.create(locationStr);
+            } catch (AnalysisException e) {
+                LOG.warn("failed to parse location:" + locationStr);
+            }
+
         }
         boolean hasChecksum = input.readBoolean();
         if (hasChecksum) {

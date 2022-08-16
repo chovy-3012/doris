@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/cloudera/Impala/blob/v0.7refresh/be/src/runtime/plan-fragment-executor.h
+// and modified by Doris
 
-#ifndef DORIS_BE_RUNTIME_PLAN_FRAGMENT_EXECUTOR_H
-#define DORIS_BE_RUNTIME_PLAN_FRAGMENT_EXECUTOR_H
+#pragma once
 
 #include <condition_variable>
 #include <functional>
@@ -30,11 +32,11 @@
 #include "runtime/runtime_state.h"
 #include "util/hash_util.hpp"
 #include "util/time.h"
+#include "vec/core/block.h"
 
 namespace doris {
 
 class QueryFragmentsCtx;
-class HdfsFsCache;
 class ExecNode;
 class RowDescriptor;
 class RowBatch;
@@ -127,7 +129,8 @@ public:
     void set_abort();
 
     // Initiate cancellation. Must not be called until after prepare() returned.
-    void cancel();
+    void cancel(const PPlanFragmentCancelReason& reason = PPlanFragmentCancelReason::INTERNAL_ERROR,
+                const std::string& msg = "");
 
     // call these only after prepare()
     RuntimeState* runtime_state() { return _runtime_state.get(); }
@@ -138,7 +141,7 @@ public:
 
     const Status& status() const { return _status; }
 
-    DataSink* get_sink() { return _sink.get(); }
+    DataSink* get_sink() const { return _sink.get(); }
 
     void set_is_report_on_cancel(bool val) { _is_report_on_cancel = val; }
 
@@ -146,7 +149,6 @@ private:
     ExecEnv* _exec_env; // not owned
     ExecNode* _plan;    // lives in _runtime_state->obj_pool()
     TUniqueId _query_id;
-    std::shared_ptr<MemTracker> _mem_tracker;
 
     // profile reporting-related
     report_status_callback _report_status_cb;
@@ -195,6 +197,7 @@ private:
     // Created in prepare (if required), owned by this object.
     std::unique_ptr<DataSink> _sink;
     std::unique_ptr<RowBatch> _row_batch;
+    std::unique_ptr<doris::vectorized::Block> _block;
 
     // Number of rows returned by this fragment
     RuntimeProfile::Counter* _rows_produced_counter;
@@ -207,7 +210,9 @@ private:
     std::shared_ptr<QueryStatistics> _query_statistics;
     bool _collect_query_statistics_with_every_batch;
 
-    bool _enable_vectorized_engine;
+    // Record the cancel information when calling the cancel() method, return it to FE
+    PPlanFragmentCancelReason _cancel_reason;
+    std::string _cancel_msg;
 
     ObjectPool* obj_pool() { return _runtime_state->obj_pool(); }
 
@@ -236,15 +241,17 @@ private:
     // have been closed, a final report will have been sent and the report thread will
     // have been stopped. _sink will be set to nullptr after successful execution.
     Status open_internal();
+    Status open_vectorized_internal();
 
     // Executes get_next() logic and returns resulting status.
     Status get_next_internal(RowBatch** batch);
+    Status get_vectorized_internal(::doris::vectorized::Block** block);
 
     // Stops report thread, if one is running. Blocks until report thread terminates.
     // Idempotent.
     void stop_report_thread();
 
-    const DescriptorTbl& desc_tbl() { return _runtime_state->desc_tbl(); }
+    const DescriptorTbl& desc_tbl() const { return _runtime_state->desc_tbl(); }
 
     void _collect_query_statistics();
 
@@ -252,5 +259,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

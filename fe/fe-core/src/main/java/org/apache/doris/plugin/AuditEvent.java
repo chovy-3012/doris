@@ -24,7 +24,7 @@ import java.lang.annotation.RetentionPolicy;
 /*
  * AuditEvent contains all information about audit log info.
  * It should be created by AuditEventBuilder. For example:
- * 
+ *
  *      AuditEvent event = new AuditEventBuilder()
  *          .setEventType(AFTER_QUERY)
  *          .setClientIp(xxx)
@@ -84,6 +84,11 @@ public class AuditEvent {
     public String sqlHash = "";
     @AuditField(value = "peakMemoryBytes")
     public long peakMemoryBytes = -1;
+    @AuditField(value = "SqlDigest")
+    public String sqlDigest = "";
+
+    @AuditField(value = "TraceId")
+    public String traceId = "";
 
     public static class AuditEventBuilder {
 
@@ -183,6 +188,16 @@ public class AuditEvent {
 
         public AuditEventBuilder setSqlHash(String sqlHash) {
             auditEvent.sqlHash = sqlHash;
+            return this;
+        }
+
+        public AuditEventBuilder setSqlDigest(String sqlDigest) {
+            auditEvent.sqlDigest = sqlDigest;
+            return this;
+        }
+
+        public AuditEventBuilder setTraceId(String traceId) {
+            auditEvent.traceId = traceId;
             return this;
         }
 

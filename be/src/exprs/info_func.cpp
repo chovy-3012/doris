@@ -19,8 +19,6 @@
 
 #include <sstream>
 
-#include "util/debug_util.h"
-
 namespace doris {
 
 InfoFunc::InfoFunc(const TExprNode& node)
@@ -46,16 +44,6 @@ std::string InfoFunc::debug_string() const {
 }
 
 void* InfoFunc::compute_fn(Expr* e, TupleRow* row) {
-#if 0
-    if (e->type() == TYPE_CHAR || e->type() == TYPE_VARCHAR) {
-        e->_result.set_string_val(((InfoFunc*)e)->_str_value);
-        return &e->_result.string_val;
-    } else {
-        e->_result.int_val = ((InfoFunc*)e)->_int_value;
-        return &e->_result.int_val;
-    }
-#endif
-
     return nullptr;
 }
 

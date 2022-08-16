@@ -34,11 +34,7 @@
 
 #include "common/status.h"
 #include "exprs/expr_context.h"
-#include "gen_cpp/PaloBrokerService_types.h"
-#include "gen_cpp/PlanNodes_types.h"
-#include "gen_cpp/Types_types.h"
 #include "runtime/row_batch.h"
-#include "runtime/tuple.h"
 
 namespace doris {
 class FileWriter;
@@ -72,7 +68,8 @@ class ParquetWriterWrapper {
 public:
     ParquetWriterWrapper(FileWriter* file_writer, const std::vector<ExprContext*>& output_expr_ctxs,
                          const std::map<std::string, std::string>& properties,
-                         const std::vector<std::vector<std::string>>& schema);
+                         const std::vector<std::vector<std::string>>& schema,
+                         bool output_object_data);
     virtual ~ParquetWriterWrapper();
 
     Status write(const RowBatch& row_batch);
@@ -101,6 +98,7 @@ private:
     int64_t _cur_writed_rows = 0;
     parquet::RowGroupWriter* _rg_writer;
     const int64_t _max_row_per_group = 10;
+    bool _output_object_data;
 };
 
 } // namespace doris

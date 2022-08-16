@@ -26,7 +26,6 @@ import org.apache.doris.thrift.TExprNodeType;
 import org.apache.doris.thrift.TIntLiteral;
 
 import com.google.common.base.Preconditions;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -173,6 +172,28 @@ public class IntLiteral extends LiteralExpr {
         return new IntLiteral(value);
     }
 
+    public static IntLiteral createMaxValue(Type type) {
+        long value = 0L;
+        switch (type.getPrimitiveType()) {
+            case TINYINT:
+                value = TINY_INT_MAX;
+                break;
+            case SMALLINT:
+                value = SMALL_INT_MAX;
+                break;
+            case INT:
+                value = INT_MAX;
+                break;
+            case BIGINT:
+                value = BIG_INT_MAX;
+                break;
+            default:
+                Preconditions.checkState(false);
+        }
+
+        return new IntLiteral(value);
+    }
+
     @Override
     public boolean isMinValue() {
         switch (type.getPrimitiveType()) {
@@ -284,7 +305,7 @@ public class IntLiteral extends LiteralExpr {
             }
         } else if (targetType.isFloatingPointType()) {
             return new FloatLiteral(new Double(value), targetType);
-        } else if (targetType.isDecimalV2()) {
+        } else if (targetType.isDecimalV2() || targetType.isDecimalV3()) {
             return new DecimalLiteral(new BigDecimal(value));
         }
         return this;

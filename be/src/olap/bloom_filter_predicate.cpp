@@ -30,8 +30,13 @@
     M(TYPE_CHAR)              \
     M(TYPE_DATE)              \
     M(TYPE_DATETIME)          \
+    M(TYPE_DATEV2)            \
+    M(TYPE_DATETIMEV2)        \
     M(TYPE_VARCHAR)           \
-    M(TYPE_STRING)
+    M(TYPE_STRING)            \
+    M(TYPE_DECIMAL32)         \
+    M(TYPE_DECIMAL64)         \
+    M(TYPE_DECIMAL128)
 
 namespace doris {
 ColumnPredicate* BloomFilterColumnPredicateFactory::create_column_predicate(
@@ -39,21 +44,21 @@ ColumnPredicate* BloomFilterColumnPredicateFactory::create_column_predicate(
         FieldType type) {
     std::shared_ptr<IBloomFilterFuncBase> filter;
     switch (type) {
-#define M(NAME)                                                           \
-    case OLAP_FIELD_##NAME: {                                             \
-        filter.reset(create_bloom_filter(bloom_filter->tracker(), NAME)); \
-        filter->light_copy(bloom_filter.get());                           \
-        return new BloomFilterColumnPredicate<NAME>(column_id, filter);   \
+#define M(NAME)                                                         \
+    case OLAP_FIELD_##NAME: {                                           \
+        filter.reset(create_bloom_filter(NAME));                        \
+        filter->light_copy(bloom_filter.get());                         \
+        return new BloomFilterColumnPredicate<NAME>(column_id, filter); \
     }
         APPLY_FOR_PRIMTYPE(M)
 #undef M
     case OLAP_FIELD_TYPE_DECIMAL: {
-        filter.reset(create_bloom_filter(bloom_filter->tracker(), TYPE_DECIMALV2));
+        filter.reset(create_bloom_filter(TYPE_DECIMALV2));
         filter->light_copy(bloom_filter.get());
         return new BloomFilterColumnPredicate<TYPE_DECIMALV2>(column_id, filter);
     }
     case OLAP_FIELD_TYPE_BOOL: {
-        filter.reset(create_bloom_filter(bloom_filter->tracker(), TYPE_BOOLEAN));
+        filter.reset(create_bloom_filter(TYPE_BOOLEAN));
         filter->light_copy(bloom_filter.get());
         return new BloomFilterColumnPredicate<TYPE_BOOLEAN>(column_id, filter);
     }

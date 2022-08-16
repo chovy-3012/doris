@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/mem-info.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_MEM_INFO_H
-#define DORIS_BE_SRC_COMMON_UTIL_MEM_INFO_H
+#pragma once
 
 #include <gperftools/malloc_extension.h>
 
@@ -34,6 +36,8 @@ public:
     // Initialize MemInfo.
     static void init();
 
+    static inline bool initialized() { return _s_initialized; }
+
     // Get total physical memory in bytes (if has cgroups memory limits, return the limits).
     static inline int64_t physical_mem() {
         DCHECK(_s_initialized);
@@ -42,6 +46,8 @@ public:
 
     static inline size_t current_mem() { return _s_current_mem; }
 
+    // Tcmalloc property `generic.total_physical_bytes` records the total length of the virtual memory
+    // obtained by the process malloc, not the physical memory actually used by the process in the OS.
     static inline void refresh_current_mem() {
         MallocExtension::instance()->GetNumericProperty("generic.total_physical_bytes",
                                                         &_s_current_mem);
@@ -62,4 +68,3 @@ private:
 };
 
 } // namespace doris
-#endif

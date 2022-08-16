@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_MYSQL_TABLE_SINK_H
-#define DORIS_BE_RUNTIME_MYSQL_TABLE_SINK_H
+#pragma once
 
 #include <vector>
 
@@ -32,7 +31,6 @@ class TMysqlTableSink;
 class RuntimeState;
 class RuntimeProfile;
 class ExprContext;
-class MemTracker;
 
 // This class is a sinker, which put input data to mysql table
 class MysqlTableSink : public DataSink {
@@ -70,9 +68,6 @@ private:
     MysqlTableWriter* _writer;
 
     RuntimeProfile* _profile;
-    std::shared_ptr<MemTracker> _mem_tracker;
 };
 
 } // namespace doris
-
-#endif

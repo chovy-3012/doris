@@ -28,8 +28,11 @@ public class MVColumnHLLUnionPattern implements MVColumnPattern {
             return false;
         }
         FunctionCallExpr fnExpr = (FunctionCallExpr) expr;
+        if (fnExpr.isDistinct()) {
+            return false;
+        }
         String fnNameString = fnExpr.getFnName().getFunction();
-        if (!fnNameString.equalsIgnoreCase(FunctionSet.HLL_UNION)){
+        if (!fnNameString.equalsIgnoreCase(FunctionSet.HLL_UNION)) {
             return false;
         }
         if (fnExpr.getChild(0) instanceof SlotRef) {
@@ -47,7 +50,7 @@ public class MVColumnHLLUnionPattern implements MVColumnPattern {
             SlotRef slotRef = child0FnExpr.getChild(0).unwrapSlotRef();
             if (slotRef == null) {
                 return false;
-            } else if (slotRef.getType() == Type.DECIMALV2) {
+            } else if (slotRef.getType() == Type.DECIMALV2 || slotRef.getType().isDecimalV3()) {
                 return false;
             }
             return true;

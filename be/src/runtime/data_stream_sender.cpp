@@ -14,15 +14,17 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/data-stream-sender.cc
+// and modified by Doris
 
 #include "runtime/data_stream_sender.h"
 
 #include <arpa/inet.h>
-#include <thrift/protocol/TDebugProtocol.h>
 
 #include <algorithm>
 #include <iostream>
-#include <thread>
+#include <random>
 
 #include "common/config.h"
 #include "common/logging.h"
@@ -34,14 +36,15 @@
 #include "runtime/descriptors.h"
 #include "runtime/dpp_sink_internal.h"
 #include "runtime/exec_env.h"
-#include "runtime/mem_tracker.h"
+#include "runtime/memory/mem_tracker.h"
 #include "runtime/raw_value.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "runtime/tuple_row.h"
 #include "service/backend_options.h"
 #include "service/brpc.h"
-#include "util/brpc_stub_cache.h"
+#include "util/brpc_client_cache.h"
 #include "util/debug_util.h"
 #include "util/defer_op.h"
 #include "util/network_util.h"
@@ -61,11 +64,11 @@ DataStreamSender::Channel::Channel(DataStreamSender* parent, const RowDescriptor
           _row_desc(row_desc),
           _fragment_instance_id(fragment_instance_id),
           _dest_node_id(dest_node_id),
-          _num_data_bytes_sent(0),
           _packet_seq(0),
           _need_close(false),
           _be_number(0),
           _brpc_dest_addr(brpc_dest),
+          _ch_cur_pb_batch(&_ch_pb_batch1),
           _is_transfer_chain(is_transfer_chain),
           _send_query_statistics_with_every_batch(send_query_statistics_with_every_batch) {
     std::string localhost = BackendOptions::get_localhost();
@@ -81,6 +84,7 @@ DataStreamSender::Channel::~Channel() {
     }
     // release this before request desctruct
     _brpc_request.release_finst_id();
+    _brpc_request.release_query_id();
 }
 
 Status DataStreamSender::Channel::init(RuntimeState* state) {
@@ -88,7 +92,7 @@ Status DataStreamSender::Channel::init(RuntimeState* state) {
 
     // TODO: figure out how to size _batch
     int capacity = std::max(1, _buffer_size / std::max(_row_desc.get_row_size(), 1));
-    _batch.reset(new RowBatch(_row_desc, capacity, _parent->_mem_tracker.get()));
+    _batch.reset(new RowBatch(_row_desc, capacity));
 
     if (_brpc_dest_addr.hostname.empty()) {
         LOG(WARNING) << "there is no brpc destination address's hostname"
@@ -100,6 +104,11 @@ Status DataStreamSender::Channel::init(RuntimeState* state) {
     _finst_id.set_hi(_fragment_instance_id.hi);
     _finst_id.set_lo(_fragment_instance_id.lo);
     _brpc_request.set_allocated_finst_id(&_finst_id);
+
+    _query_id.set_hi(state->query_id().hi);
+    _query_id.set_lo(state->query_id().lo);
+    _brpc_request.set_allocated_query_id(&_query_id);
+
     _brpc_request.set_node_id(_dest_node_id);
     _brpc_request.set_sender_id(_parent->_sender_id);
     _brpc_request.set_be_number(_be_number);
@@ -111,7 +120,7 @@ Status DataStreamSender::Channel::init(RuntimeState* state) {
     // so the empty channel not need call function close_internal()
     _need_close = (_fragment_instance_id.hi != -1 && _fragment_instance_id.lo != -1);
     if (_need_close) {
-        _brpc_stub = state->exec_env()->brpc_stub_cache()->get_stub(_brpc_dest_addr);
+        _brpc_stub = state->exec_env()->brpc_internal_client_cache()->get_client(_brpc_dest_addr);
         if (!_brpc_stub) {
             std::string msg = fmt::format("Get rpc stub failed, dest_addr={}:{}",
                                           _brpc_dest_addr.hostname, _brpc_dest_addr.port);
@@ -119,6 +128,7 @@ Status DataStreamSender::Channel::init(RuntimeState* state) {
             return Status::InternalError(msg);
         }
     }
+    _state = state;
     return Status::OK();
 }
 
@@ -145,10 +155,29 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
 
     _closure->ref();
     _closure->cntl.set_timeout_ms(_brpc_timeout_ms);
-    request_row_batch_transfer_attachment<PTransmitDataParams,
-                                          RefCountClosure<PTransmitDataResult>>(&_brpc_request,
-                                                                                _closure);
-    _brpc_stub->transmit_data(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
+
+    if (_parent->_transfer_large_data_by_brpc && _brpc_request.has_row_batch() &&
+        _brpc_request.row_batch().has_tuple_data() &&
+        _brpc_request.ByteSizeLong() > MIN_HTTP_BRPC_SIZE) {
+        Status st = request_embed_attachment_contain_tuple<PTransmitDataParams,
+                                                           RefCountClosure<PTransmitDataResult>>(
+                &_brpc_request, _closure);
+        RETURN_IF_ERROR(st);
+        std::string brpc_url =
+                fmt::format("http://{}:{}", _brpc_dest_addr.hostname, _brpc_dest_addr.port);
+        std::shared_ptr<PBackendService_Stub> _brpc_http_stub =
+                _state->exec_env()->brpc_internal_client_cache()->get_new_client_no_cache(brpc_url,
+                                                                                          "http");
+        _closure->cntl.http_request().uri() =
+                brpc_url + "/PInternalServiceImpl/transmit_data_by_http";
+        _closure->cntl.http_request().set_method(brpc::HTTP_METHOD_POST);
+        _closure->cntl.http_request().set_content_type("application/json");
+        _brpc_http_stub->transmit_data_by_http(&_closure->cntl, NULL, &_closure->result, _closure);
+    } else {
+        _closure->cntl.http_request().Clear();
+        _brpc_stub->transmit_data(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
+    }
+
     if (batch != nullptr) {
         _brpc_request.release_row_batch();
     }
@@ -189,15 +218,15 @@ Status DataStreamSender::Channel::send_current_batch(bool eos) {
     if (is_local()) {
         return send_local_batch(eos);
     }
-    {
-        SCOPED_TIMER(_parent->_serialize_batch_timer);
-        size_t uncompressed_bytes = _batch->serialize(&_pb_batch);
-        COUNTER_UPDATE(_parent->_bytes_sent_counter, RowBatch::get_batch_size(_pb_batch));
-        COUNTER_UPDATE(_parent->_uncompressed_bytes_counter, uncompressed_bytes);
-    }
+    RETURN_IF_ERROR(_parent->serialize_batch(_batch.get(), _ch_cur_pb_batch));
     _batch->reset();
-    RETURN_IF_ERROR(send_batch(&_pb_batch, eos));
+    RETURN_IF_ERROR(send_batch(_ch_cur_pb_batch, eos));
+    ch_roll_pb_batch();
     return Status::OK();
+}
+
+void DataStreamSender::Channel::ch_roll_pb_batch() {
+    _ch_cur_pb_batch = (_ch_cur_pb_batch == &_ch_pb_batch1 ? &_ch_pb_batch2 : &_ch_pb_batch1);
 }
 
 Status DataStreamSender::Channel::send_local_batch(bool eos) {
@@ -263,7 +292,7 @@ Status DataStreamSender::Channel::close_wait(RuntimeState* state) {
 
 DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id, const RowDescriptor& row_desc)
         : _row_desc(row_desc),
-          _current_pb_batch(&_pb_batch1),
+          _cur_pb_batch(&_pb_batch1),
           _pool(pool),
           _sender_id(sender_id),
           _serialize_batch_timer(nullptr),
@@ -277,7 +306,7 @@ DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id, const RowDes
                                    bool send_query_statistics_with_every_batch)
         : _row_desc(row_desc),
           _profile(nullptr),
-          _current_pb_batch(&_pb_batch1),
+          _cur_pb_batch(&_pb_batch1),
           _pool(pool),
           _sender_id(sender_id),
           _serialize_batch_timer(nullptr),
@@ -286,7 +315,8 @@ DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id, const RowDes
           _current_channel_idx(0),
           _part_type(sink.output_partition.type),
           _ignore_not_found(sink.__isset.ignore_not_found ? sink.ignore_not_found : true),
-          _dest_node_id(sink.dest_node_id) {
+          _dest_node_id(sink.dest_node_id),
+          _transfer_large_data_by_brpc(config::transfer_large_data_by_brpc) {
     DCHECK_GT(destinations.size(), 0);
     DCHECK(sink.output_partition.type == TPartitionType::UNPARTITIONED ||
            sink.output_partition.type == TPartitionType::HASH_PARTITIONED ||
@@ -372,21 +402,21 @@ Status DataStreamSender::prepare(RuntimeState* state) {
           << "])";
     _profile = _pool->add(new RuntimeProfile(title.str()));
     SCOPED_TIMER(_profile->total_time_counter());
-    _mem_tracker = MemTracker::CreateTracker(
-            _profile, -1, "DataStreamSender:" + print_id(state->fragment_instance_id()),
-            state->instance_mem_tracker());
+    _mem_tracker = std::make_unique<MemTracker>(
+            "DataStreamSender:" + print_id(state->fragment_instance_id()), _profile);
+    SCOPED_CONSUME_MEM_TRACKER(_mem_tracker.get());
 
     if (_part_type == TPartitionType::UNPARTITIONED || _part_type == TPartitionType::RANDOM) {
-        // Randomize the order we open/transmit to channels to avoid thundering herd problems.
-        srand(reinterpret_cast<uint64_t>(this));
-        random_shuffle(_channels.begin(), _channels.end());
+        std::random_device rd;
+        std::mt19937 g(rd());
+        shuffle(_channels.begin(), _channels.end(), g);
     } else if (_part_type == TPartitionType::HASH_PARTITIONED ||
                _part_type == TPartitionType::BUCKET_SHFFULE_HASH_PARTITIONED) {
-        RETURN_IF_ERROR(Expr::prepare(_partition_expr_ctxs, state, _row_desc, _expr_mem_tracker));
+        RETURN_IF_ERROR(Expr::prepare(_partition_expr_ctxs, state, _row_desc));
     } else {
-        RETURN_IF_ERROR(Expr::prepare(_partition_expr_ctxs, state, _row_desc, _expr_mem_tracker));
+        RETURN_IF_ERROR(Expr::prepare(_partition_expr_ctxs, state, _row_desc));
         for (auto iter : _partition_infos) {
-            RETURN_IF_ERROR(iter->prepare(state, _row_desc, _expr_mem_tracker));
+            RETURN_IF_ERROR(iter->prepare(state, _row_desc));
         }
     }
 
@@ -415,6 +445,7 @@ DataStreamSender::~DataStreamSender() {
 
 Status DataStreamSender::open(RuntimeState* state) {
     DCHECK(state != nullptr);
+    SCOPED_CONSUME_MEM_TRACKER(_mem_tracker.get());
     RETURN_IF_ERROR(Expr::open(_partition_expr_ctxs, state));
     for (auto iter : _partition_infos) {
         RETURN_IF_ERROR(iter->open(state));
@@ -424,6 +455,7 @@ Status DataStreamSender::open(RuntimeState* state) {
 
 Status DataStreamSender::send(RuntimeState* state, RowBatch* batch) {
     SCOPED_TIMER(_profile->total_time_counter());
+    SCOPED_CONSUME_MEM_TRACKER(_mem_tracker.get());
 
     // Unpartition or _channel size
     if (_part_type == TPartitionType::UNPARTITIONED || _channels.size() == 1) {
@@ -439,15 +471,16 @@ Status DataStreamSender::send(RuntimeState* state, RowBatch* batch) {
                 RETURN_IF_ERROR(channel->send_local_batch(batch, false));
             }
         } else {
-            RETURN_IF_ERROR(serialize_batch(batch, _current_pb_batch, _channels.size()));
+            RETURN_IF_ERROR(serialize_batch(batch, _cur_pb_batch, _channels.size()));
             for (auto channel : _channels) {
                 if (channel->is_local()) {
                     RETURN_IF_ERROR(channel->send_local_batch(batch, false));
                 } else {
-                    RETURN_IF_ERROR(channel->send_batch(_current_pb_batch));
+                    RETURN_IF_ERROR(channel->send_batch(_cur_pb_batch));
                 }
             }
-            _current_pb_batch = (_current_pb_batch == &_pb_batch1 ? &_pb_batch2 : &_pb_batch1);
+            // rollover
+            _roll_pb_batch();
         }
     } else if (_part_type == TPartitionType::RANDOM) {
         // Round-robin batches among channels. Wait for the current channel to finish its
@@ -456,8 +489,9 @@ Status DataStreamSender::send(RuntimeState* state, RowBatch* batch) {
         if (current_channel->is_local()) {
             RETURN_IF_ERROR(current_channel->send_local_batch(batch, false));
         } else {
-            RETURN_IF_ERROR(serialize_batch(batch, current_channel->pb_batch()));
-            RETURN_IF_ERROR(current_channel->send_batch(current_channel->pb_batch()));
+            RETURN_IF_ERROR(serialize_batch(batch, current_channel->ch_cur_pb_batch()));
+            RETURN_IF_ERROR(current_channel->send_batch(current_channel->ch_cur_pb_batch()));
+            current_channel->ch_roll_pb_batch();
         }
         _current_channel_idx = (_current_channel_idx + 1) % _channels.size();
     } else if (_part_type == TPartitionType::HASH_PARTITIONED) {
@@ -517,6 +551,10 @@ Status DataStreamSender::send(RuntimeState* state, RowBatch* batch) {
     }
 
     return Status::OK();
+}
+
+void DataStreamSender::_roll_pb_batch() {
+    _cur_pb_batch = (_cur_pb_batch == &_pb_batch1 ? &_pb_batch2 : &_pb_batch1);
 }
 
 int DataStreamSender::binary_find_partition(const PartRangeKey& key) const {
@@ -619,7 +657,6 @@ Status DataStreamSender::close(RuntimeState* state, Status exec_status) {
     // TODO: only close channels that didn't have any errors
     // make all channels close parallel
     if (_closed) return Status::OK();
-    _closed = true;
     Status final_st = Status::OK();
     for (int i = 0; i < _channels.size(); ++i) {
         Status st = _channels[i]->close(state);
@@ -639,41 +676,21 @@ Status DataStreamSender::close(RuntimeState* state, Status exec_status) {
     }
     Expr::close(_partition_expr_ctxs, state);
 
+    DataSink::close(state, exec_status);
     return final_st;
 }
 
-template <typename T>
-Status DataStreamSender::serialize_batch(RowBatch* src, T* dest, int num_receivers) {
-    VLOG_ROW << "serializing " << src->num_rows() << " rows";
+Status DataStreamSender::serialize_batch(RowBatch* src, PRowBatch* dest, int num_receivers) {
     {
-        // TODO(zc)
-        // SCOPED_TIMER(_profile->total_time_counter());
         SCOPED_TIMER(_serialize_batch_timer);
-        // TODO(zc)
-        // RETURN_IF_ERROR(src->serialize(dest));
-        size_t uncompressed_bytes = src->serialize(dest);
-        size_t bytes = RowBatch::get_batch_size(*dest);
-        // TODO(zc)
-        // int uncompressed_bytes = bytes - dest->tuple_data.size() + dest->uncompressed_size;
-        // The size output_batch would be if we didn't compress tuple_data (will be equal to
-        // actual batch size if tuple_data isn't compressed)
-        COUNTER_UPDATE(_bytes_sent_counter, bytes * num_receivers);
+        size_t uncompressed_bytes = 0, compressed_bytes = 0;
+        RETURN_IF_ERROR(src->serialize(dest, &uncompressed_bytes, &compressed_bytes,
+                                       _transfer_large_data_by_brpc));
+        COUNTER_UPDATE(_bytes_sent_counter, compressed_bytes * num_receivers);
         COUNTER_UPDATE(_uncompressed_bytes_counter, uncompressed_bytes * num_receivers);
     }
 
     return Status::OK();
-}
-
-int64_t DataStreamSender::get_num_data_bytes_sent() const {
-    // TODO: do we need synchronization here or are reads & writes to 8-byte ints
-    // atomic?
-    int64_t result = 0;
-
-    for (int i = 0; i < _channels.size(); ++i) {
-        result += _channels[i]->num_data_bytes_sent();
-    }
-
-    return result;
 }
 
 } // namespace doris

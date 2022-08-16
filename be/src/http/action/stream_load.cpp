@@ -28,6 +28,7 @@
 #include <rapidjson/prettywriter.h>
 #include <thrift/protocol/TDebugProtocol.h>
 
+#include "common/consts.h"
 #include "common/logging.h"
 #include "common/utils.h"
 #include "gen_cpp/FrontendService.h"
@@ -63,7 +64,6 @@
 namespace doris {
 
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(streaming_load_requests_total, MetricUnit::REQUESTS);
-DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(streaming_load_bytes, MetricUnit::BYTES);
 DEFINE_COUNTER_METRIC_PROTOTYPE_2ARG(streaming_load_duration_ms, MetricUnit::MILLISECONDS);
 DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(streaming_load_current_processing, MetricUnit::REQUESTS);
 
@@ -77,27 +77,31 @@ static TFileFormatType::type parse_format(const std::string& format_str,
         return parse_format("CSV", compress_type);
     }
     TFileFormatType::type format_type = TFileFormatType::FORMAT_UNKNOWN;
-    if (boost::iequals(format_str, "CSV")) {
+    if (iequal(format_str, "CSV")) {
         if (compress_type.empty()) {
             format_type = TFileFormatType::FORMAT_CSV_PLAIN;
         }
-        if (boost::iequals(compress_type, "GZ")) {
+        if (iequal(compress_type, "GZ")) {
             format_type = TFileFormatType::FORMAT_CSV_GZ;
-        } else if (boost::iequals(compress_type, "LZO")) {
+        } else if (iequal(compress_type, "LZO")) {
             format_type = TFileFormatType::FORMAT_CSV_LZO;
-        } else if (boost::iequals(compress_type, "BZ2")) {
+        } else if (iequal(compress_type, "BZ2")) {
             format_type = TFileFormatType::FORMAT_CSV_BZ2;
-        } else if (boost::iequals(compress_type, "LZ4FRAME")) {
+        } else if (iequal(compress_type, "LZ4FRAME")) {
             format_type = TFileFormatType::FORMAT_CSV_LZ4FRAME;
-        } else if (boost::iequals(compress_type, "LZOP")) {
+        } else if (iequal(compress_type, "LZOP")) {
             format_type = TFileFormatType::FORMAT_CSV_LZOP;
-        } else if (boost::iequals(compress_type, "DEFLATE")) {
+        } else if (iequal(compress_type, "DEFLATE")) {
             format_type = TFileFormatType::FORMAT_CSV_DEFLATE;
         }
-    } else if (boost::iequals(format_str, "JSON")) {
+    } else if (iequal(format_str, "JSON")) {
         if (compress_type.empty()) {
             format_type = TFileFormatType::FORMAT_JSON;
         }
+    } else if (iequal(format_str, "PARQUET")) {
+        format_type = TFileFormatType::FORMAT_PARQUET;
+    } else if (iequal(format_str, "ORC")) {
+        format_type = TFileFormatType::FORMAT_ORC;
     }
     return format_type;
 }
@@ -122,7 +126,6 @@ StreamLoadAction::StreamLoadAction(ExecEnv* exec_env) : _exec_env(exec_env) {
     _stream_load_entity =
             DorisMetrics::instance()->metric_registry()->register_entity("stream_load");
     INT_COUNTER_METRIC_REGISTER(_stream_load_entity, streaming_load_requests_total);
-    INT_COUNTER_METRIC_REGISTER(_stream_load_entity, streaming_load_bytes);
     INT_COUNTER_METRIC_REGISTER(_stream_load_entity, streaming_load_duration_ms);
     INT_GAUGE_METRIC_REGISTER(_stream_load_entity, streaming_load_current_processing);
 }
@@ -170,7 +173,6 @@ void StreamLoadAction::handle(HttpRequest* req) {
     // update statstics
     streaming_load_requests_total->increment(1);
     streaming_load_duration_ms->increment(ctx->load_cost_millis);
-    streaming_load_bytes->increment(ctx->receive_bytes);
     streaming_load_current_processing->increment(-1);
 }
 
@@ -193,11 +195,16 @@ Status StreamLoadAction::_handle(StreamLoadContext* ctx) {
     // wait stream load finish
     RETURN_IF_ERROR(ctx->future.get());
 
-    // If put file success we need commit this load
-    int64_t commit_and_publish_start_time = MonotonicNanos();
-    RETURN_IF_ERROR(_exec_env->stream_load_executor()->commit_txn(ctx));
-    ctx->commit_and_publish_txn_cost_nanos = MonotonicNanos() - commit_and_publish_start_time;
-
+    if (ctx->two_phase_commit) {
+        int64_t pre_commit_start_time = MonotonicNanos();
+        RETURN_IF_ERROR(_exec_env->stream_load_executor()->pre_commit_txn(ctx));
+        ctx->pre_commit_txn_cost_nanos = MonotonicNanos() - pre_commit_start_time;
+    } else {
+        // If put file success we need commit this load
+        int64_t commit_and_publish_start_time = MonotonicNanos();
+        RETURN_IF_ERROR(_exec_env->stream_load_executor()->commit_txn(ctx));
+        ctx->commit_and_publish_txn_cost_nanos = MonotonicNanos() - commit_and_publish_start_time;
+    }
     return Status::OK();
 }
 
@@ -217,6 +224,8 @@ int StreamLoadAction::on_header(HttpRequest* req) {
     if (ctx->label.empty()) {
         ctx->label = generate_uuid_string();
     }
+
+    ctx->two_phase_commit = req->header(HTTP_TWO_PHASE_COMMIT) == "true" ? true : false;
 
     LOG(INFO) << "new income streaming load request." << ctx->brief() << ", db=" << ctx->db
               << ", tbl=" << ctx->table;
@@ -255,15 +264,25 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, StreamLoadContext* ct
     }
 
     // get format of this put
-    if (!http_req->header(HTTP_COMPRESS_TYPE).empty() && boost::iequals(http_req->header(HTTP_FORMAT_KEY), "JSON")) {
+    if (!http_req->header(HTTP_COMPRESS_TYPE).empty() &&
+        iequal(http_req->header(HTTP_FORMAT_KEY), "JSON")) {
         return Status::InternalError("compress data of JSON format is not supported.");
     }
-    ctx->format =
-            parse_format(http_req->header(HTTP_FORMAT_KEY), http_req->header(HTTP_COMPRESS_TYPE));
+    std::string format_str = http_req->header(HTTP_FORMAT_KEY);
+    if (iequal(format_str, BeConsts::CSV_WITH_NAMES) ||
+        iequal(format_str, BeConsts::CSV_WITH_NAMES_AND_TYPES)) {
+        ctx->header_type = format_str;
+        //treat as CSV
+        format_str = BeConsts::CSV;
+    }
+    ctx->format = parse_format(format_str, http_req->header(HTTP_COMPRESS_TYPE));
     if (ctx->format == TFileFormatType::FORMAT_UNKNOWN) {
-        std::stringstream ss;
-        ss << "unknown data format, format=" << http_req->header(HTTP_FORMAT_KEY);
-        return Status::InternalError(ss.str());
+        return Status::InternalError("unknown data format, format={}",
+                                     http_req->header(HTTP_FORMAT_KEY));
+    }
+
+    if (ctx->two_phase_commit && config::disable_stream_load_2pc) {
+        return Status::InternalError("Two phase commit (2PC) for stream load was disabled");
     }
 
     // check content length
@@ -272,7 +291,7 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, StreamLoadContext* ct
     size_t json_max_body_bytes = config::streaming_load_json_max_mb * 1024 * 1024;
     bool read_json_by_line = false;
     if (!http_req->header(HTTP_READ_JSON_BY_LINE).empty()) {
-        if (boost::iequals(http_req->header(HTTP_READ_JSON_BY_LINE), "true")) {
+        if (iequal(http_req->header(HTTP_READ_JSON_BY_LINE), "true")) {
             read_json_by_line = true;
         }
     }
@@ -281,18 +300,16 @@ Status StreamLoadAction::_on_header(HttpRequest* http_req, StreamLoadContext* ct
         // json max body size
         if ((ctx->format == TFileFormatType::FORMAT_JSON) &&
             (ctx->body_bytes > json_max_body_bytes) && !read_json_by_line) {
-            std::stringstream ss;
-            ss << "The size of this batch exceed the max size [" << json_max_body_bytes
-               << "]  of json type data "
-               << " data [ " << ctx->body_bytes << " ]. Split the file, or use 'read_json_by_line'";
-            return Status::InternalError(ss.str());
+            return Status::InternalError(
+                    "The size of this batch exceed the max size [{}]  of json type data "
+                    " data [ {} ]. Split the file, or use 'read_json_by_line'",
+                    json_max_body_bytes, ctx->body_bytes);
         }
         // csv max body size
         else if (ctx->body_bytes > csv_max_body_bytes) {
             LOG(WARNING) << "body exceed max size." << ctx->brief();
-            std::stringstream ss;
-            ss << "body exceed max size: " << csv_max_body_bytes << ", data: " << ctx->body_bytes;
-            return Status::InternalError(ss.str());
+            return Status::InternalError("body exceed max size: {}, data: {}", csv_max_body_bytes,
+                                         ctx->body_bytes);
         }
     } else {
 #ifndef BE_TEST
@@ -329,14 +346,14 @@ void StreamLoadAction::on_chunk_data(HttpRequest* req) {
 
     int64_t start_read_data_time = MonotonicNanos();
     while (evbuffer_get_length(evbuf) > 0) {
-        auto bb = ByteBuffer::allocate(4096);
+        auto bb = ByteBuffer::allocate(128 * 1024);
         auto remove_bytes = evbuffer_remove(evbuf, bb->ptr, bb->capacity);
         bb->pos = remove_bytes;
         bb->flip();
         auto st = ctx->body_sink->append(bb);
         if (!st.ok()) {
-            LOG(WARNING) << "append body content failed. errmsg=" << st.get_error_msg()
-                         << ", " << ctx->brief();
+            LOG(WARNING) << "append body content failed. errmsg=" << st.get_error_msg() << ", "
+                         << ctx->brief();
             ctx->status = st;
             return;
         }
@@ -370,9 +387,10 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
     request.tbl = ctx->table;
     request.txnId = ctx->txn_id;
     request.formatType = ctx->format;
+    request.__set_header_type(ctx->header_type);
     request.__set_loadId(ctx->id.to_thrift());
     if (ctx->use_streaming) {
-        auto pipe = std::make_shared<StreamLoadPipe>(1024 * 1024 /* max_buffered_bytes */,
+        auto pipe = std::make_shared<StreamLoadPipe>(kMaxPipeBufferedBytes /* max_buffered_bytes */,
                                                      64 * 1024 /* min_chunk_size */,
                                                      ctx->body_bytes /* total_length */);
         RETURN_IF_ERROR(_exec_env->load_stream_mgr()->put(ctx->id, pipe));
@@ -420,9 +438,9 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
         request.__set_negative(false);
     }
     if (!http_req->header(HTTP_STRICT_MODE).empty()) {
-        if (boost::iequals(http_req->header(HTTP_STRICT_MODE), "false")) {
+        if (iequal(http_req->header(HTTP_STRICT_MODE), "false")) {
             request.__set_strictMode(false);
-        } else if (boost::iequals(http_req->header(HTTP_STRICT_MODE), "true")) {
+        } else if (iequal(http_req->header(HTTP_STRICT_MODE), "true")) {
             request.__set_strictMode(true);
         } else {
             return Status::InvalidArgument("Invalid strict mode format. Must be bool type");
@@ -445,7 +463,7 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
         request.__set_json_root(http_req->header(HTTP_JSONROOT));
     }
     if (!http_req->header(HTTP_STRIP_OUTER_ARRAY).empty()) {
-        if (boost::iequals(http_req->header(HTTP_STRIP_OUTER_ARRAY), "true")) {
+        if (iequal(http_req->header(HTTP_STRIP_OUTER_ARRAY), "true")) {
             request.__set_strip_outer_array(true);
         } else {
             request.__set_strip_outer_array(false);
@@ -454,7 +472,7 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
         request.__set_strip_outer_array(false);
     }
     if (!http_req->header(HTTP_NUM_AS_STRING).empty()) {
-        if (boost::iequals(http_req->header(HTTP_NUM_AS_STRING), "true")) {
+        if (iequal(http_req->header(HTTP_NUM_AS_STRING), "true")) {
             request.__set_num_as_string(true);
         } else {
             request.__set_num_as_string(false);
@@ -463,7 +481,7 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
         request.__set_num_as_string(false);
     }
     if (!http_req->header(HTTP_FUZZY_PARSE).empty()) {
-        if (boost::iequals(http_req->header(HTTP_FUZZY_PARSE), "true")) {
+        if (iequal(http_req->header(HTTP_FUZZY_PARSE), "true")) {
             request.__set_fuzzy_parse(true);
         } else {
             request.__set_fuzzy_parse(false);
@@ -473,7 +491,7 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
     }
 
     if (!http_req->header(HTTP_READ_JSON_BY_LINE).empty()) {
-        if (boost::iequals(http_req->header(HTTP_READ_JSON_BY_LINE), "true")) {
+        if (iequal(http_req->header(HTTP_READ_JSON_BY_LINE), "true")) {
             request.__set_read_json_by_line(true);
         } else {
             request.__set_read_json_by_line(false);
@@ -489,9 +507,18 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
 
     if (!http_req->header(HTTP_SEND_BATCH_PARALLELISM).empty()) {
         try {
-            request.__set_send_batch_parallelism(std::stoi(http_req->header(HTTP_SEND_BATCH_PARALLELISM)));
+            request.__set_send_batch_parallelism(
+                    std::stoi(http_req->header(HTTP_SEND_BATCH_PARALLELISM)));
         } catch (const std::invalid_argument& e) {
             return Status::InvalidArgument("Invalid send_batch_parallelism format");
+        }
+    }
+
+    if (!http_req->header(HTTP_LOAD_TO_SINGLE_TABLET).empty()) {
+        if (iequal(http_req->header(HTTP_LOAD_TO_SINGLE_TABLET), "true")) {
+            request.__set_load_to_single_tablet(true);
+        } else {
+            request.__set_load_to_single_tablet(false);
         }
     }
 
@@ -508,7 +535,7 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
         if (merge_type_map.find(merge_type_str) != merge_type_map.end()) {
             merge_type = merge_type_map.find(merge_type_str)->second;
         } else {
-            return Status::InvalidArgument("Invalid merge type " + merge_type_str);
+            return Status::InvalidArgument("Invalid merge type {}", merge_type_str);
         }
         if (merge_type == TMergeType::MERGE && http_req->header(HTTP_DELETE_CONDITION).empty()) {
             return Status::InvalidArgument("Excepted DELETE ON clause when merge type is MERGE.");
@@ -522,13 +549,15 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req, StreamLoadContext* 
     if (!http_req->header(HTTP_DELETE_CONDITION).empty()) {
         request.__set_delete_condition(http_req->header(HTTP_DELETE_CONDITION));
     }
-    // plan this load
-    TNetworkAddress master_addr = _exec_env->master_info()->network_address;
-#ifndef BE_TEST
+
     if (!http_req->header(HTTP_MAX_FILTER_RATIO).empty()) {
         ctx->max_filter_ratio = strtod(http_req->header(HTTP_MAX_FILTER_RATIO).c_str(), nullptr);
+        request.__set_max_filter_ratio(ctx->max_filter_ratio);
     }
 
+#ifndef BE_TEST
+    // plan this load
+    TNetworkAddress master_addr = _exec_env->master_info()->network_address;
     int64_t stream_load_put_start_time = MonotonicNanos();
     RETURN_IF_ERROR(ThriftRpcHelper::rpc<FrontendServiceClient>(
             master_addr.hostname, master_addr.port,
@@ -574,10 +603,12 @@ Status StreamLoadAction::_data_saved_path(HttpRequest* req, std::string* file_pa
 void StreamLoadAction::_sava_stream_load_record(StreamLoadContext* ctx, const std::string& str) {
     auto stream_load_recorder = StorageEngine::instance()->get_stream_load_recorder();
     if (stream_load_recorder != nullptr) {
-        std::string key = std::to_string(ctx->start_millis + ctx->load_cost_millis) + "_" + ctx->label;
+        std::string key =
+                std::to_string(ctx->start_millis + ctx->load_cost_millis) + "_" + ctx->label;
         auto st = stream_load_recorder->put(key, str);
         if (st.ok()) {
-            LOG(INFO) << "put stream_load_record rocksdb successfully. label: " << ctx->label << ", key: " << key;
+            LOG(INFO) << "put stream_load_record rocksdb successfully. label: " << ctx->label
+                      << ", key: " << key;
         }
     } else {
         LOG(WARNING) << "put stream_load_record rocksdb failed. stream_load_recorder is null.";

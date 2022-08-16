@@ -14,11 +14,14 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/SlotRef.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
-import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.io.Text;
@@ -30,7 +33,6 @@ import org.apache.doris.thrift.TSlotRef;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -69,7 +71,7 @@ public class SlotRef extends Expr {
     public SlotRef(SlotDescriptor desc) {
         super();
         this.tblName = null;
-        this.col = null;
+        this.col = desc.getColumn() != null ? desc.getColumn().getName() : null;
         this.desc = desc;
         this.type = desc.getType();
         // TODO(zc): label is meaningful
@@ -286,6 +288,14 @@ public class SlotRef extends Expr {
         if (desc != null && other.desc != null) {
             return desc.getId().equals(other.desc.getId());
         }
+        return notCheckDescIdEquals(obj);
+    }
+
+    public boolean notCheckDescIdEquals(Object obj) {
+        if (!super.equals(obj)) {
+            return false;
+        }
+        SlotRef other = (SlotRef) obj;
         if ((tblName == null) != (other.tblName == null)) {
             return false;
         }
@@ -295,20 +305,24 @@ public class SlotRef extends Expr {
         if ((col == null) != (other.col == null)) {
             return false;
         }
-        if (col != null && !col.toLowerCase().equals(other.col.toLowerCase())) {
+        if (col != null && !col.equalsIgnoreCase(other.col)) {
             return false;
         }
         return true;
     }
 
     @Override
-    protected boolean isConstantImpl() { return false; }
+    protected boolean isConstantImpl() {
+        return false;
+    }
 
     @Override
     public boolean isBoundByTupleIds(List<TupleId> tids) {
         Preconditions.checkState(desc != null);
-        for (TupleId tid: tids) {
-            if (tid.equals(desc.getParent().getId())) return true;
+        for (TupleId tid : tids) {
+            if (tid.equals(desc.getParent().getId())) {
+                return true;
+            }
         }
         return false;
     }
@@ -359,7 +373,7 @@ public class SlotRef extends Expr {
                 expr.getTableIdToColumnNames(tableIdToColumnNames);
             }
         } else {
-            Table table = desc.getParent().getTable();
+            TableIf table = desc.getParent().getTable();
             if (table == null) {
                 // Maybe this column comes from inline view.
                 return;
@@ -374,10 +388,9 @@ public class SlotRef extends Expr {
         }
     }
 
-    public Table getTable() {
+    public TableIf getTable() {
         Preconditions.checkState(desc != null);
-        Table table = desc.getParent().getTable();
-        return table;
+        return desc.getParent().getTable();
     }
 
     public void setLabel(String label) {
@@ -427,5 +440,10 @@ public class SlotRef extends Expr {
     public boolean isNullable() {
         Preconditions.checkNotNull(desc);
         return desc.getIsNullable();
+    }
+
+    @Override
+    public void finalizeImplForNereids() throws AnalysisException {
+
     }
 }

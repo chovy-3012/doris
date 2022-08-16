@@ -14,16 +14,17 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/in-predicate.cpp
+// and modified by Doris
 
 #include "exprs/in_predicate.h"
 
 #include <sstream>
 
-#include "exprs/anyval_util.h"
+#include "exprs/create_predicate_function.h"
 #include "exprs/expr_context.h"
-#include "runtime/raw_value.h"
 #include "runtime/runtime_state.h"
-#include "runtime/string_value.hpp"
 
 namespace doris {
 

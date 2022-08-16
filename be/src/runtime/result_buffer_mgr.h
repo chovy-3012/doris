@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_RESULT_BUFFER_MGR_H
-#define DORIS_BE_RUNTIME_RESULT_BUFFER_MGR_H
+#pragma once
 
 #include <map>
 #include <mutex>
@@ -34,7 +33,7 @@ namespace doris {
 
 class TFetchDataResult;
 class BufferControlBlock;
-class GetResultBatchCtx;
+struct GetResultBatchCtx;
 class PUniqueId;
 
 // manage all result buffer control block in one backend
@@ -89,5 +88,3 @@ private:
 // TUniqueId hash function used for std::unordered_map
 std::size_t hash_value(const TUniqueId& fragment_id);
 } // namespace doris
-
-#endif

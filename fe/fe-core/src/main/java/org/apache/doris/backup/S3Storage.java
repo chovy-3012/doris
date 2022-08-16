@@ -30,20 +30,6 @@ import org.apache.http.HttpStatus;
 import org.apache.http.client.utils.URIBuilder;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.net.URI;
-import java.nio.file.FileVisitOption;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.time.Duration;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.auth.signer.AwsS3V4Signer;
@@ -64,6 +50,19 @@ import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.file.FileVisitOption;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 
 public class S3Storage extends BlobStorage {
     public static final String S3_PROPERTIES_PREFIX = "AWS";
@@ -105,7 +104,8 @@ public class S3Storage extends BlobStorage {
         // If not, it will not be converted ( https://github.com/aws/aws-sdk-java-v2/pull/763),
         // but the endpoints of many cloud service providers for object storage do not start with s3,
         // so they cannot be converted to virtual hosted-sytle.
-        // Some of them, such as aliyun's oss, only support virtual hosted-sytle, and some of them(ceph) may only support
+        // Some of them, such as aliyun's oss, only support virtual hosted-sytle,
+        // and some of them(ceph) may only support
         // path-style, so we need to do some additional conversion.
         //
         //          use_path_style          |     !use_path_style
@@ -203,7 +203,8 @@ public class S3Storage extends BlobStorage {
         }
         try {
             S3URI uri = S3URI.create(remoteFilePath, forceHostedStyle);
-            GetObjectResponse response = getClient(uri.getVirtualBucket()).getObject(GetObjectRequest.builder().bucket(uri.getBucket()).key(uri.getKey()).build(), localFile.toPath());
+            GetObjectResponse response = getClient(uri.getVirtualBucket()).getObject(
+                    GetObjectRequest.builder().bucket(uri.getBucket()).key(uri.getKey()).build(), localFile.toPath());
             if (localFile.length() == fileSize) {
                 LOG.info(
                         "finished to download from {} to {} with size: {}. cost {} ms",
@@ -337,7 +338,7 @@ public class S3Storage extends BlobStorage {
             conf.set("fs.s3a.access.key", s3AK);
             conf.set("fs.s3a.secret.key", s3Sk);
             conf.set("fs.s3a.endpoint", s3Endpoint);
-            conf.set("fs.s3a.impl.disable.cache", "true");
+            conf.set("fs.s3.impl.disable.cache", "true");
             conf.set("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
             // introducing in hadoop aws 2.8.0
             conf.set("fs.s3a.path.style.access", forceHostedStyle ? "false" : "true");
@@ -349,7 +350,9 @@ public class S3Storage extends BlobStorage {
                 return Status.OK;
             }
             for (FileStatus fileStatus : files) {
-                RemoteFile remoteFile = new RemoteFile(fileNameOnly ? fileStatus.getPath().getName() : fileStatus.getPath().toString(), !fileStatus.isDirectory(), fileStatus.isDirectory() ? -1 : fileStatus.getLen());
+                RemoteFile remoteFile = new RemoteFile(
+                        fileNameOnly ? fileStatus.getPath().getName() : fileStatus.getPath().toString(),
+                        !fileStatus.isDirectory(), fileStatus.isDirectory() ? -1 : fileStatus.getLen());
                 result.add(remoteFile);
             }
         } catch (FileNotFoundException e) {
@@ -410,4 +413,3 @@ public class S3Storage extends BlobStorage {
         return StorageBackend.StorageType.S3;
     }
 }
-

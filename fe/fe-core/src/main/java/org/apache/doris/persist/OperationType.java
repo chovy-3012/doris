@@ -20,8 +20,12 @@ package org.apache.doris.persist;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 
+/**
+ * Operation name and code mapping.
+ **/
 public class OperationType {
-    public static final short OP_INVALID = -1;
+    // OP_LOCAL_EOF is only for local edit log, to indicate the end of a edit log run.
+    public static final short OP_LOCAL_EOF = -1;
     public static final short OP_SAVE_NEXTID = 0;
     public static final short OP_CREATE_DB = 1;
     public static final short OP_DROP_DB = 2;
@@ -69,6 +73,9 @@ public class OperationType {
     public static final short OP_MODIFY_COMMENT = 126;
     public static final short OP_MODIFY_TABLE_ENGINE = 127;
 
+    //schema change for add and drop columns
+    public static final short OP_MODIFY_TABLE_ADD_OR_DROP_COLUMNS = 128;
+
     // 30~39 130~139 230~239 ...
     // load job for only hadoop load
     public static final short OP_LOAD_START = 30;
@@ -79,6 +86,7 @@ public class OperationType {
     public static final short OP_LOAD_CANCEL = 35;
     public static final short OP_EXPORT_CREATE = 36;
     public static final short OP_EXPORT_UPDATE_STATE = 37;
+    public static final short OP_CLEAN_LABEL = 38;
 
     @Deprecated
     public static final short OP_FINISH_SYNC_DELETE = 40;
@@ -88,8 +96,10 @@ public class OperationType {
     @Deprecated
     public static final short OP_FINISH_ASYNC_DELETE = 44;
     public static final short OP_UPDATE_REPLICA = 45;
+    @Deprecated
     public static final short OP_BACKEND_TABLETS_INFO = 46;
     public static final short OP_SET_REPLICA_STATUS = 47;
+    public static final short OP_BACKEND_REPLICAS_INFO = 48;
 
     public static final short OP_ADD_BACKEND = 50;
     public static final short OP_DROP_BACKEND = 51;
@@ -205,6 +215,7 @@ public class OperationType {
     // resource 276~290
     public static final short OP_CREATE_RESOURCE = 276;
     public static final short OP_DROP_RESOURCE = 277;
+    public static final short OP_ALTER_RESOURCE = 278;
 
     // alter external table
     public static final short OP_ALTER_EXTERNAL_TABLE_SCHEMA = 280;
@@ -216,7 +227,21 @@ public class OperationType {
     public static final short OP_ALTER_SQL_BLOCK_RULE = 301;
     public static final short OP_DROP_SQL_BLOCK_RULE = 302;
 
-    // get opcode name by op codeStri
+    // policy 310-320
+    public static final short OP_CREATE_POLICY = 310;
+    public static final short OP_DROP_POLICY = 311;
+    public static final short OP_ALTER_STORAGE_POLICY = 312;
+
+    // catalog 320-330
+    public static final short OP_CREATE_CATALOG = 320;
+    public static final short OP_DROP_CATALOG = 321;
+    public static final short OP_ALTER_CATALOG_NAME = 322;
+    public static final short OP_ALTER_CATALOG_PROPS = 323;
+    public static final short OP_REFRESH_CATALOG = 324;
+
+    /**
+     * Get opcode name by op code.
+     **/
     public static String getOpName(short opCode) {
         try {
             Field[] fields = OperationType.class.getDeclaredFields();

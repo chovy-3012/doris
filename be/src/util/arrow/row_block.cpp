@@ -23,7 +23,8 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
-#include <arrow/visitor_inline.h>
+#include <arrow/visit_array_inline.h>
+#include <arrow/visit_type_inline.h>
 
 #include "gutil/strings/substitute.h"
 #include "olap/column_block.h"
@@ -59,7 +60,7 @@ Status convert_to_arrow_type(FieldType type, std::shared_ptr<arrow::DataType>* r
         *result = arrow::float64();
         break;
     default:
-        return Status::InvalidArgument(strings::Substitute("Unknown FieldType($0)", type));
+        return Status::InvalidArgument("Unknown FieldType({})", type);
     }
     return Status::OK();
 }
@@ -105,7 +106,7 @@ Status convert_to_type_name(const arrow::DataType& type, std::string* name) {
         *name = "DOUBLE";
         break;
     default:
-        return Status::InvalidArgument(strings::Substitute("Unknown arrow type id($0)", type.id()));
+        return Status::InvalidArgument("Unknown arrow type id({})", type.id());
     }
     return Status::OK();
 }
@@ -171,7 +172,7 @@ private:
     _visit(const T& type) {
         arrow::NumericBuilder<T> builder(_pool);
         size_t num_rows = _block.num_rows();
-        builder.Reserve(num_rows);
+        ARROW_RETURN_NOT_OK(builder.Reserve(num_rows));
 
         auto column_block = _block.column_block(_cur_field_idx);
         for (size_t i = 0; i < num_rows; ++i) {
@@ -190,7 +191,7 @@ private:
     std::shared_ptr<arrow::Schema> _schema;
     arrow::MemoryPool* _pool;
 
-    size_t _cur_field_idx;
+    size_t _cur_field_idx = 0;
     std::vector<std::shared_ptr<arrow::Array>> _arrays;
 };
 

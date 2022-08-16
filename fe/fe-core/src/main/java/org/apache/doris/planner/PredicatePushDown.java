@@ -25,6 +25,7 @@ import org.apache.doris.analysis.JoinOperator;
 import org.apache.doris.analysis.Predicate;
 import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.TupleId;
+import org.apache.doris.common.Pair;
 
 import org.apache.directory.api.util.Strings;
 import org.apache.logging.log4j.LogManager;
@@ -32,9 +33,29 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.List;
 
+/**
+ * Due to the current architecture, predicate derivation at rewrite cannot satisfy all cases,
+ * because rewrite is performed on first and then where, and when there are subqueries, all cases cannot be derived.
+ * So keep the predicate pushdown method here.
+ *
+ * <p>
+ *     eg:
+ *      origin: select * from t1 left join t2 on t1 = t2 where t1 = 1;
+ *      after: The function will be derived t2 = 1
+ * </p>
+ *
+ */
 public class PredicatePushDown {
-    private final static Logger LOG = LogManager.getLogger(PredicatePushDown.class);
+    private static final Logger LOG = LogManager.getLogger(PredicatePushDown.class);
 
+    /**
+     * Desc: Predicate pushdown for inner and left join.
+
+     * @param scanNode ScanNode to be judged
+     * @param joinOp join Operator
+     * @param analyzer global context
+     * @return {@link PlanNode}
+     */
     public static PlanNode visitScanNode(ScanNode scanNode, JoinOperator joinOp, Analyzer analyzer) {
         switch (joinOp) {
             case INNER_JOIN:
@@ -88,18 +109,29 @@ public class PredicatePushDown {
                             && rightSlot.isBound(rightSideTuple)) {
                         Expr pushDownConjunct = rewritePredicate(analyzer, conjunct, rightSlot);
                         LOG.debug("pushDownConjunct: {}", pushDownConjunct);
-                        scanNode.addConjunct(pushDownConjunct);
+                        if (!analyzer.getGlobalInDeDuplication().contains(pushDownConjunct)
+                                && !analyzer.getGlobalSlotToLiteralDeDuplication()
+                                .contains(new Pair<>(pushDownConjunct.getChild(0), pushDownConjunct.getChild(1)))) {
+                            scanNode.addConjunct(pushDownConjunct);
+                        }
                     } else if (otherSlot.isBound(rightSlot.getSlotId())
                             && leftSlot.isBound(rightSideTuple)) {
                         Expr pushDownConjunct = rewritePredicate(analyzer, conjunct, leftSlot);
                         LOG.debug("pushDownConjunct: {}", pushDownConjunct);
-                        scanNode.addConjunct(pushDownConjunct);
+                        if (!analyzer.getGlobalInDeDuplication().contains(pushDownConjunct)
+                                && !analyzer.getGlobalSlotToLiteralDeDuplication()
+                                .contains(new Pair<>(pushDownConjunct.getChild(0), pushDownConjunct.getChild(1)))) {
+                            scanNode.addConjunct(pushDownConjunct);
+                        }
                     }
                 }
             }
         }
     }
 
+    // TODO: (minghong) here is a bug. For example, this is a left join, we cannot infer "t2.id = 1"
+    // by "t1.id=1" and "t1.id=t2.id".
+    // we should not do inference work here. it should be done in some rule like InferFilterRule.
     // Rewrite the oldPredicate with new leftChild
     // For example: oldPredicate is t1.id = 1, leftChild is t2.id, will return t2.id = 1
     private static Expr rewritePredicate(Analyzer analyzer, Expr oldPredicate, Expr leftChild) {

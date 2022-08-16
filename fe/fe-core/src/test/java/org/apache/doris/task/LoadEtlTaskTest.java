@@ -17,10 +17,8 @@
 
 package org.apache.doris.task;
 
-import mockit.Expectations;
-import mockit.Mocked;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
 import org.apache.doris.catalog.OlapTable;
@@ -28,6 +26,7 @@ import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.util.UnitTestUtil;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.load.DppScheduler;
 import org.apache.doris.load.EtlStatus;
 import org.apache.doris.load.Load;
@@ -42,7 +41,8 @@ import org.apache.doris.thrift.TEtlState;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -63,7 +63,9 @@ public class LoadEtlTaskTest {
 
     private String label;
     @Mocked
-    private Catalog catalog;
+    private Env env;
+    @Mocked
+    private InternalCatalog catalog;
     @Mocked
     private EditLog editLog;
     @Mocked
@@ -78,18 +80,22 @@ public class LoadEtlTaskTest {
         indexId = 0L;
         tabletId = 0L;
         backendId = 0L;
-        
+
         label = "test_label";
-        
+
         UnitTestUtil.initDppConfig();
     }
-    
+
     @Test
     public void testRunEtlTask(@Mocked DppScheduler dppScheduler) throws Exception {
         // mock catalog
-        db = UnitTestUtil.createDb(dbId, tableId, partitionId, indexId, tabletId, backendId, 1L, 0L);
-        new Expectations(catalog) {
+        db = UnitTestUtil.createDb(dbId, tableId, partitionId, indexId, tabletId, backendId, 1L);
+        new Expectations(env, catalog) {
             {
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
+
                 catalog.getDbNullable(dbId);
                 minTimes = 0;
                 result = db;
@@ -98,13 +104,13 @@ public class LoadEtlTaskTest {
                 minTimes = 0;
                 result = db;
 
-                catalog.getEditLog();
+                env.getEditLog();
                 minTimes = 0;
                 result = editLog;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
             }
         };
         // create job
@@ -139,12 +145,12 @@ public class LoadEtlTaskTest {
                 times = 1;
                 result = true;
 
-                catalog.getLoadInstance();
+                env.getLoadInstance();
                 times = 1;
                 result = load;
             }
         };
-        
+
         // mock dppscheduler
         EtlStatus runningStatus = new EtlStatus();
         runningStatus.setState(TEtlState.RUNNING);
@@ -178,18 +184,17 @@ public class LoadEtlTaskTest {
         // test exec: running
         HadoopLoadEtlTask loadEtlTask = new HadoopLoadEtlTask(job);
         loadEtlTask.exec();
-        
+
         // verify running
         Assert.assertEquals(job.getId(), loadEtlTask.getSignature());
         Assert.assertEquals(60, job.getProgress());
         Assert.assertEquals(JobState.ETL, job.getState());
-        
+
         // test exec: finished
         loadEtlTask.exec();
-        
+
         // verify finished
         Assert.assertEquals(100, job.getProgress());
-        long expectVersion = partition.getVisibleVersion() + 1;
         Assert.assertEquals(-1,
                             job.getIdToTableLoadInfo().get(tableId)
                 .getIdToPartitionLoadInfo().get(partitionId).getVersion());
@@ -203,5 +208,5 @@ public class LoadEtlTaskTest {
         }
         Assert.assertEquals(tabletNum, tabletLoadInfos.size());
     }
-    
+
 }

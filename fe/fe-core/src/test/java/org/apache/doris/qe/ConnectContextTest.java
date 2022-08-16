@@ -17,14 +17,14 @@
 
 package org.apache.doris.qe;
 
-import mockit.Expectations;
-import mockit.Mocked;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.mysql.MysqlCapability;
 import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlCommand;
 import org.apache.doris.thrift.TUniqueId;
 
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -40,7 +40,7 @@ public class ConnectContextTest {
     @Mocked
     private SocketChannel socketChannel;
     @Mocked
-    private Catalog catalog;
+    private Env env;
     @Mocked
     private ConnectScheduler connectScheduler;
 
@@ -86,7 +86,7 @@ public class ConnectContextTest {
         Assert.assertEquals("", ctx.getClusterName());
         ctx.setCluster("testCluster");
         Assert.assertEquals("testCluster", ctx.getClusterName());
-        
+
         // Current db
         Assert.assertEquals("", ctx.getDatabase());
         ctx.setDatabase("testCluster:testDb");
@@ -116,8 +116,8 @@ public class ConnectContextTest {
         Assert.assertEquals(MysqlCommand.COM_PING, ctx.getCommand());
 
         // Thread info
-        Assert.assertNotNull(ctx.toThreadInfo());
-        List<String> row = ctx.toThreadInfo().toRow(1000);
+        Assert.assertNotNull(ctx.toThreadInfo(false));
+        List<String> row = ctx.toThreadInfo(false).toRow(1000);
         Assert.assertEquals(9, row.size());
         Assert.assertEquals("101", row.get(0));
         Assert.assertEquals("testUser", row.get(1));
@@ -139,9 +139,9 @@ public class ConnectContextTest {
         Assert.assertEquals(new TUniqueId(100, 200), ctx.queryId());
 
         // Catalog
-        Assert.assertNull(ctx.getCatalog());
-        ctx.setCatalog(catalog);
-        Assert.assertNotNull(ctx.getCatalog());
+        Assert.assertNull(ctx.getEnv());
+        ctx.setEnv(env);
+        Assert.assertNotNull(ctx.getEnv());
 
         // clean up
         ctx.cleanup();

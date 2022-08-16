@@ -27,8 +27,10 @@ import org.apache.doris.analysis.TupleDescriptor;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.VectorizedUtil;
 import org.apache.doris.load.Load;
 import org.apache.doris.load.loadv2.LoadTask;
+import org.apache.doris.statistics.StatisticalType;
 import org.apache.doris.task.LoadTaskInfo;
 import org.apache.doris.thrift.TBrokerRangeDesc;
 import org.apache.doris.thrift.TBrokerScanRange;
@@ -39,11 +41,10 @@ import org.apache.doris.thrift.TScanRange;
 import org.apache.doris.thrift.TScanRangeLocations;
 import org.apache.doris.thrift.TUniqueId;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.nio.charset.Charset;
 import java.util.List;
@@ -66,13 +67,16 @@ public class StreamLoadScanNode extends LoadScanNode {
     private TupleDescriptor srcTupleDesc;
     private TBrokerScanRange brokerScanRange;
 
-    private Map<String, SlotDescriptor> slotDescByName = Maps.newHashMap();
-    private Map<String, Expr> exprsByName = Maps.newHashMap();
+    // If use case sensitive map, for example,
+    // the column name 「A」 in the table and the mapping '(a) set (A = a)' in load sql，
+    // Slotdescbyname stores「a」, later will use 「a」to get table's 「A」 column info, will throw exception.
+    private final Map<String, SlotDescriptor> slotDescByName = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
+    private final Map<String, Expr> exprsByName = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
 
     // used to construct for streaming loading
     public StreamLoadScanNode(
             TUniqueId loadId, PlanNodeId id, TupleDescriptor tupleDesc, Table dstTable, LoadTaskInfo taskInfo) {
-        super(id, tupleDesc, "StreamLoadScanNode");
+        super(id, tupleDesc, "StreamLoadScanNode", StatisticalType.STREAM_LOAD_SCAN_NODE);
         this.loadId = loadId;
         this.dstTable = dstTable;
         this.taskInfo = taskInfo;
@@ -86,7 +90,7 @@ public class StreamLoadScanNode extends LoadScanNode {
 
         this.analyzer = analyzer;
         brokerScanRange = new TBrokerScanRange();
-        
+
         deleteCondition = taskInfo.getDeleteCondition();
         mergeType = taskInfo.getMergeType();
 
@@ -118,6 +122,7 @@ public class StreamLoadScanNode extends LoadScanNode {
                 throw new UserException("unsupported file type, type=" + taskInfo.getFileType());
         }
         rangeDesc.start_offset = 0;
+        rangeDesc.setHeaderType(taskInfo.getHeaderType());
         rangeDesc.size = -1;
         brokerScanRange.addToRanges(rangeDesc);
 
@@ -132,12 +137,14 @@ public class StreamLoadScanNode extends LoadScanNode {
                 columnExprDescs.descs.add(ImportColumnDesc.newDeleteSignImportColumnDesc(new IntLiteral(1)));
             }
             if (taskInfo.hasSequenceCol()) {
-                columnExprDescs.descs.add(new ImportColumnDesc(Column.SEQUENCE_COL, new SlotRef(null, taskInfo.getSequenceCol())));
+                columnExprDescs.descs.add(new ImportColumnDesc(Column.SEQUENCE_COL,
+                        new SlotRef(null, taskInfo.getSequenceCol())));
             }
         }
 
         Load.initColumns(dstTable, columnExprDescs, null /* no hadoop function */,
-                exprsByName, analyzer, srcTupleDesc, slotDescByName, params);
+                exprsByName, analyzer, srcTupleDesc, slotDescByName, params,
+                taskInfo.getFormatType(), VectorizedUtil.isVectorized());
 
         // analyze where statement
         initAndSetPrecedingFilter(taskInfo.getPrecedingFilter(), this.srcTupleDesc, analyzer);
@@ -188,7 +195,9 @@ public class StreamLoadScanNode extends LoadScanNode {
     }
 
     @Override
-    public int getNumInstances() { return 1; }
+    public int getNumInstances() {
+        return 1;
+    }
 
     @Override
     public String getNodeExplainString(String prefix, TExplainLevel detailLevel) {

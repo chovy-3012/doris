@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.10.0/be/src/runtime/initial-reservations.h
+// and modified by Doris
 
-#ifndef DORIS_BE_RUNTIME_INITIAL_RESERVATIONS_H
-#define DORIS_BE_RUNTIME_INITIAL_RESERVATIONS_H
+#pragma once
 
 #include "common/status.h"
 #include "gen_cpp/Types_types.h" // for TUniqueId
@@ -42,7 +44,6 @@ public:
     /// claimed over the lifetime of the query. The total bytes claimed via Claim()
     /// cannot exceed this. Allocated objects are stored in 'obj_pool'.
     InitialReservations(ObjectPool* obj_pool, ReservationTracker* query_reservation,
-                        std::shared_ptr<MemTracker> query_mem_tracker,
                         int64_t initial_reservation_total_claims);
 
     /// Initialize the query's pool of initial reservations by acquiring the minimum
@@ -70,12 +71,8 @@ private:
     // Return() returns reservations to.
     ReservationTracker initial_reservations_;
 
-    std::shared_ptr<MemTracker> const initial_reservation_mem_tracker_;
-
     /// The total bytes of additional reservations that we expect to be claimed.
     /// initial_reservations_->GetReservation() <= remaining_initial_reservation_claims_.
     int64_t remaining_initial_reservation_claims_;
 };
 } // namespace doris
-
-#endif

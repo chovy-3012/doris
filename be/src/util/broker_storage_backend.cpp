@@ -18,13 +18,13 @@
 #include "util/broker_storage_backend.h"
 
 #include "env/env.h"
-#include "exec/broker_reader.h"
-#include "exec/broker_writer.h"
 #include "gen_cpp/FrontendService.h"
 #include "gen_cpp/FrontendService_types.h"
 #include "gen_cpp/HeartbeatService_types.h"
 #include "gen_cpp/PaloBrokerService_types.h"
 #include "gen_cpp/TPaloBrokerService.h"
+#include "io/broker_reader.h"
+#include "io/broker_writer.h"
 #include "olap/file_helper.h"
 #include "runtime/client_cache.h"
 #include "runtime/exec_env.h"
@@ -61,10 +61,10 @@ Status BrokerStorageBackend::download(const std::string& remote, const std::stri
 
     // 3. open local file for write
     FileHandler file_handler;
-    OLAPStatus ost =
+    Status ost =
             file_handler.open_with_mode(local, O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR);
-    if (ost != OLAP_SUCCESS) {
-        return Status::InternalError("failed to open file: " + local);
+    if (!ost.ok()) {
+        return Status::InternalError("failed to open file: {}", local);
     }
 
     // 4. read remote and write to local
@@ -84,8 +84,8 @@ Status BrokerStorageBackend::download(const std::string& remote, const std::stri
 
         if (read_len > 0) {
             ost = file_handler.pwrite(read_buf, read_len, write_offset);
-            if (ost != OLAP_SUCCESS) {
-                return Status::InternalError("failed to write file: " + local);
+            if (!ost.ok()) {
+                return Status::InternalError("failed to write file: {}", local);
             }
 
             write_offset += read_len;
@@ -96,17 +96,21 @@ Status BrokerStorageBackend::download(const std::string& remote, const std::stri
     return Status::OK();
 }
 
+Status BrokerStorageBackend::direct_download(const std::string& remote, std::string* content) {
+    return Status::IOError("broker direct_download not support ");
+}
+
 Status BrokerStorageBackend::upload(const std::string& local, const std::string& remote) {
     // read file and write to broker
     FileHandler file_handler;
-    OLAPStatus ost = file_handler.open(local, O_RDONLY);
-    if (ost != OLAP_SUCCESS) {
-        return Status::InternalError("failed to open file: " + local);
+    Status ost = file_handler.open(local, O_RDONLY);
+    if (!ost.ok()) {
+        return Status::InternalError("failed to open file: {}", local);
     }
 
     size_t file_len = file_handler.length();
     if (file_len == -1) {
-        return Status::InternalError("failed to get length of file: " + local);
+        return Status::InternalError("failed to get length of file: {}", local);
     }
 
     // NOTICE: broker writer must be closed before calling rename
@@ -123,8 +127,8 @@ Status BrokerStorageBackend::upload(const std::string& local, const std::string&
     while (left_len > 0) {
         size_t read_len = left_len > buf_sz ? buf_sz : left_len;
         ost = file_handler.pread(read_buf, read_len, read_offset);
-        if (ost != OLAP_SUCCESS) {
-            return Status::InternalError("failed to read file: " + local);
+        if (!ost.ok()) {
+            return Status::InternalError("failed to read file: {}", local);
         }
         // write through broker
         size_t write_len = 0;
@@ -180,7 +184,7 @@ Status BrokerStorageBackend::rename(const std::string& orig_name, const std::str
         std::stringstream ss;
         ss << "Fail to rename file: " << orig_name << " to: " << new_name << " msg:" << e.what();
         LOG(WARNING) << ss.str();
-        return Status::ThriftRpcError(ss.str());
+        return Status::RpcError(ss.str());
     }
 
     LOG(INFO) << "finished to rename file. orig: " << orig_name << ", new: " << new_name;
@@ -188,7 +192,11 @@ Status BrokerStorageBackend::rename(const std::string& orig_name, const std::str
     return status;
 }
 
-Status BrokerStorageBackend::list(const std::string& remote_path,
+Status BrokerStorageBackend::rename_dir(const std::string& orig_name, const std::string& new_name) {
+    return rename(orig_name, new_name);
+}
+
+Status BrokerStorageBackend::list(const std::string& remote_path, bool contain_md5, bool recursion,
                                   std::map<std::string, FileStat>* files) {
     Status status = Status::OK();
     BrokerServiceConnection client(client_cache(_env), _broker_addr, config::thrift_rpc_timeout_ms,
@@ -256,7 +264,7 @@ Status BrokerStorageBackend::list(const std::string& remote_path,
         std::stringstream ss;
         ss << "failed to list files in remote path: " << remote_path << ", msg: " << e.what();
         LOG(WARNING) << ss.str();
-        return Status::ThriftRpcError(ss.str());
+        return Status::RpcError(ss.str());
     }
 
     return status;
@@ -313,16 +321,28 @@ Status BrokerStorageBackend::rm(const std::string& remote) {
         std::stringstream ss;
         ss << "failed to delete file in remote path: " << remote << ", msg: " << e.what();
         LOG(WARNING) << ss.str();
-        return Status::ThriftRpcError(ss.str());
+        return Status::RpcError(ss.str());
     }
+}
+
+Status BrokerStorageBackend::rmdir(const std::string& remote) {
+    return rm(remote);
 }
 
 Status BrokerStorageBackend::copy(const std::string& src, const std::string& dst) {
     return Status::NotSupported("copy not implemented!");
 }
 
+Status BrokerStorageBackend::copy_dir(const std::string& src, const std::string& dst) {
+    return copy(src, dst);
+}
+
 Status BrokerStorageBackend::mkdir(const std::string& path) {
     return Status::NotSupported("mkdir not implemented!");
+}
+
+Status BrokerStorageBackend::mkdirs(const std::string& path) {
+    return Status::NotSupported("mkdirs not implemented!");
 }
 
 Status BrokerStorageBackend::exist(const std::string& path) {
@@ -356,7 +376,7 @@ Status BrokerStorageBackend::exist(const std::string& path) {
             LOG(WARNING) << ss.str();
             return Status::InternalError(ss.str());
         } else if (!check_rep.isPathExist) {
-            return Status::NotFound(path + " not exists!");
+            return Status::NotFound("{} not exists!", path);
         } else {
             return Status::OK();
         }
@@ -364,8 +384,12 @@ Status BrokerStorageBackend::exist(const std::string& path) {
         std::stringstream ss;
         ss << "failed to check exist: " << path << ", msg: " << e.what();
         LOG(WARNING) << ss.str();
-        return Status::ThriftRpcError(ss.str());
+        return Status::RpcError(ss.str());
     }
+}
+
+Status BrokerStorageBackend::exist_dir(const std::string& path) {
+    return exist(path);
 }
 
 Status BrokerStorageBackend::upload_with_checksum(const std::string& local,

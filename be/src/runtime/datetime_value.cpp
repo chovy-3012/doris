@@ -47,14 +47,6 @@ uint8_t mysql_week_mode(uint32_t mode) {
     return mode;
 }
 
-static bool is_leap(uint32_t year) {
-    return ((year % 4) == 0) && ((year % 100 != 0) || ((year % 400) == 0 && year));
-}
-
-static uint32_t calc_days_in_year(uint32_t year) {
-    return is_leap(year) ? 366 : 365;
-}
-
 RE2 DateTimeValue::time_zone_offset_format_reg("^[+-]{1}\\d{2}\\:\\d{2}$");
 
 bool DateTimeValue::check_range(uint32_t year, uint32_t month, uint32_t day, uint32_t hour,
@@ -102,7 +94,7 @@ bool DateTimeValue::from_date_str(const char* date_str, int len) {
     int digits = pos - ptr;
     bool is_interval_format = false;
 
-    // Compatible with MySQL. Shit!!!
+    // Compatible with MySQL.
     // For YYYYMMDD/YYYYMMDDHHMMSS is 4 digits years
     if (pos == end || *pos == '.') {
         if (digits == 4 || digits == 8 || digits >= 14) {
@@ -122,7 +114,7 @@ bool DateTimeValue::from_date_str(const char* date_str, int len) {
         while (ptr < end && isdigit(*ptr) && (scan_to_delim || field_len--)) {
             temp_val = temp_val * 10 + (*ptr++ - '0');
         }
-        // Imposible
+        // Impossible
         if (temp_val > 999999L) {
             return false;
         }
@@ -1466,6 +1458,8 @@ bool DateTimeValue::from_date_format_str(const char* format, int format_len, con
 }
 
 bool DateTimeValue::date_add_interval(const TimeInterval& interval, TimeUnit unit) {
+    if (!is_valid_date()) return false;
+
     int sign = interval.is_neg ? -1 : 1;
     switch (unit) {
     case MICROSECOND:

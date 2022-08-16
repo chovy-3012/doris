@@ -17,7 +17,7 @@
 
 package org.apache.doris.qe;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ThreadPoolManager;
@@ -28,7 +28,6 @@ import org.apache.doris.mysql.privilege.PrivPredicate;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -40,28 +39,29 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-// 查询请求的调度器
-// 当前的策略比较简单，有请求过来，就为其单独申请一个线程进行服务。
-// TODO(zhaochun): 应当后面考虑本地文件的连接是否可以超过最大连接数
+// The scheduler of query requests
+// Now the strategy is simple, we allocate a thread for it when a request comes.
+// TODO(zhaochun): We should consider if the number of local file connection can >= maximum connections later.
 public class ConnectScheduler {
     private static final Logger LOG = LogManager.getLogger(ConnectScheduler.class);
-    private int maxConnections;
-    private int numberConnection;
-    private AtomicInteger nextConnectionId;
-    private Map<Long, ConnectContext> connectionMap = Maps.newConcurrentMap();
-    private Map<String, AtomicInteger> connByUser = Maps.newHashMap();
-    private ExecutorService executor = ThreadPoolManager.newDaemonCacheThreadPool(Config.max_connection_scheduler_threads_num, "connect-scheduler-pool", true);
+    private final int maxConnections;
+    private final AtomicInteger numberConnection;
+    private final AtomicInteger nextConnectionId;
+    private final Map<Integer, ConnectContext> connectionMap = Maps.newConcurrentMap();
+    private final Map<String, AtomicInteger> connByUser = Maps.newConcurrentMap();
+    private final ExecutorService executor = ThreadPoolManager.newDaemonCacheThreadPool(
+            Config.max_connection_scheduler_threads_num, "connect-scheduler-pool", true);
 
     // Use a thread to check whether connection is timeout. Because
     // 1. If use a scheduler, the task maybe a huge number when query is messy.
     //    Let timeout is 10m, and 5000 qps, then there are up to 3000000 tasks in scheduler.
     // 2. Use a thread to poll maybe lose some accurate, but is enough to us.
-    private ScheduledExecutorService checkTimer = ThreadPoolManager.newDaemonScheduledThreadPool(1,
-            "Connect-Scheduler-Check-Timer", true);
+    private final ScheduledExecutorService checkTimer = ThreadPoolManager.newDaemonScheduledThreadPool(1,
+            "connect-scheduler-check-timer", true);
 
     public ConnectScheduler(int maxConnections) {
         this.maxConnections = maxConnections;
-        numberConnection = 0;
+        numberConnection = new AtomicInteger(0);
         nextConnectionId = new AtomicInteger(0);
         checkTimer.scheduleAtFixedRate(new TimeoutChecker(), 0, 1000L, TimeUnit.MILLISECONDS);
     }
@@ -70,10 +70,8 @@ public class ConnectScheduler {
         @Override
         public void run() {
             long now = System.currentTimeMillis();
-            synchronized (ConnectScheduler.this) {
-                for (ConnectContext connectContext : connectionMap.values()) {
-                    connectContext.checkTimeout(now);
-                }
+            for (ConnectContext connectContext : connectionMap.values()) {
+                connectContext.checkTimeout(now);
             }
         }
     }
@@ -88,7 +86,7 @@ public class ConnectScheduler {
 
         context.setConnectionId(nextConnectionId.getAndAdd(1));
         // no necessary for nio.
-        if(context instanceof NConnectContext){
+        if (context instanceof NConnectContext) {
             return true;
         }
         executor.submit(new LoopHandler(context));
@@ -96,59 +94,58 @@ public class ConnectScheduler {
     }
 
     // Register one connection with its connection id.
-    public synchronized boolean registerConnection(ConnectContext ctx) {
-        if (numberConnection >= maxConnections) {
+    public boolean registerConnection(ConnectContext ctx) {
+        if (numberConnection.incrementAndGet() > maxConnections) {
+            numberConnection.decrementAndGet();
             return false;
         }
         // Check user
-        if (connByUser.get(ctx.getQualifiedUser()) == null) {
-            connByUser.put(ctx.getQualifiedUser(), new AtomicInteger(0));
-        }
-        int conns = connByUser.get(ctx.getQualifiedUser()).get();
+        connByUser.putIfAbsent(ctx.getQualifiedUser(), new AtomicInteger(0));
+        AtomicInteger conns = connByUser.get(ctx.getQualifiedUser());
         if (ctx.getIsTempUser()) {
-            if (conns >= LdapAuthenticate.getMaxConn()) {
+            if (conns.incrementAndGet() > LdapAuthenticate.getMaxConn()) {
+                conns.decrementAndGet();
+                numberConnection.decrementAndGet();
                 return false;
             }
-        } else if (conns >= ctx.getCatalog().getAuth().getMaxConn(ctx.getQualifiedUser())) {
+        } else if (conns.incrementAndGet() > ctx.getEnv().getAuth().getMaxConn(ctx.getQualifiedUser())) {
+            conns.decrementAndGet();
+            numberConnection.decrementAndGet();
             return false;
         }
-        numberConnection++;
-        connByUser.get(ctx.getQualifiedUser()).incrementAndGet();
-        connectionMap.put((long) ctx.getConnectionId(), ctx);
+        connectionMap.put(ctx.getConnectionId(), ctx);
         return true;
     }
 
-    public synchronized void unregisterConnection(ConnectContext ctx) {
+    public void unregisterConnection(ConnectContext ctx) {
         ctx.closeTxn();
-        if (connectionMap.remove((long) ctx.getConnectionId()) != null) {
-            numberConnection--;
+        if (connectionMap.remove(ctx.getConnectionId()) != null) {
             AtomicInteger conns = connByUser.get(ctx.getQualifiedUser());
             if (conns != null) {
                 conns.decrementAndGet();
             }
+            numberConnection.decrementAndGet();
         }
     }
 
-    public synchronized ConnectContext getContext(long connectionId) {
+    public ConnectContext getContext(int connectionId) {
         return connectionMap.get(connectionId);
     }
 
-    public synchronized int getConnectionNum() {
-        return numberConnection;
+    public int getConnectionNum() {
+        return numberConnection.get();
     }
 
-    public synchronized List<ConnectContext.ThreadInfo> listConnection(String user) {
+    public List<ConnectContext.ThreadInfo> listConnection(String user, boolean isFull) {
         List<ConnectContext.ThreadInfo> infos = Lists.newArrayList();
-
         for (ConnectContext ctx : connectionMap.values()) {
             // Check auth
-            if (!ctx.getQualifiedUser().equals(user) &&
-                    !Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(),
-                                                                           PrivPredicate.GRANT)) {
+            if (!ctx.getQualifiedUser().equals(user) && !Env.getCurrentEnv().getAuth()
+                    .checkGlobalPriv(ConnectContext.get(), PrivPredicate.GRANT)) {
                 continue;
             }
-            
-            infos.add(ctx.toThreadInfo());
+
+            infos.add(ctx.toThreadInfo(isFull));
         }
         return infos;
     }

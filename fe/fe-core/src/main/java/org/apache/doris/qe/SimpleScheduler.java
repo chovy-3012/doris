@@ -17,7 +17,7 @@
 
 package org.apache.doris.qe;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.Reference;
@@ -30,7 +30,6 @@ import org.apache.doris.thrift.TScanRangeLocation;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -49,7 +48,7 @@ public class SimpleScheduler {
     // backend id -> (try time, reason)
     // There will be multi threads to read and modify this map.
     // But only one thread (UpdateBlacklistThread) will modify the `Pair`.
-    // So using concurrenty map is enough
+    // So using concurrent map is enough
     private static Map<Long, Pair<Integer, String>> blacklistBackends = Maps.newConcurrentMap();
     private static UpdateBlacklistThread updateBlacklistThread;
 
@@ -87,8 +86,8 @@ public class SimpleScheduler {
         }
 
         // no backend returned
-        throw new UserException(SystemInfoService.NO_SCAN_NODE_BACKEND_AVAILABLE_MSG +
-                getBackendErrorMsg(locations.stream().map(l -> l.backend_id).collect(Collectors.toList()),
+        throw new UserException(SystemInfoService.NO_SCAN_NODE_BACKEND_AVAILABLE_MSG
+                + getBackendErrorMsg(locations.stream().map(l -> l.backend_id).collect(Collectors.toList()),
                         backends, locations.size()));
     }
 
@@ -119,8 +118,8 @@ public class SimpleScheduler {
         }
 
         // no backend returned
-        throw new UserException(SystemInfoService.NO_SCAN_NODE_BACKEND_AVAILABLE_MSG +
-                getBackendErrorMsg(locations.stream().map(l -> l.backend_id).collect(Collectors.toList()),
+        throw new UserException(SystemInfoService.NO_SCAN_NODE_BACKEND_AVAILABLE_MSG
+                + getBackendErrorMsg(locations.stream().map(l -> l.backend_id).collect(Collectors.toList()),
                         backends, locations.size()));
     }
 
@@ -199,11 +198,11 @@ public class SimpleScheduler {
     public static boolean isAvailable(Backend backend) {
         return (backend != null && backend.isQueryAvailable() && !blacklistBackends.containsKey(backend.getId()));
     }
-    
+
     private static class UpdateBlacklistThread implements Runnable {
         private static final Logger LOG = LogManager.getLogger(UpdateBlacklistThread.class);
         private static Thread thread;
-        
+
         public UpdateBlacklistThread() {
             thread = new Thread(this, "UpdateBlacklistThread");
             thread.setDaemon(true);
@@ -212,14 +211,14 @@ public class SimpleScheduler {
         public void start() {
             thread.start();
         }
- 
+
         @Override
         public void run() {
             LOG.debug("UpdateBlacklistThread is start to run");
             while (true) {
                 try {
                     Thread.sleep(1000L);
-                    SystemInfoService clusterInfoService = Catalog.getCurrentSystemInfo();
+                    SystemInfoService clusterInfoService = Env.getCurrentSystemInfo();
                     LOG.debug("UpdateBlacklistThread retry begin");
 
                     Iterator<Map.Entry<Long, Pair<Integer, String>>> iterator = blacklistBackends.entrySet().iterator();
@@ -238,7 +237,8 @@ public class SimpleScheduler {
                                 iterator.remove();
                                 LOG.warn("remove backend {} from black list. reach max try time", backendId);
                             } else {
-                                LOG.debug("blacklistBackends backendID={} retryTimes={}", backendId, entry.getValue().first);
+                                LOG.debug("blacklistBackends backendID={} retryTimes={}",
+                                        backendId, entry.getValue().first);
                             }
                         }
                     }
@@ -251,7 +251,7 @@ public class SimpleScheduler {
             }
         }
     }
-    
+
     public static TNetworkAddress getHostByCurrentBackend(Map<TNetworkAddress, Long> addressToBackendID) {
         int backendSize = addressToBackendID.size();
         if (backendSize == 0) {

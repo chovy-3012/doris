@@ -17,12 +17,15 @@
 
 package org.apache.doris.ldap;
 
-import com.clearspring.analytics.util.Lists;
+import org.apache.doris.catalog.Env;
+import org.apache.doris.common.LdapConfig;
+import org.apache.doris.mysql.privilege.PaloAuth;
+import org.apache.doris.persist.LdapInfo;
+
+import com.google.common.collect.Lists;
 import mockit.Delegate;
 import mockit.Expectations;
 import mockit.Mocked;
-import org.apache.doris.common.LdapConfig;
-import org.apache.doris.common.util.SymmetricEncryption;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -38,8 +41,32 @@ public class LdapClientTest {
     @Mocked
     private LdapTemplate ldapTemplate;
 
+    @Mocked
+    private Env env;
+
+    @Mocked
+    private PaloAuth auth;
+
+    private LdapInfo ldapInfo = new LdapInfo(ADMIN_PASSWORD);
+
     @Before
     public void setUp() {
+        new Expectations() {
+            {
+                Env.getCurrentEnv();
+                minTimes = 0;
+                result = env;
+
+                env.getAuth();
+                minTimes = 0;
+                result = auth;
+
+                auth.getLdapInfo();
+                minTimes = 0;
+                result = ldapInfo;
+            }
+        };
+
         LdapConfig.ldap_authentication_enabled = true;
         LdapConfig.ldap_host = "127.0.0.1";
         LdapConfig.ldap_port = 389;
@@ -47,9 +74,8 @@ public class LdapClientTest {
         LdapConfig.ldap_user_basedn = "dc=baidu,dc=com";
         LdapConfig.ldap_group_basedn = "ou=group,dc=baidu,dc=com";
         LdapConfig.ldap_user_filter = "(&(uid={login}))";
-        LdapClient.init(SymmetricEncryption.encrypt(ADMIN_PASSWORD));
     }
-    
+
     private void mockLdapTemplateSearch(List list) {
         new Expectations() {
             {

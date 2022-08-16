@@ -14,13 +14,13 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/partitioned-hash-table.inline.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_EXEC_NEW_PARTITIONED_HASH_TABLE_INLINE_H
-#define DORIS_BE_SRC_EXEC_NEW_PARTITIONED_HASH_TABLE_INLINE_H
+#pragma once
 
 #include "exec/partitioned_hash_table.h"
-#include "exprs/expr.h"
-#include "exprs/expr_context.h"
 
 namespace doris {
 
@@ -249,8 +249,7 @@ inline PartitionedHashTable::DuplicateNode* PartitionedHashTable::InsertDuplicat
     return AppendNextNode(bucket);
 }
 
-inline TupleRow* IR_ALWAYS_INLINE PartitionedHashTable::GetRow(HtData& htdata,
-                                                               TupleRow* row) const {
+inline TupleRow* PartitionedHashTable::GetRow(HtData& htdata, TupleRow* row) const {
     if (stores_tuples()) {
         return reinterpret_cast<TupleRow*>(&htdata.tuple);
     } else {
@@ -260,8 +259,7 @@ inline TupleRow* IR_ALWAYS_INLINE PartitionedHashTable::GetRow(HtData& htdata,
     }
 }
 
-inline TupleRow* IR_ALWAYS_INLINE PartitionedHashTable::GetRow(Bucket* bucket,
-                                                               TupleRow* row) const {
+inline TupleRow* PartitionedHashTable::GetRow(Bucket* bucket, TupleRow* row) const {
     DCHECK(bucket != nullptr);
     if (UNLIKELY(stores_duplicates() && bucket->hasDuplicates)) {
         DuplicateNode* duplicate = bucket->bucketData.duplicates;
@@ -272,7 +270,7 @@ inline TupleRow* IR_ALWAYS_INLINE PartitionedHashTable::GetRow(Bucket* bucket,
     }
 }
 
-inline TupleRow* IR_ALWAYS_INLINE PartitionedHashTable::Iterator::GetRow() const {
+inline TupleRow* PartitionedHashTable::Iterator::GetRow() const {
     DCHECK(!AtEnd());
     DCHECK(table_ != nullptr);
     DCHECK(scratch_row_ != nullptr);
@@ -285,7 +283,7 @@ inline TupleRow* IR_ALWAYS_INLINE PartitionedHashTable::Iterator::GetRow() const
     }
 }
 
-inline Tuple* IR_ALWAYS_INLINE PartitionedHashTable::Iterator::GetTuple() const {
+inline Tuple* PartitionedHashTable::Iterator::GetTuple() const {
     DCHECK(!AtEnd());
     DCHECK(table_->stores_tuples());
     Bucket* bucket = &table_->buckets_[bucket_idx_];
@@ -406,5 +404,3 @@ inline int64_t PartitionedHashTable::NumInsertsBeforeResize() const {
 }
 
 } // namespace doris
-
-#endif

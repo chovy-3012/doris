@@ -27,7 +27,6 @@ import org.apache.doris.thrift.TUnit;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -399,8 +398,7 @@ public class RuntimeProfile {
     // Because the profile of summary and child fragment is not a real parent-child relationship
     // Each child profile needs to calculate the time proportion consumed by itself
     public void computeTimeInChildProfile() {
-        childMap.values().
-                forEach(RuntimeProfile::computeTimeInProfile);
+        childMap.values().forEach(RuntimeProfile::computeTimeInProfile);
     }
 
     public void computeTimeInProfile() {
@@ -468,7 +466,10 @@ public class RuntimeProfile {
     // Returns the value to which the specified key is mapped;
     // or null if this map contains no mapping for the key.
     public String getInfoString(String key) {
-        return infoStrings.get(key);
+        return infoStrings.getOrDefault(key, "");
+    }
+
+    public Map<String, String> getInfoStrings() {
+        return infoStrings;
     }
 }
-

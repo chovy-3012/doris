@@ -94,7 +94,7 @@ struct TQueryOptions {
   8: optional i32 max_io_buffers = 0
   9: optional bool allow_unsupported_formats = 0
   10: optional i64 default_order_by_limit = -1
-  11: optional string debug_action = ""
+  // 11: optional string debug_action = "" // Never used
   12: optional i64 mem_limit = 2147483648
   13: optional bool abort_on_default_limit_exceeded = 0
   14: optional i32 query_timeout = 3600
@@ -156,6 +156,15 @@ struct TQueryOptions {
 
   // the resource limitation of this query
   42: optional TResourceLimit resource_limit
+
+  // show bitmap data in result, if use this in mysql cli may make the terminal
+  // output corrupted character
+  43: optional bool return_object_data_as_binary = false
+
+  // trim tailing spaces while querying external table and stream load
+  44: optional bool trim_tailing_spaces_for_external_table_query = false
+
+  45: optional bool enable_function_pushdown;
 }
     
 
@@ -220,9 +229,9 @@ struct TPlanFragmentExecParams {
   5: list<TPlanFragmentDestination> destinations
 
   // Debug options: perform some action in a particular phase of a particular node
-  6: optional Types.TPlanNodeId debug_node_id
-  7: optional PlanNodes.TExecNodePhase debug_phase
-  8: optional PlanNodes.TDebugAction debug_action
+  // 6: optional Types.TPlanNodeId debug_node_id // Never used
+  // 7: optional PlanNodes.TExecNodePhase debug_phase // Never used
+  // 8: optional PlanNodes.TDebugAction debug_action // Never used
 
   // Id of this fragment in its role as a sender.
   9: optional i32 sender_id
@@ -245,6 +254,9 @@ struct TQueryGlobals {
   // time_zone is the timezone this query used.
   // If this value is set, BE will ignore now_string
   3: optional string time_zone
+
+  // Set to true if in a load plan, the max_filter_ratio is 0.0
+  4: optional bool load_zero_tolerance = false;
 }
 
 
@@ -267,8 +279,18 @@ struct TTxnParams {
   10: optional double max_filter_ratio
 }
 
-// ExecPlanFragment
+// Definition of global dict, global dict is used to accelerate query performance of low cardinality data
+struct TColumnDict {
+  1: optional Types.TPrimitiveType type
+  2: list<string> str_dict  // map one string to a integer, using offset as id
+}
 
+struct TGlobalDict {
+  1: optional map<i32, TColumnDict> dicts,  // map dict_id to column dict
+  2: optional map<i32, i32> slot_dicts // map from slot id to column dict id, because 2 or more column may share the dict
+}
+
+// ExecPlanFragment
 struct TExecPlanFragmentParams {
   1: required PaloInternalServiceVersion protocol_version
 
@@ -320,9 +342,19 @@ struct TExecPlanFragmentParams {
 
   // If true, all @Common components is unset and should be got from BE's cache
   // If this field is unset or it set to false, all @Common components is set.
-  16: optional bool is_simplified_param
+  16: optional bool is_simplified_param = false;
   17: optional TTxnParams txn_conf
   18: optional i64 backend_id
+  19: optional TGlobalDict global_dict  // scan node could use the global dict to encode the string value to an integer
+
+  // If it is true, after this fragment is prepared on the BE side,
+  // it will wait for the FE to send the "start execution" command before it is actually executed.
+  // Otherwise, the fragment will start executing directly on the BE side.
+  20: optional bool need_wait_execution_trigger = false;
+}
+
+struct TExecPlanFragmentParamsList {
+    1: optional list<TExecPlanFragmentParams> paramsList;
 }
 
 struct TExecPlanFragmentResult {
@@ -351,6 +383,7 @@ struct TExprMap {
 struct TFoldConstantParams {
   1: required map<string, map<string, Exprs.TExpr>> expr_map
   2: required TQueryGlobals query_globals
+  3: optional bool vec_exec
 }
 
 // TransmitData

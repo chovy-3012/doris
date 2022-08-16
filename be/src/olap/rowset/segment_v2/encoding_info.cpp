@@ -25,6 +25,7 @@
 #include "olap/rowset/segment_v2/binary_plain_page.h"
 #include "olap/rowset/segment_v2/binary_prefix_page.h"
 #include "olap/rowset/segment_v2/bitshuffle_page.h"
+#include "olap/rowset/segment_v2/bitshuffle_page_pre_decoder.h"
 #include "olap/rowset/segment_v2/frame_of_reference_page.h"
 #include "olap/rowset/segment_v2/plain_page.h"
 #include "olap/rowset/segment_v2/rle_page.h"
@@ -57,12 +58,12 @@ struct TypeEncodingTraits<type, PLAIN_ENCODING, CppType> {
 template <FieldType type>
 struct TypeEncodingTraits<type, PLAIN_ENCODING, Slice> {
     static Status create_page_builder(const PageBuilderOptions& opts, PageBuilder** builder) {
-        *builder = new BinaryPlainPageBuilder(opts);
+        *builder = new BinaryPlainPageBuilder<type>(opts);
         return Status::OK();
     }
     static Status create_page_decoder(const Slice& data, const PageDecoderOptions& opts,
                                       PageDecoder** decoder) {
-        *decoder = new BinaryPlainPageDecoder(data, opts);
+        *decoder = new BinaryPlainPageDecoder<type>(data, opts);
         return Status::OK();
     }
 };
@@ -130,6 +131,34 @@ struct TypeEncodingTraits<OLAP_FIELD_TYPE_DATE, FOR_ENCODING,
     static Status create_page_decoder(const Slice& data, const PageDecoderOptions& opts,
                                       PageDecoder** decoder) {
         *decoder = new FrameOfReferencePageDecoder<OLAP_FIELD_TYPE_DATE>(data, opts);
+        return Status::OK();
+    }
+};
+
+template <>
+struct TypeEncodingTraits<OLAP_FIELD_TYPE_DATEV2, FOR_ENCODING,
+                          typename CppTypeTraits<OLAP_FIELD_TYPE_DATEV2>::CppType> {
+    static Status create_page_builder(const PageBuilderOptions& opts, PageBuilder** builder) {
+        *builder = new FrameOfReferencePageBuilder<OLAP_FIELD_TYPE_DATEV2>(opts);
+        return Status::OK();
+    }
+    static Status create_page_decoder(const Slice& data, const PageDecoderOptions& opts,
+                                      PageDecoder** decoder) {
+        *decoder = new FrameOfReferencePageDecoder<OLAP_FIELD_TYPE_DATEV2>(data, opts);
+        return Status::OK();
+    }
+};
+
+template <>
+struct TypeEncodingTraits<OLAP_FIELD_TYPE_DATETIMEV2, FOR_ENCODING,
+                          typename CppTypeTraits<OLAP_FIELD_TYPE_DATETIMEV2>::CppType> {
+    static Status create_page_builder(const PageBuilderOptions& opts, PageBuilder** builder) {
+        *builder = new FrameOfReferencePageBuilder<OLAP_FIELD_TYPE_DATETIMEV2>(opts);
+        return Status::OK();
+    }
+    static Status create_page_decoder(const Slice& data, const PageDecoderOptions& opts,
+                                      PageDecoder** decoder) {
+        *decoder = new FrameOfReferencePageDecoder<OLAP_FIELD_TYPE_DATETIMEV2>(data, opts);
         return Status::OK();
     }
 };
@@ -267,6 +296,14 @@ EncodingInfoResolver::EncodingInfoResolver() {
     _add_map<OLAP_FIELD_TYPE_DATE, PLAIN_ENCODING>();
     _add_map<OLAP_FIELD_TYPE_DATE, FOR_ENCODING, true>();
 
+    _add_map<OLAP_FIELD_TYPE_DATEV2, BIT_SHUFFLE>();
+    _add_map<OLAP_FIELD_TYPE_DATEV2, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_DATEV2, FOR_ENCODING, true>();
+
+    _add_map<OLAP_FIELD_TYPE_DATETIMEV2, BIT_SHUFFLE>();
+    _add_map<OLAP_FIELD_TYPE_DATETIMEV2, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_DATETIMEV2, FOR_ENCODING, true>();
+
     _add_map<OLAP_FIELD_TYPE_DATETIME, BIT_SHUFFLE>();
     _add_map<OLAP_FIELD_TYPE_DATETIME, PLAIN_ENCODING>();
     _add_map<OLAP_FIELD_TYPE_DATETIME, FOR_ENCODING, true>();
@@ -275,9 +312,23 @@ EncodingInfoResolver::EncodingInfoResolver() {
     _add_map<OLAP_FIELD_TYPE_DECIMAL, PLAIN_ENCODING>();
     _add_map<OLAP_FIELD_TYPE_DECIMAL, BIT_SHUFFLE, true>();
 
+    _add_map<OLAP_FIELD_TYPE_DECIMAL32, BIT_SHUFFLE>();
+    _add_map<OLAP_FIELD_TYPE_DECIMAL32, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_DECIMAL32, BIT_SHUFFLE, true>();
+
+    _add_map<OLAP_FIELD_TYPE_DECIMAL64, BIT_SHUFFLE>();
+    _add_map<OLAP_FIELD_TYPE_DECIMAL64, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_DECIMAL64, BIT_SHUFFLE, true>();
+
+    _add_map<OLAP_FIELD_TYPE_DECIMAL128, BIT_SHUFFLE>();
+    _add_map<OLAP_FIELD_TYPE_DECIMAL128, PLAIN_ENCODING>();
+    _add_map<OLAP_FIELD_TYPE_DECIMAL128, BIT_SHUFFLE, true>();
+
     _add_map<OLAP_FIELD_TYPE_HLL, PLAIN_ENCODING>();
 
     _add_map<OLAP_FIELD_TYPE_OBJECT, PLAIN_ENCODING>();
+
+    _add_map<OLAP_FIELD_TYPE_QUANTILE_STATE, PLAIN_ENCODING>();
 }
 
 EncodingInfoResolver::~EncodingInfoResolver() {
@@ -295,9 +346,8 @@ Status EncodingInfoResolver::get(FieldType data_type, EncodingTypePB encoding_ty
     auto key = std::make_pair(data_type, encoding_type);
     auto it = _encoding_map.find(key);
     if (it == std::end(_encoding_map)) {
-        return Status::InternalError(
-                strings::Substitute("fail to find valid type encoding, type:$0, encoding:$1",
-                                    data_type, encoding_type));
+        return Status::InternalError("fail to find valid type encoding, type:{}, encoding:{}",
+                                     data_type, encoding_type);
     }
     *out = it->second;
     return Status::OK();
@@ -310,7 +360,13 @@ EncodingInfo::EncodingInfo(TraitsClass traits)
         : _create_builder_func(TraitsClass::create_page_builder),
           _create_decoder_func(TraitsClass::create_page_decoder),
           _type(TraitsClass::type),
-          _encoding(TraitsClass::encoding) {}
+          _encoding(TraitsClass::encoding) {
+    if (_encoding == BIT_SHUFFLE) {
+        _data_page_pre_decoder = std::make_unique<BitShufflePagePreDecoder<false>>();
+    } else if (_encoding == DICT_ENCODING) {
+        _data_page_pre_decoder = std::make_unique<BitShufflePagePreDecoder<true>>();
+    }
+}
 
 Status EncodingInfo::get(const TypeInfo* type_info, EncodingTypePB encoding_type,
                          const EncodingInfo** out) {

@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/cloudera/Impala/blob/v0.7refresh/be/src/exec/merge-node.cc
+// and modified by Doris
 
 #include "exec/merge_node.h"
 
@@ -60,13 +63,13 @@ Status MergeNode::init(const TPlanNode& tnode, RuntimeState* state) {
 
 Status MergeNode::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::prepare(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     _tuple_desc = state->desc_tbl().get_tuple_descriptor(_tuple_id);
     DCHECK(_tuple_desc != nullptr);
 
     // Prepare const expr lists.
     for (int i = 0; i < _const_result_expr_ctx_lists.size(); ++i) {
-        RETURN_IF_ERROR(Expr::prepare(_const_result_expr_ctx_lists[i], state, row_desc(),
-                                      expr_mem_tracker()));
+        RETURN_IF_ERROR(Expr::prepare(_const_result_expr_ctx_lists[i], state, row_desc()));
         DCHECK_EQ(_const_result_expr_ctx_lists[i].size(), _tuple_desc->slots().size());
     }
 
@@ -80,8 +83,7 @@ Status MergeNode::prepare(RuntimeState* state) {
 
     // Prepare result expr lists.
     for (int i = 0; i < _result_expr_ctx_lists.size(); ++i) {
-        RETURN_IF_ERROR(Expr::prepare(_result_expr_ctx_lists[i], state, child(i)->row_desc(),
-                                      expr_mem_tracker()));
+        RETURN_IF_ERROR(Expr::prepare(_result_expr_ctx_lists[i], state, child(i)->row_desc()));
         // DCHECK_EQ(_result_expr_ctx_lists[i].size(), _tuple_desc->slots().size());
         DCHECK_EQ(_result_expr_ctx_lists[i].size(), _materialized_slots.size());
     }
@@ -91,6 +93,7 @@ Status MergeNode::prepare(RuntimeState* state) {
 
 Status MergeNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::open(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     // Prepare const expr lists.
     for (int i = 0; i < _const_result_expr_ctx_lists.size(); ++i) {
         RETURN_IF_ERROR(Expr::open(_const_result_expr_ctx_lists[i], state));
@@ -105,9 +108,9 @@ Status MergeNode::open(RuntimeState* state) {
 }
 
 Status MergeNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::GETNEXT));
     RETURN_IF_CANCELLED(state);
     SCOPED_TIMER(_runtime_profile->total_time_counter());
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     // Create new tuple buffer for row_batch.
     int tuple_buffer_size = row_batch->capacity() * _tuple_desc->byte_size();
     void* tuple_buffer = row_batch->tuple_data_pool()->allocate(tuple_buffer_size);
@@ -136,8 +139,8 @@ Status MergeNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) 
         // Row batch was either never set or we're moving on to a different child.
         if (_child_row_batch.get() == nullptr) {
             RETURN_IF_CANCELLED(state);
-            _child_row_batch.reset(new RowBatch(child(_child_idx)->row_desc(), state->batch_size(),
-                                                mem_tracker().get()));
+            _child_row_batch.reset(
+                    new RowBatch(child(_child_idx)->row_desc(), state->batch_size()));
             // Open child and fetch the first row batch.
             RETURN_IF_ERROR(child(_child_idx)->open(state));
             RETURN_IF_ERROR(

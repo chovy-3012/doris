@@ -14,16 +14,17 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/string-parser.hpp
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_STRING_PARSER_H
-#define DORIS_BE_SRC_COMMON_UTIL_STRING_PARSER_H
+#pragma once
 
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-
-#include <string>
 #include <limits>
+#include <string>
 #include <type_traits>
 
 #include "common/compiler_util.h"
@@ -52,14 +53,9 @@ namespace doris {
 //  - Since we know the length, we can parallelize this: i.e. result = 100*s[0] + 10*s[1] + s[2]
 class StringParser {
 public:
-    enum ParseResult {
-        PARSE_SUCCESS = 0,
-        PARSE_FAILURE,
-        PARSE_OVERFLOW,
-        PARSE_UNDERFLOW
-    };
+    enum ParseResult { PARSE_SUCCESS = 0, PARSE_FAILURE, PARSE_OVERFLOW, PARSE_UNDERFLOW };
 
-    template<typename T>
+    template <typename T>
     class StringParseTraits {
     public:
         /// Returns the maximum ascii string length for this type.
@@ -67,10 +63,11 @@ public:
         static int max_ascii_len();
     };
 
-    template<typename T>
+    template <typename T>
     static T numeric_limits(bool negative);
 
-    static inline __int128 get_scale_multiplier(int scale);
+    template <typename T>
+    static T get_scale_multiplier(int scale);
 
     // This is considerably faster than glibc's implementation (25x).
     // In the case of overflow, the max/min value for the data type will be returned.
@@ -78,7 +75,7 @@ public:
     template <typename T>
     static inline T string_to_int(const char* s, int len, ParseResult* result) {
         T ans = string_to_int_internal<T>(s, len, result);
-        if (LIKELY(*result == PARSE_SUCCESS)){
+        if (LIKELY(*result == PARSE_SUCCESS)) {
             return ans;
         }
 
@@ -92,7 +89,7 @@ public:
     template <typename T>
     static inline T string_to_unsigned_int(const char* s, int len, ParseResult* result) {
         T ans = string_to_unsigned_int_internal<T>(s, len, result);
-        if (LIKELY(*result == PARSE_SUCCESS)){
+        if (LIKELY(*result == PARSE_SUCCESS)) {
             return ans;
         }
 
@@ -115,7 +112,7 @@ public:
     template <typename T>
     static inline T string_to_float(const char* s, int len, ParseResult* result) {
         T ans = string_to_float_internal<T>(s, len, result);
-        if (LIKELY(*result == PARSE_SUCCESS)){
+        if (LIKELY(*result == PARSE_SUCCESS)) {
             return ans;
         }
 
@@ -126,7 +123,7 @@ public:
     // Parses a string for 'true' or 'false', case insensitive.
     static inline bool string_to_bool(const char* s, int len, ParseResult* result) {
         bool ans = string_to_bool_internal(s, len, result);
-        if (LIKELY(*result == PARSE_SUCCESS)){
+        if (LIKELY(*result == PARSE_SUCCESS)) {
             return ans;
         }
 
@@ -134,37 +131,38 @@ public:
         return string_to_bool_internal(s + i, len - i, result);
     }
 
-    static inline __int128 string_to_decimal(const char* s, int len,
-	    int type_precision, int type_scale, ParseResult* result);
+    template <typename T>
+    static inline T string_to_decimal(const char* s, int len, int type_precision, int type_scale,
+                                      ParseResult* result);
 
-   
     template <typename T>
     static Status split_string_to_map(const std::string& base, const T element_separator,
-                                      const T key_value_separator, 
+                                      const T key_value_separator,
                                       std::map<std::string, std::string>* result) {
         int key_pos = 0;
         int key_end;
         int val_pos;
         int val_end;
-    
+
         while ((key_end = base.find(key_value_separator, key_pos)) != std::string::npos) {
-            if ((val_pos = base.find_first_not_of(key_value_separator, key_end)) 
-			          == std::string::npos) {
+            if ((val_pos = base.find_first_not_of(key_value_separator, key_end)) ==
+                std::string::npos) {
                 break;
             }
-    	    if ((val_end = base.find(element_separator, val_pos)) == std::string::npos) {
+            if ((val_end = base.find(element_separator, val_pos)) == std::string::npos) {
                 val_end = base.size();
             }
-            result->insert(std::make_pair(base.substr(key_pos, key_end - key_pos), 
-			                              base.substr(val_pos, val_end - val_pos)));
+            result->insert(std::make_pair(base.substr(key_pos, key_end - key_pos),
+                                          base.substr(val_pos, val_end - val_pos)));
             key_pos = val_end;
             if (key_pos != std::string::npos) {
-          	    ++key_pos;
+                ++key_pos;
             }
         }
-    
+
         return Status::OK();
     }
+
 private:
     // This is considerably faster than glibc's implementation.
     // In the case of overflow, the max/min value for the data type will be returned.
@@ -218,7 +216,7 @@ private:
     // Returns the position of the first non-whitespace character in s.
     static inline int skip_leading_whitespace(const char* s, int len) {
         int i = 0;
-        while(i < len && is_whitespace(s[i])) {
+        while (i < len && is_whitespace(s[i])) {
             ++i;
         }
         return i;
@@ -226,8 +224,8 @@ private:
 
     // Our own definition of "isspace" that optimize on the ' ' branch.
     static inline bool is_whitespace(const char& c) {
-        return LIKELY(c == ' ')
-                || UNLIKELY(c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r');
+        return LIKELY(c == ' ') ||
+               UNLIKELY(c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r');
     }
 
 }; // end of class StringParser
@@ -288,7 +286,8 @@ inline T StringParser::string_to_int_internal(const char* s, int len, ParseResul
 }
 
 template <typename T>
-inline T StringParser::string_to_unsigned_int_internal(const char* s, int len, ParseResult* result) {
+inline T StringParser::string_to_unsigned_int_internal(const char* s, int len,
+                                                       ParseResult* result) {
     if (UNLIKELY(len <= 0)) {
         *result = PARSE_FAILURE;
         return 0;
@@ -335,8 +334,8 @@ inline T StringParser::string_to_unsigned_int_internal(const char* s, int len, P
 }
 
 template <typename T>
-inline T StringParser::string_to_int_internal(
-        const char* s, int len, int base, ParseResult* result) {
+inline T StringParser::string_to_int_internal(const char* s, int len, int base,
+                                              ParseResult* result) {
     typedef typename std::make_unsigned<T>::type UnsignedT;
     UnsignedT val = 0;
     UnsignedT max_val = StringParser::numeric_limits<T>(false);
@@ -347,10 +346,11 @@ inline T StringParser::string_to_int_internal(
     }
     int i = 0;
     switch (*s) {
-        case '-':
-            negative = true;
-            max_val = StringParser::numeric_limits<T>(false) + 1;
-        case '+': i = 1;
+    case '-':
+        negative = true;
+        max_val = StringParser::numeric_limits<T>(false) + 1;
+    case '+':
+        i = 1;
     }
 
     const T max_div_base = max_val / base;
@@ -452,7 +452,7 @@ inline T StringParser::string_to_float_internal(const char* s, int len, ParseRes
     int first = i;
     for (; i < len; ++i) {
         if (LIKELY(s[i] >= '0' && s[i] <= '9')) {
-            if (s[i] != '0' || sig_figs > 0){
+            if (s[i] != '0' || sig_figs > 0) {
                 ++sig_figs;
             }
             if (decimal) {
@@ -474,9 +474,8 @@ inline T StringParser::string_to_float_internal(const char* s, int len, ParseRes
         } else if (s[i] == 'e' || s[i] == 'E') {
             break;
         } else if (s[i] == 'i' || s[i] == 'I') {
-            if (len > i + 2
-                    && (s[i + 1] == 'n' || s[i + 1] == 'N')
-                    && (s[i + 2] == 'f' || s[i + 2] == 'F')) {
+            if (len > i + 2 && (s[i + 1] == 'n' || s[i + 1] == 'N') &&
+                (s[i + 2] == 'f' || s[i + 2] == 'F')) {
                 // Note: Hive writes inf as Infinity, at least for text. We'll be a little loose
                 // here and interpret any column with inf as a prefix as infinity rather than
                 // checking every remaining byte.
@@ -489,7 +488,7 @@ inline T StringParser::string_to_float_internal(const char* s, int len, ParseRes
             }
         } else if (s[i] == 'n' || s[i] == 'N') {
             if (len > i + 2 && (s[i + 1] == 'a' || s[i + 1] == 'A') &&
-                    (s[i + 2] == 'n' || s[i + 2] == 'N')) {
+                (s[i + 2] == 'n' || s[i + 2] == 'N')) {
                 *result = PARSE_SUCCESS;
                 return negative ? -NAN : NAN;
             } else {
@@ -544,18 +543,15 @@ inline bool StringParser::string_to_bool_internal(const char* s, int len, ParseR
     *result = PARSE_SUCCESS;
 
     if (len >= 4 && (s[0] == 't' || s[0] == 'T')) {
-        bool match = (s[1] == 'r' || s[1] == 'R') &&
-            (s[2] == 'u' || s[2] == 'U') &&
-            (s[3] == 'e' || s[3] == 'E');
+        bool match = (s[1] == 'r' || s[1] == 'R') && (s[2] == 'u' || s[2] == 'U') &&
+                     (s[3] == 'e' || s[3] == 'E');
         if (match && LIKELY(is_all_whitespace(s + 4, len - 4))) {
             return true;
         }
     } else if (len >= 5 && (s[0] == 'f' || s[0] == 'F')) {
-        bool match = (s[1] == 'a' || s[1] == 'A') &&
-            (s[2] == 'l' || s[2] == 'L') &&
-            (s[3] == 's' || s[3] == 'S') &&
-            (s[4] == 'e' || s[4] == 'E');
-        if (match && LIKELY(is_all_whitespace(s + 5, len - 5))){
+        bool match = (s[1] == 'a' || s[1] == 'A') && (s[2] == 'l' || s[2] == 'L') &&
+                     (s[3] == 's' || s[3] == 'S') && (s[4] == 'e' || s[4] == 'E');
+        if (match && LIKELY(is_all_whitespace(s + 5, len - 5))) {
             return false;
         }
     }
@@ -564,87 +560,62 @@ inline bool StringParser::string_to_bool_internal(const char* s, int len, ParseR
     return false;
 }
 
-template<>
+template <>
 __int128 StringParser::numeric_limits<__int128>(bool negative);
 
-template<typename T>
+template <typename T>
 T StringParser::numeric_limits(bool negative) {
     return negative ? std::numeric_limits<T>::min() : std::numeric_limits<T>::max();
 }
 
-template<>
+template <>
+inline int StringParser::StringParseTraits<uint8_t>::max_ascii_len() {
+    return 3;
+}
+
+template <>
+inline int StringParser::StringParseTraits<uint16_t>::max_ascii_len() {
+    return 5;
+}
+
+template <>
+inline int StringParser::StringParseTraits<uint32_t>::max_ascii_len() {
+    return 10;
+}
+
+template <>
+inline int StringParser::StringParseTraits<uint64_t>::max_ascii_len() {
+    return 20;
+}
+
+template <>
 inline int StringParser::StringParseTraits<int8_t>::max_ascii_len() {
     return 3;
 }
 
-template<>
+template <>
 inline int StringParser::StringParseTraits<int16_t>::max_ascii_len() {
     return 5;
 }
 
-template<>
+template <>
 inline int StringParser::StringParseTraits<int32_t>::max_ascii_len() {
     return 10;
 }
 
-template<>
+template <>
 inline int StringParser::StringParseTraits<int64_t>::max_ascii_len() {
     return 19;
 }
 
-template<>
+template <>
 inline int StringParser::StringParseTraits<__int128>::max_ascii_len() {
     return 39;
 }
 
-inline __int128 StringParser::get_scale_multiplier(int scale) {
-    DCHECK_GE(scale, 0);
-    static const __int128 values[] = {
-        static_cast<__int128>(1ll),
-        static_cast<__int128>(10ll),
-        static_cast<__int128>(100ll),
-        static_cast<__int128>(1000ll),
-        static_cast<__int128>(10000ll),
-        static_cast<__int128>(100000ll),
-        static_cast<__int128>(1000000ll),
-        static_cast<__int128>(10000000ll),
-        static_cast<__int128>(100000000ll),
-        static_cast<__int128>(1000000000ll),
-        static_cast<__int128>(10000000000ll),
-        static_cast<__int128>(100000000000ll),
-        static_cast<__int128>(1000000000000ll),
-        static_cast<__int128>(10000000000000ll),
-        static_cast<__int128>(100000000000000ll),
-        static_cast<__int128>(1000000000000000ll),
-        static_cast<__int128>(10000000000000000ll),
-        static_cast<__int128>(100000000000000000ll),
-        static_cast<__int128>(1000000000000000000ll),
-        static_cast<__int128>(1000000000000000000ll) * 10ll,
-        static_cast<__int128>(1000000000000000000ll) * 100ll,
-        static_cast<__int128>(1000000000000000000ll) * 1000ll,
-        static_cast<__int128>(1000000000000000000ll) * 10000ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000ll,
-        static_cast<__int128>(1000000000000000000ll) * 1000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 10000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 1000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 10000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 1000000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 10000000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 1000000000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 10000000000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000000000000000ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000000000000000ll * 10ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000000000000000ll * 100ll,
-        static_cast<__int128>(1000000000000000000ll) * 100000000000000000ll * 1000ll};
-    if (scale >= 0 && scale < 39) return values[scale];
-    return -1;  // Overflow
-}
-
-inline __int128 StringParser::string_to_decimal(const char* s, int len,
-            int type_precision, int type_scale, ParseResult* result) {
+template <typename T>
+inline T StringParser::string_to_decimal(const char* s, int len, int type_precision, int type_scale,
+                                         ParseResult* result) {
     // Special cases:
     //   1) '' == Fail, an empty string fails to parse.
     //   2) '   #   ' == #, leading and trailing white space is ignored.
@@ -663,11 +634,11 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
     bool is_negative = false;
     if (len > 0) {
         switch (*s) {
-            case '-':
-                is_negative = true;
-            case '+':
-                ++s;
-                --len;
+        case '-':
+            is_negative = true;
+        case '+':
+            ++s;
+            --len;
         }
     }
 
@@ -699,7 +670,7 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
     int precision = 0;
     bool found_exponent = false;
     int8_t exponent = 0;
-    __int128 value = 0;
+    T value = 0;
     for (int i = 0; i < len; ++i) {
         const char& c = s[i];
         if (LIKELY('0' <= c && c <= '9')) {
@@ -709,9 +680,9 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
             // 10000000000e-10 into a DECIMAL(1, 0). Adjustments for ignored digits and
             // an exponent will be made later.
             if (LIKELY(type_precision > precision)) {
-                value = (value * 10) + (c - '0');  // Benchmarks are faster with parenthesis...
+                value = (value * 10) + (c - '0'); // Benchmarks are faster with parenthesis...
             }
-            DCHECK(value >= 0);  // For some reason //DCHECK_GE doesn't work with __int128.
+            DCHECK(value >= 0); // For some reason //DCHECK_GE doesn't work with __int128.
             ++precision;
             scale += found_dot;
         } else if (c == '.' && LIKELY(!found_dot)) {
@@ -732,7 +703,7 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
                 return 0;
             }
             *result = StringParser::PARSE_SUCCESS;
-            value *= get_scale_multiplier(type_scale - scale);
+            value *= get_scale_multiplier<T>(type_scale - scale);
             return is_negative ? -value : value;
         }
     }
@@ -743,7 +714,7 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
         // Ex: 0.1e3 (which at this point would have precision == 1 and scale == 1), the
         //     scale must be set to 0 and the value set to 100 which means a precision of 3.
         precision += exponent - scale;
-        value *= get_scale_multiplier(exponent - scale);
+        value *= get_scale_multiplier<T>(exponent - scale);
         scale = 0;
     } else {
         // Ex: 100e-4, the scale must be set to 4 but no adjustment to the value is needed,
@@ -753,7 +724,9 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
     }
     // Ex: 0.001, at this point would have precision 1 and scale 3 since leading zeros
     //     were ignored during previous parsing.
-    if (scale > precision) precision = scale;
+    if (scale > precision) {
+        precision = scale;
+    }
 
     // Microbenchmarks show that beyond this point, returning on parse failure is slower
     // than just letting the function run out.
@@ -763,13 +736,15 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
     } else if (UNLIKELY(scale > type_scale)) {
         *result = StringParser::PARSE_UNDERFLOW;
         int shift = scale - type_scale;
-        if (UNLIKELY(truncated_digit_count > 0)) shift -= truncated_digit_count;
+        if (UNLIKELY(truncated_digit_count > 0)) {
+            shift -= truncated_digit_count;
+        }
         if (shift > 0) {
-            __int128 divisor = get_scale_multiplier(shift);
+            T divisor = get_scale_multiplier<T>(shift);
             if (LIKELY(divisor >= 0)) {
                 value /= divisor;
-                __int128 remainder = value % divisor;
-                if (abs(remainder) >= (divisor >> 1)) {
+                T remainder = value % divisor;
+                if ((remainder > 0 ? remainder : -remainder) >= (divisor >> 1)) {
                     value += 1;
                 }
             } else {
@@ -783,12 +758,10 @@ inline __int128 StringParser::string_to_decimal(const char* s, int len,
     }
 
     if (type_scale > scale) {
-        value *= get_scale_multiplier(type_scale - scale);
+        value *= get_scale_multiplier<T>(type_scale - scale);
     }
 
     return is_negative ? -value : value;
 }
 
 } // end namespace doris
-
-#endif // end of DORIS_BE_SRC_COMMON_UTIL_STRING_PARSER_HPP

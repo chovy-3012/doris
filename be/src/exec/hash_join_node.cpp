@@ -14,17 +14,20 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/hash-join-node.cc
+// and modified by Doris
 #include "exec/hash_join_node.h"
 
 #include <memory>
 #include <sstream>
 
-#include "exec/hash_table.hpp"
+#include "common/utils.h"
+#include "exec/hash_table.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
-#include "exprs/in_predicate.h"
 #include "exprs/runtime_filter.h"
-#include "exprs/slot_ref.h"
+#include "exprs/runtime_filter_slots.h"
 #include "gen_cpp/PlanNodes_types.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_filter_mgr.h"
@@ -85,8 +88,8 @@ Status HashJoinNode::init(const TPlanNode& tnode, RuntimeState* state) {
     }
 
     for (const auto& filter_desc : _runtime_filter_descs) {
-        RETURN_IF_ERROR(state->runtime_filter_mgr()->regist_filter(RuntimeFilterRole::PRODUCER,
-                                                                   filter_desc));
+        RETURN_IF_ERROR(state->runtime_filter_mgr()->regist_filter(
+                RuntimeFilterRole::PRODUCER, filter_desc, state->query_options()));
     }
 
     return Status::OK();
@@ -94,8 +97,9 @@ Status HashJoinNode::init(const TPlanNode& tnode, RuntimeState* state) {
 
 Status HashJoinNode::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::prepare(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
 
-    _build_pool.reset(new MemPool(mem_tracker().get()));
+    _build_pool.reset(new MemPool(mem_tracker()));
     _build_timer = ADD_TIMER(runtime_profile(), "BuildTime");
     _push_down_timer = ADD_TIMER(runtime_profile(), "PushDownTime");
     _push_compute_timer = ADD_TIMER(runtime_profile(), "PushDownComputeTime");
@@ -109,14 +113,11 @@ Status HashJoinNode::prepare(RuntimeState* state) {
     _hash_table_list_max_size = ADD_COUNTER(runtime_profile(), "HashTableMaxList", TUnit::UNIT);
     // build and probe exprs are evaluated in the context of the rows produced by our
     // right and left children, respectively
-    RETURN_IF_ERROR(
-            Expr::prepare(_build_expr_ctxs, state, child(1)->row_desc(), expr_mem_tracker()));
-    RETURN_IF_ERROR(
-            Expr::prepare(_probe_expr_ctxs, state, child(0)->row_desc(), expr_mem_tracker()));
+    RETURN_IF_ERROR(Expr::prepare(_build_expr_ctxs, state, child(1)->row_desc()));
+    RETURN_IF_ERROR(Expr::prepare(_probe_expr_ctxs, state, child(0)->row_desc()));
 
     // _other_join_conjuncts are evaluated in the context of the rows produced by this node
-    RETURN_IF_ERROR(
-            Expr::prepare(_other_join_conjunct_ctxs, state, _row_descriptor, expr_mem_tracker()));
+    RETURN_IF_ERROR(Expr::prepare(_other_join_conjunct_ctxs, state, _row_descriptor));
 
     _result_tuple_row_size = _row_descriptor.tuple_descriptors().size() * sizeof(Tuple*);
 
@@ -143,10 +144,10 @@ Status HashJoinNode::prepare(RuntimeState* state) {
             (std::find(_is_null_safe_eq_join.begin(), _is_null_safe_eq_join.end(), true) !=
              _is_null_safe_eq_join.end());
     _hash_tbl.reset(new HashTable(_build_expr_ctxs, _probe_expr_ctxs, _build_tuple_size,
-                                  stores_nulls, _is_null_safe_eq_join, id(), mem_tracker(), 1024));
+                                  stores_nulls, _is_null_safe_eq_join, id(),
+                                  state->batch_size() * 2));
 
-    _probe_batch.reset(
-            new RowBatch(child(0)->row_desc(), state->batch_size(), mem_tracker().get()));
+    _probe_batch.reset(new RowBatch(child(0)->row_desc(), state->batch_size()));
 
     return Status::OK();
 }
@@ -156,7 +157,6 @@ Status HashJoinNode::close(RuntimeState* state) {
         return Status::OK();
     }
 
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::CLOSE));
     // Must reset _probe_batch in close() to release resources
     _probe_batch.reset(nullptr);
 
@@ -170,16 +170,12 @@ Status HashJoinNode::close(RuntimeState* state) {
     Expr::close(_build_expr_ctxs, state);
     Expr::close(_probe_expr_ctxs, state);
     Expr::close(_other_join_conjunct_ctxs, state);
-#if 0
-    for (auto iter : _push_down_expr_ctxs) {
-        iter->close(state);
-    }
-#endif
 
     return ExecNode::close(state);
 }
 
 void HashJoinNode::build_side_thread(RuntimeState* state, std::promise<Status>* status) {
+    SCOPED_ATTACH_TASK(state);
     status->set_value(construct_hash_table(state));
 }
 
@@ -188,7 +184,7 @@ Status HashJoinNode::construct_hash_table(RuntimeState* state) {
     // The hash join node needs to keep in memory all build tuples, including the tuple
     // row ptrs.  The row ptrs are copied into the hash table's internal structure so they
     // don't need to be stored in the _build_pool.
-    RowBatch build_batch(child(1)->row_desc(), state->batch_size(), mem_tracker().get());
+    RowBatch build_batch(child(1)->row_desc(), state->batch_size());
     RETURN_IF_ERROR(child(1)->open(state));
 
     SCOPED_TIMER(_build_timer);
@@ -219,8 +215,8 @@ Status HashJoinNode::construct_hash_table(RuntimeState* state) {
 
 Status HashJoinNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::open(state));
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::OPEN));
     SCOPED_TIMER(_runtime_profile->total_time_counter());
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_CANCELLED(state);
     RETURN_IF_ERROR(Expr::open(_build_expr_ctxs, state));
     RETURN_IF_ERROR(Expr::open(_probe_expr_ctxs, state));
@@ -300,13 +296,12 @@ Status HashJoinNode::open(RuntimeState* state) {
 }
 
 Status HashJoinNode::get_next(RuntimeState* state, RowBatch* out_batch, bool* eos) {
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::GETNEXT));
     RETURN_IF_CANCELLED(state);
     // In most cases, no additional memory overhead will be applied for at this stage,
     // but if the expression calculation in this node needs to apply for additional memory,
     // it may cause the memory to exceed the limit.
-    RETURN_IF_LIMIT_EXCEEDED(state, "Hash join, while execute get_next.");
     SCOPED_TIMER(_runtime_profile->total_time_counter());
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
 
     if (reached_limit()) {
         *eos = true;
@@ -643,6 +638,145 @@ void HashJoinNode::create_output_row(TupleRow* out, TupleRow* probe, TupleRow* b
     } else {
         memcpy(out_ptr + _probe_tuple_row_size, build, _build_tuple_row_size);
     }
+}
+
+// Wrapper around ExecNode's eval conjuncts with a different function name.
+// This lets us distinguish between the join conjuncts vs. non-join conjuncts
+// for codegen.
+// Note: don't declare this static.  LLVM will pick the fastcc calling convention and
+// we will not be able to replace the functions with codegen'd versions.
+// TODO: explicitly set the calling convention?
+// TODO: investigate using fastcc for all codegen internal functions?
+bool eval_other_join_conjuncts(ExprContext* const* ctxs, int num_ctxs, TupleRow* row) {
+    return ExecNode::eval_conjuncts(ctxs, num_ctxs, row);
+}
+
+// CreateOutputRow, EvalOtherJoinConjuncts, and EvalConjuncts are replaced by
+// codegen.
+int HashJoinNode::process_probe_batch(RowBatch* out_batch, RowBatch* probe_batch,
+                                      int max_added_rows) {
+    // This path does not handle full outer or right outer joins
+    DCHECK(!_match_all_build);
+
+    int row_idx = out_batch->add_rows(max_added_rows);
+    DCHECK(row_idx != RowBatch::INVALID_ROW_INDEX);
+    uint8_t* out_row_mem = reinterpret_cast<uint8_t*>(out_batch->get_row(row_idx));
+    TupleRow* out_row = reinterpret_cast<TupleRow*>(out_row_mem);
+
+    int rows_returned = 0;
+    int probe_rows = probe_batch->num_rows();
+
+    ExprContext* const* other_conjunct_ctxs = &_other_join_conjunct_ctxs[0];
+    int num_other_conjunct_ctxs = _other_join_conjunct_ctxs.size();
+
+    ExprContext* const* conjunct_ctxs = &_conjunct_ctxs[0];
+    int num_conjunct_ctxs = _conjunct_ctxs.size();
+
+    while (true) {
+        // Create output row for each matching build row
+        while (_hash_tbl_iterator.has_next()) {
+            TupleRow* matched_build_row = _hash_tbl_iterator.get_row();
+            _hash_tbl_iterator.next<true>();
+            create_output_row(out_row, _current_probe_row, matched_build_row);
+
+            if (!eval_other_join_conjuncts(other_conjunct_ctxs, num_other_conjunct_ctxs, out_row)) {
+                continue;
+            }
+
+            _matched_probe = true;
+
+            // left_anti_join: equal match won't return
+            if (_join_op == TJoinOp::LEFT_ANTI_JOIN) {
+                _hash_tbl_iterator = _hash_tbl->end();
+                break;
+            }
+
+            if (eval_conjuncts(conjunct_ctxs, num_conjunct_ctxs, out_row)) {
+                ++rows_returned;
+
+                // Filled up out batch or hit limit
+                if (UNLIKELY(rows_returned == max_added_rows)) {
+                    goto end;
+                }
+
+                // Advance to next out row
+                out_row_mem += out_batch->row_byte_size();
+                out_row = reinterpret_cast<TupleRow*>(out_row_mem);
+            }
+
+            // Handle left semi-join
+            if (_match_one_build) {
+                _hash_tbl_iterator = _hash_tbl->end();
+                break;
+            }
+        }
+
+        // Handle left outer-join and left semi-join
+        if ((!_matched_probe && _match_all_probe) ||
+            ((!_matched_probe && _join_op == TJoinOp::LEFT_ANTI_JOIN))) {
+            create_output_row(out_row, _current_probe_row, nullptr);
+            _matched_probe = true;
+
+            if (ExecNode::eval_conjuncts(conjunct_ctxs, num_conjunct_ctxs, out_row)) {
+                ++rows_returned;
+
+                if (UNLIKELY(rows_returned == max_added_rows)) {
+                    goto end;
+                }
+
+                // Advance to next out row
+                out_row_mem += out_batch->row_byte_size();
+                out_row = reinterpret_cast<TupleRow*>(out_row_mem);
+            }
+        }
+
+        if (!_hash_tbl_iterator.has_next()) {
+            // Advance to the next probe row
+            if (UNLIKELY(_probe_batch_pos == probe_rows)) {
+                goto end;
+            }
+            if (++_probe_counter % RELEASE_CONTEXT_COUNTER == 0) {
+                ExprContext::free_local_allocations(_probe_expr_ctxs);
+                ExprContext::free_local_allocations(_build_expr_ctxs);
+            }
+            _current_probe_row = probe_batch->get_row(_probe_batch_pos++);
+            _hash_tbl_iterator = _hash_tbl->find(_current_probe_row);
+            _matched_probe = false;
+        }
+    }
+
+end:
+
+    if (_match_one_build && _matched_probe) {
+        _hash_tbl_iterator = _hash_tbl->end();
+    }
+
+    out_batch->commit_rows(rows_returned);
+    return rows_returned;
+}
+
+// when build table has too many duplicated rows, the collisions will be very serious,
+// so in some case will don't need to store duplicated value in hash table, we can build an unique one
+Status HashJoinNode::process_build_batch(RuntimeState* state, RowBatch* build_batch) {
+    // insert build row into our hash table
+    if (_build_unique) {
+        for (int i = 0; i < build_batch->num_rows(); ++i) {
+            TupleRow* tuple_row = nullptr;
+            if (_hash_tbl->emplace_key(build_batch->get_row(i), &tuple_row)) {
+                build_batch->get_row(i)->deep_copy(tuple_row,
+                                                   child(1)->row_desc().tuple_descriptors(),
+                                                   _build_pool.get(), false);
+            }
+        }
+    } else {
+        // take ownership of tuple data of build_batch
+        _build_pool->acquire_data(build_batch->tuple_data_pool(), false);
+        RETURN_IF_ERROR(_hash_tbl->resize_buckets_ahead(build_batch->num_rows()));
+        for (int i = 0; i < build_batch->num_rows(); ++i) {
+            _hash_tbl->insert_without_check(build_batch->get_row(i));
+        }
+    }
+    return Status::OK();
 }
 
 } // namespace doris

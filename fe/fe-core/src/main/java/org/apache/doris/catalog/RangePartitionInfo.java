@@ -17,15 +17,14 @@
 
 package org.apache.doris.catalog;
 
-import com.google.common.collect.Lists;
 import org.apache.doris.analysis.PartitionKeyDesc;
 import org.apache.doris.analysis.SinglePartitionDesc;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.util.RangeUtils;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Range;
 
 import java.io.DataInput;
@@ -35,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public class RangePartitionInfo extends PartitionInfo {
 
@@ -80,11 +80,12 @@ public class RangePartitionInfo extends PartitionInfo {
     // create a new range and check it.
     private Range<PartitionKey> createAndCheckNewRange(PartitionKeyDesc partKeyDesc, boolean isTemp)
             throws AnalysisException, DdlException {
-        boolean isFixedPartitionKeyValueType = partKeyDesc.getPartitionType() == PartitionKeyDesc.PartitionKeyValueType.FIXED;
+        boolean isFixedPartitionKeyValueType
+                = partKeyDesc.getPartitionType() == PartitionKeyDesc.PartitionKeyValueType.FIXED;
 
         // generate partitionItemEntryList
-        List<Map.Entry<Long, PartitionItem>> partitionItemEntryList = isFixedPartitionKeyValueType ?
-                        getPartitionItemEntryList(isTemp, false) : getPartitionItemEntryList(isTemp, true);
+        List<Map.Entry<Long, PartitionItem>> partitionItemEntryList = isFixedPartitionKeyValueType
+                        ? getPartitionItemEntryList(isTemp, false) : getPartitionItemEntryList(isTemp, true);
 
         if (isFixedPartitionKeyValueType) {
             return createNewRangeForFixedPartitionValueType(partKeyDesc, partitionItemEntryList);
@@ -123,7 +124,7 @@ public class RangePartitionInfo extends PartitionInfo {
     }
 
     private Range<PartitionKey> createNewRangeForFixedPartitionValueType(PartitionKeyDesc partKeyDesc,
-                                                                         List<Map.Entry<Long, PartitionItem>> partitionItemEntryList)
+            List<Map.Entry<Long, PartitionItem>> partitionItemEntryList)
             throws AnalysisException, DdlException {
         PartitionKey lowKey = PartitionKey.createPartitionKey(partKeyDesc.getLowerValues(), partitionColumns);
         PartitionKey upperKey =  PartitionKey.createPartitionKey(partKeyDesc.getUpperValues(), partitionColumns);
@@ -138,10 +139,9 @@ public class RangePartitionInfo extends PartitionInfo {
     }
 
     private Range<PartitionKey> createNewRangeForLessThanPartitionValueType(PartitionKey newRangeUpper,
-                                                                            Range<PartitionKey> lastRange, Range<PartitionKey> currentRange)
-            throws AnalysisException, DdlException {
-        PartitionKey lowKey = lastRange == null ?
-                PartitionKey.createInfinityPartitionKey(partitionColumns, false) : lastRange.upperEndpoint();
+            Range<PartitionKey> lastRange, Range<PartitionKey> currentRange) throws AnalysisException, DdlException {
+        PartitionKey lowKey = lastRange == null
+                ? PartitionKey.createInfinityPartitionKey(partitionColumns, false) : lastRange.upperEndpoint();
 
         // check: [left, right), error if left equal right
         if (lowKey.compareTo(newRangeUpper) >= 0) {
@@ -171,7 +171,8 @@ public class RangePartitionInfo extends PartitionInfo {
     }
 
     @Override
-    public void checkPartitionItemListsConflict(List<PartitionItem> list1, List<PartitionItem> list2) throws DdlException {
+    public void checkPartitionItemListsConflict(List<PartitionItem> list1, List<PartitionItem> list2)
+            throws DdlException {
         RangeUtils.checkRangeConflict(list1, list2);
     }
 
@@ -222,13 +223,11 @@ public class RangePartitionInfo extends PartitionInfo {
             idToItem.put(partitionId, new RangePartitionItem(range));
         }
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_77) {
-            counter = in.readInt();
-            for (int i = 0; i < counter; i++) {
-                long partitionId = in.readLong();
-                Range<PartitionKey> range = RangeUtils.readRange(in);
-                idToTempItem.put(partitionId, new RangePartitionItem(range));
-            }
+        counter = in.readInt();
+        for (int i = 0; i < counter; i++) {
+            long partitionId = in.readLong();
+            Range<PartitionKey> range = RangeUtils.readRange(in);
+            idToTempItem.put(partitionId, new RangePartitionItem(range));
         }
     }
 
@@ -261,6 +260,13 @@ public class RangePartitionInfo extends PartitionInfo {
             sb.append(range.lowerEndpoint().toSql());
             sb.append(", ").append(range.upperEndpoint().toSql()).append(")");
 
+            Optional.ofNullable(this.idToStoragePolicy.get(entry.getKey())).ifPresent(p -> {
+                if (!p.equals("")) {
+                    sb.append("PROPERTIES (\"STORAGE POLICY\" = \"");
+                    sb.append(p).append("\")");
+                }
+            });
+
             if (partitionId != null) {
                 partitionId.add(entry.getKey());
                 break;
@@ -275,4 +281,3 @@ public class RangePartitionInfo extends PartitionInfo {
         return sb.toString();
     }
 }
-

@@ -49,7 +49,7 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
             return this == IndexState.NORMAL;
         }
     }
-    
+
     public enum IndexExtState {
         ALL,
         VISIBLE, // index state in NORMAL
@@ -126,7 +126,7 @@ public class MaterializedIndex extends MetaObject implements Writable, GsonPostP
         idToTablets.put(tablet.getId(), tablet);
         tablets.add(tablet);
         if (!isRestore) {
-            Catalog.getCurrentInvertedIndex().addTablet(tablet.getId(), tabletMeta);
+            Env.getCurrentInvertedIndex().addTablet(tablet.getId(), tabletMeta);
         }
     }
 

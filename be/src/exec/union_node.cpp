@@ -14,20 +14,20 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/union-node.cc
+// and modified by Doris
 
 #include "exec/union_node.h"
 
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
+#include "gen_cpp/PlanNodes_types.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
 #include "runtime/tuple.h"
 #include "runtime/tuple_row.h"
-// #include "util/runtime_profile_counters.h"
-#include "gen_cpp/PlanNodes_types.h"
 #include "util/runtime_profile.h"
-
-//
 
 namespace doris {
 
@@ -69,6 +69,7 @@ Status UnionNode::init(const TPlanNode& tnode, RuntimeState* state) {
 Status UnionNode::prepare(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::prepare(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     _tuple_desc = state->desc_tbl().get_tuple_descriptor(_tuple_id);
     DCHECK(_tuple_desc != nullptr);
     _materialize_exprs_evaluate_timer =
@@ -76,7 +77,7 @@ Status UnionNode::prepare(RuntimeState* state) {
     _codegend_union_materialize_batch_fns.resize(_child_expr_lists.size());
     // Prepare const expr lists.
     for (const std::vector<ExprContext*>& exprs : _const_expr_lists) {
-        RETURN_IF_ERROR(Expr::prepare(exprs, state, row_desc(), expr_mem_tracker()));
+        RETURN_IF_ERROR(Expr::prepare(exprs, state, row_desc()));
         // TODO(zc)
         // AddExprCtxsToFree(exprs);
         DCHECK_EQ(exprs.size(), _tuple_desc->slots().size());
@@ -84,8 +85,7 @@ Status UnionNode::prepare(RuntimeState* state) {
 
     // Prepare result expr lists.
     for (int i = 0; i < _child_expr_lists.size(); ++i) {
-        RETURN_IF_ERROR(Expr::prepare(_child_expr_lists[i], state, child(i)->row_desc(),
-                                      expr_mem_tracker()));
+        RETURN_IF_ERROR(Expr::prepare(_child_expr_lists[i], state, child(i)->row_desc()));
         // TODO(zc)
         // AddExprCtxsToFree(_child_expr_lists[i]);
         DCHECK_EQ(_child_expr_lists[i].size(), _tuple_desc->slots().size());
@@ -96,6 +96,7 @@ Status UnionNode::prepare(RuntimeState* state) {
 Status UnionNode::open(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::open(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     // open const expr lists.
     for (const std::vector<ExprContext*>& exprs : _const_expr_lists) {
         RETURN_IF_ERROR(Expr::open(exprs, state));
@@ -154,8 +155,7 @@ Status UnionNode::get_next_materialized(RuntimeState* state, RowBatch* row_batch
         // Child row batch was either never set or we're moving on to a different child.
         if (_child_batch.get() == nullptr) {
             DCHECK_LT(_child_idx, _children.size());
-            _child_batch.reset(new RowBatch(child(_child_idx)->row_desc(), state->batch_size(),
-                                            mem_tracker().get()));
+            _child_batch.reset(new RowBatch(child(_child_idx)->row_desc(), state->batch_size()));
             _child_row_idx = 0;
             // open the current child unless it's the first child, which was already opened in
             // UnionNode::open().
@@ -234,10 +234,8 @@ Status UnionNode::get_next_const(RuntimeState* state, RowBatch* row_batch) {
 
 Status UnionNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::GETNEXT));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_CANCELLED(state);
-    // TODO(zc)
-    // RETURN_IF_ERROR(QueryMaintenance(state));
 
     if (_to_close_child_idx != -1) {
         // The previous child needs to be closed if passthrough was enabled for it. In the non
@@ -277,20 +275,6 @@ Status UnionNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) 
     return Status::OK();
 }
 
-#if 0
-Status UnionNode::reset(RuntimeState* state) {
-    _child_idx = 0;
-    _child_batch.reset();
-    _child_row_idx = 0;
-    _child_eos = false;
-    _const_expr_list_idx = 0;
-    // Since passthrough is disabled in subplans, verify that there is no passthrough child
-    // that needs to be closed.
-    DCHECK_EQ(_to_close_child_idx, -1);
-    return ExecNode::reset(state);
-}
-#endif
-
 Status UnionNode::close(RuntimeState* state) {
     if (is_closed()) return Status::OK();
     _child_batch.reset();
@@ -314,6 +298,48 @@ void UnionNode::debug_string(int indentation_level, std::stringstream* out) cons
     *out << "] \n";
     ExecNode::debug_string(indentation_level, out);
     *out << ")" << std::endl;
+}
+
+void UnionNode::materialize_exprs(const std::vector<ExprContext*>& exprs, TupleRow* row,
+                                  uint8_t* tuple_buf, RowBatch* dst_batch) {
+    DCHECK(!dst_batch->at_capacity());
+    Tuple* dst_tuple = reinterpret_cast<Tuple*>(tuple_buf);
+    TupleRow* dst_row = dst_batch->get_row(dst_batch->add_row());
+    // dst_tuple->materialize_exprs<false, false>(row, *_tuple_desc, exprs,
+    dst_tuple->materialize_exprs<false>(row, *_tuple_desc, exprs, dst_batch->tuple_data_pool(),
+                                        nullptr, nullptr);
+    dst_row->set_tuple(0, dst_tuple);
+    dst_batch->commit_last_row();
+}
+
+void UnionNode::materialize_batch(RowBatch* dst_batch, uint8_t** tuple_buf) {
+    // Take all references to member variables out of the loop to reduce the number of
+    // loads and stores.
+    RowBatch* child_batch = _child_batch.get();
+    int tuple_byte_size = _tuple_desc->byte_size();
+    uint8_t* cur_tuple = *tuple_buf;
+    const std::vector<ExprContext*>& child_exprs = _child_expr_lists[_child_idx];
+
+    int num_rows_to_process = std::min(child_batch->num_rows() - _child_row_idx,
+                                       dst_batch->capacity() - dst_batch->num_rows());
+    FOREACH_ROW_LIMIT(child_batch, _child_row_idx, num_rows_to_process, batch_iter) {
+        TupleRow* child_row = batch_iter.get();
+        materialize_exprs(child_exprs, child_row, cur_tuple, dst_batch);
+        cur_tuple += tuple_byte_size;
+    }
+
+    _child_row_idx += num_rows_to_process;
+    *tuple_buf = cur_tuple;
+}
+
+Status UnionNode::get_error_msg(const std::vector<ExprContext*>& exprs) {
+    for (auto expr_ctx : exprs) {
+        std::string expr_error = expr_ctx->get_error_msg();
+        if (!expr_error.empty()) {
+            return Status::RuntimeError(expr_error);
+        }
+    }
+    return Status::OK();
 }
 
 } // namespace doris

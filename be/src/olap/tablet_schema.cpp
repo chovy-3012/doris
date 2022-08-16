@@ -17,7 +17,14 @@
 
 #include "olap/tablet_schema.h"
 
+#include <gen_cpp/olap_file.pb.h>
+
+#include "gen_cpp/descriptors.pb.h"
 #include "tablet_meta.h"
+#include "vec/aggregate_functions/aggregate_function_reader.h"
+#include "vec/aggregate_functions/aggregate_function_simple_factory.h"
+#include "vec/core/block.h"
+#include "vec/data_types/data_type_factory.hpp"
 
 namespace doris {
 
@@ -54,8 +61,18 @@ FieldType TabletColumn::get_field_type_by_string(const std::string& type_str) {
         type = OLAP_FIELD_TYPE_CHAR;
     } else if (0 == upper_type_str.compare("DATE")) {
         type = OLAP_FIELD_TYPE_DATE;
+    } else if (0 == upper_type_str.compare("DATEV2")) {
+        type = OLAP_FIELD_TYPE_DATEV2;
+    } else if (0 == upper_type_str.compare("DATETIMEV2")) {
+        type = OLAP_FIELD_TYPE_DATETIMEV2;
     } else if (0 == upper_type_str.compare("DATETIME")) {
         type = OLAP_FIELD_TYPE_DATETIME;
+    } else if (0 == upper_type_str.compare("DECIMAL32")) {
+        type = OLAP_FIELD_TYPE_DECIMAL32;
+    } else if (0 == upper_type_str.compare("DECIMAL64")) {
+        type = OLAP_FIELD_TYPE_DECIMAL64;
+    } else if (0 == upper_type_str.compare("DECIMAL128")) {
+        type = OLAP_FIELD_TYPE_DECIMAL128;
     } else if (0 == upper_type_str.compare(0, 7, "DECIMAL")) {
         type = OLAP_FIELD_TYPE_DECIMAL;
     } else if (0 == upper_type_str.compare(0, 7, "VARCHAR")) {
@@ -76,6 +93,8 @@ FieldType TabletColumn::get_field_type_by_string(const std::string& type_str) {
         type = OLAP_FIELD_TYPE_OBJECT;
     } else if (0 == upper_type_str.compare("ARRAY")) {
         type = OLAP_FIELD_TYPE_ARRAY;
+    } else if (0 == upper_type_str.compare("QUANTILE_STATE")) {
+        type = OLAP_FIELD_TYPE_QUANTILE_STATE;
     } else {
         LOG(WARNING) << "invalid type string. [type='" << type_str << "']";
         type = OLAP_FIELD_TYPE_UNKNOWN;
@@ -105,6 +124,8 @@ FieldAggregationMethod TabletColumn::get_aggregation_type_by_string(const std::s
         aggregation_type = OLAP_FIELD_AGGREGATION_HLL_UNION;
     } else if (0 == upper_str.compare("BITMAP_UNION")) {
         aggregation_type = OLAP_FIELD_AGGREGATION_BITMAP_UNION;
+    } else if (0 == upper_str.compare("QUANTILE_UNION")) {
+        aggregation_type = OLAP_FIELD_AGGREGATION_QUANTILE_UNION;
     } else {
         LOG(WARNING) << "invalid aggregation type string. [aggregation='" << str << "']";
         aggregation_type = OLAP_FIELD_AGGREGATION_UNKNOWN;
@@ -157,11 +178,26 @@ std::string TabletColumn::get_string_by_field_type(FieldType type) {
     case OLAP_FIELD_TYPE_DATE:
         return "DATE";
 
+    case OLAP_FIELD_TYPE_DATEV2:
+        return "DATEV2";
+
     case OLAP_FIELD_TYPE_DATETIME:
         return "DATETIME";
 
+    case OLAP_FIELD_TYPE_DATETIMEV2:
+        return "DATETIMEV2";
+
     case OLAP_FIELD_TYPE_DECIMAL:
         return "DECIMAL";
+
+    case OLAP_FIELD_TYPE_DECIMAL32:
+        return "DECIMAL32";
+
+    case OLAP_FIELD_TYPE_DECIMAL64:
+        return "DECIMAL64";
+
+    case OLAP_FIELD_TYPE_DECIMAL128:
+        return "DECIMAL128";
 
     case OLAP_FIELD_TYPE_VARCHAR:
         return "VARCHAR";
@@ -186,6 +222,8 @@ std::string TabletColumn::get_string_by_field_type(FieldType type) {
 
     case OLAP_FIELD_TYPE_OBJECT:
         return "OBJECT";
+    case OLAP_FIELD_TYPE_QUANTILE_STATE:
+        return "QUANTILE_STATE";
 
     default:
         return "UNKNOWN";
@@ -218,6 +256,9 @@ std::string TabletColumn::get_string_by_aggregation_type(FieldAggregationMethod 
     case OLAP_FIELD_AGGREGATION_BITMAP_UNION:
         return "BITMAP_UNION";
 
+    case OLAP_FIELD_AGGREGATION_QUANTILE_UNION:
+        return "QUANTILE_UNION";
+
     default:
         return "UNKNOWN";
     }
@@ -238,12 +279,17 @@ uint32_t TabletColumn::get_field_length_by_type(TPrimitiveType::type type, uint3
         return 16;
     case TPrimitiveType::DATE:
         return 3;
+    case TPrimitiveType::DATEV2:
+        return 4;
     case TPrimitiveType::DATETIME:
+        return 8;
+    case TPrimitiveType::DATETIMEV2:
         return 8;
     case TPrimitiveType::FLOAT:
         return 4;
     case TPrimitiveType::DOUBLE:
         return 8;
+    case TPrimitiveType::QUANTILE_STATE:
     case TPrimitiveType::OBJECT:
         return 16;
     case TPrimitiveType::CHAR:
@@ -255,10 +301,16 @@ uint32_t TabletColumn::get_field_length_by_type(TPrimitiveType::type type, uint3
         return string_length + sizeof(OLAP_STRING_MAX_LENGTH);
     case TPrimitiveType::ARRAY:
         return OLAP_ARRAY_MAX_LENGTH;
+    case TPrimitiveType::DECIMAL32:
+        return 4;
+    case TPrimitiveType::DECIMAL64:
+        return 8;
+    case TPrimitiveType::DECIMAL128:
+        return 16;
     case TPrimitiveType::DECIMALV2:
         return 12; // use 12 bytes in olap engine.
     default:
-        OLAP_LOG_WARNING("unknown field type. [type=%d]", type);
+        LOG(WARNING) << "unknown field type. [type=" << type << "]";
         return 0;
     }
 }
@@ -273,7 +325,7 @@ TabletColumn::TabletColumn(FieldAggregationMethod agg, FieldType type) {
 TabletColumn::TabletColumn(FieldAggregationMethod agg, FieldType filed_type, bool is_nullable) {
     _aggregation = agg;
     _type = filed_type;
-    _length = get_type_info(filed_type)->size();
+    _length = get_scalar_type_info(filed_type)->size();
     _is_nullable = is_nullable;
 }
 
@@ -284,6 +336,20 @@ TabletColumn::TabletColumn(FieldAggregationMethod agg, FieldType filed_type, boo
     _is_nullable = is_nullable;
     _unique_id = unique_id;
     _length = length;
+}
+
+TabletColumn::TabletColumn(const ColumnPB& column) {
+    init_from_pb(column);
+}
+
+TabletColumn::TabletColumn(const TColumn& column) {
+    init_from_thrift(column);
+}
+
+void TabletColumn::init_from_thrift(const TColumn& tcolumn) {
+    ColumnPB column_pb;
+    TabletMeta::init_column_from_tcolumn(tcolumn.col_unique_id, tcolumn, &column_pb);
+    init_from_pb(column_pb);
 }
 
 void TabletColumn::init_from_pb(const ColumnPB& column) {
@@ -319,10 +385,6 @@ void TabletColumn::init_from_pb(const ColumnPB& column) {
     } else {
         _has_bitmap_index = false;
     }
-    _has_referenced_column = column.has_referenced_column_id();
-    if (_has_referenced_column) {
-        _referenced_column_id = column.referenced_column_id();
-    }
     if (column.has_aggregation()) {
         _aggregation = get_aggregation_type_by_string(column.aggregation());
     }
@@ -337,7 +399,7 @@ void TabletColumn::init_from_pb(const ColumnPB& column) {
     }
 }
 
-void TabletColumn::to_schema_pb(ColumnPB* column) {
+void TabletColumn::to_schema_pb(ColumnPB* column) const {
     column->set_unique_id(_unique_id);
     column->set_name(_col_name);
     column->set_type(get_string_by_field_type(_type));
@@ -356,15 +418,12 @@ void TabletColumn::to_schema_pb(ColumnPB* column) {
         column->set_is_bf_column(_is_bf_column);
     }
     column->set_aggregation(get_string_by_aggregation_type(_aggregation));
-    if (_has_referenced_column) {
-        column->set_referenced_column_id(_referenced_column_id);
-    }
     if (_has_bitmap_index) {
         column->set_has_bitmap_index(_has_bitmap_index);
     }
     column->set_visible(_visible);
 
-    if (_type == FieldType::OLAP_FIELD_TYPE_ARRAY) {
+    if (_type == OLAP_FIELD_TYPE_ARRAY) {
         DCHECK(_sub_columns.size() == 1) << "ARRAY type has more than 1 children types.";
         ColumnPB* child = column->add_children_columns();
         _sub_columns[0].to_schema_pb(child);
@@ -373,6 +432,7 @@ void TabletColumn::to_schema_pb(ColumnPB* column) {
 
 uint32_t TabletColumn::mem_size() const {
     auto size = sizeof(TabletColumn);
+    size += _col_name.size();
     if (_has_default_value) {
         size += _default_value.size();
     }
@@ -388,6 +448,38 @@ void TabletColumn::add_sub_column(TabletColumn& sub_column) {
     _sub_column_count += 1;
 }
 
+vectorized::AggregateFunctionPtr TabletColumn::get_aggregate_function(
+        vectorized::DataTypes argument_types, std::string suffix) const {
+    std::string agg_name = TabletColumn::get_string_by_aggregation_type(_aggregation) + suffix;
+    std::transform(agg_name.begin(), agg_name.end(), agg_name.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+
+    return vectorized::AggregateFunctionSimpleFactory::instance().get(
+            agg_name, argument_types, {}, argument_types.back()->is_nullable());
+}
+
+void TabletSchema::append_column(TabletColumn column) {
+    if (column.is_key()) {
+        _num_key_columns++;
+    }
+    if (column.is_nullable()) {
+        _num_null_columns++;
+    }
+    _field_name_to_index[column.name()] = _num_columns;
+    _field_id_to_index[column.unique_id()] = _num_columns;
+    _cols.push_back(std::move(column));
+    _num_columns++;
+}
+
+void TabletSchema::clear_columns() {
+    _field_name_to_index.clear();
+    _field_id_to_index.clear();
+    _num_columns = 0;
+    _num_null_columns = 0;
+    _num_key_columns = 0;
+    _cols.clear();
+}
+
 void TabletSchema::init_from_pb(const TabletSchemaPB& schema) {
     _keys_type = schema.keys_type();
     _num_columns = 0;
@@ -395,6 +487,7 @@ void TabletSchema::init_from_pb(const TabletSchemaPB& schema) {
     _num_null_columns = 0;
     _cols.clear();
     _field_name_to_index.clear();
+    _field_id_to_index.clear();
     for (auto& column_pb : schema.column()) {
         TabletColumn column;
         column.init_from_pb(column_pb);
@@ -405,6 +498,7 @@ void TabletSchema::init_from_pb(const TabletSchemaPB& schema) {
             _num_null_columns++;
         }
         _field_name_to_index[column.name()] = _num_columns;
+        _field_id_to_index[column.unique_id()] = _num_columns;
         _cols.emplace_back(std::move(column));
         _num_columns++;
     }
@@ -424,26 +518,96 @@ void TabletSchema::init_from_pb(const TabletSchemaPB& schema) {
     _sequence_col_idx = schema.sequence_col_idx();
     _sort_type = schema.sort_type();
     _sort_col_num = schema.sort_col_num();
+    _compression_type = schema.compression_type();
+    _schema_version = schema.schema_version();
 }
 
-void TabletSchema::to_schema_pb(TabletSchemaPB* tablet_meta_pb) {
-    tablet_meta_pb->set_keys_type(_keys_type);
+void TabletSchema::copy_from(const TabletSchema& tablet_schema) {
+    TabletSchemaPB tablet_schema_pb;
+    tablet_schema.to_schema_pb(&tablet_schema_pb);
+    init_from_pb(tablet_schema_pb);
+}
+
+std::string TabletSchema::to_key() const {
+    TabletSchemaPB pb;
+    to_schema_pb(&pb);
+    return pb.SerializeAsString();
+}
+
+void TabletSchema::build_current_tablet_schema(int64_t index_id, int32_t version,
+                                               const POlapTableIndexSchema& index,
+                                               const TabletSchema& ori_tablet_schema) {
+    // copy from ori_tablet_schema
+    _keys_type = ori_tablet_schema.keys_type();
+    _num_short_key_columns = ori_tablet_schema.num_short_key_columns();
+    _num_rows_per_row_block = ori_tablet_schema.num_rows_per_row_block();
+    _compress_kind = ori_tablet_schema.compress_kind();
+
+    // todo(yixiu): unique_id
+    _next_column_unique_id = ori_tablet_schema.next_column_unique_id();
+    _is_in_memory = ori_tablet_schema.is_in_memory();
+    _delete_sign_idx = ori_tablet_schema.delete_sign_idx();
+    _sequence_col_idx = ori_tablet_schema.sequence_col_idx();
+    _sort_type = ori_tablet_schema.sort_type();
+    _sort_col_num = ori_tablet_schema.sort_col_num();
+
+    // copy from table_schema_param
+    _schema_version = version;
+    _num_columns = 0;
+    _num_key_columns = 0;
+    _num_null_columns = 0;
+    bool has_bf_columns = false;
+    _cols.clear();
+    _field_name_to_index.clear();
+    _field_id_to_index.clear();
+
+    for (auto& pcolumn : index.columns_desc()) {
+        TabletColumn column;
+        column.init_from_pb(pcolumn);
+        if (column.is_key()) {
+            _num_key_columns++;
+        }
+        if (column.is_nullable()) {
+            _num_null_columns++;
+        }
+        if (column.is_bf_column()) {
+            has_bf_columns = true;
+        }
+        _field_name_to_index[column.name()] = _num_columns;
+        _field_id_to_index[column.unique_id()] = _num_columns;
+        _cols.emplace_back(std::move(column));
+        _num_columns++;
+    }
+
+    if (has_bf_columns) {
+        _has_bf_fpp = true;
+        _bf_fpp = ori_tablet_schema.bloom_filter_fpp();
+    } else {
+        _has_bf_fpp = false;
+        _bf_fpp = BLOOM_FILTER_DEFAULT_FPP;
+    }
+}
+
+void TabletSchema::to_schema_pb(TabletSchemaPB* tablet_schema_pb) const {
+    tablet_schema_pb->set_keys_type(_keys_type);
     for (auto& col : _cols) {
-        ColumnPB* column = tablet_meta_pb->add_column();
+        ColumnPB* column = tablet_schema_pb->add_column();
         col.to_schema_pb(column);
     }
-    tablet_meta_pb->set_num_short_key_columns(_num_short_key_columns);
-    tablet_meta_pb->set_num_rows_per_row_block(_num_rows_per_row_block);
-    tablet_meta_pb->set_compress_kind(_compress_kind);
+    tablet_schema_pb->set_num_short_key_columns(_num_short_key_columns);
+    tablet_schema_pb->set_num_rows_per_row_block(_num_rows_per_row_block);
+    tablet_schema_pb->set_compress_kind(_compress_kind);
     if (_has_bf_fpp) {
-        tablet_meta_pb->set_bf_fpp(_bf_fpp);
+        tablet_schema_pb->set_bf_fpp(_bf_fpp);
     }
-    tablet_meta_pb->set_next_column_unique_id(_next_column_unique_id);
-    tablet_meta_pb->set_is_in_memory(_is_in_memory);
-    tablet_meta_pb->set_delete_sign_idx(_delete_sign_idx);
-    tablet_meta_pb->set_sequence_col_idx(_sequence_col_idx);
-    tablet_meta_pb->set_sort_type(_sort_type);
-    tablet_meta_pb->set_sort_col_num(_sort_col_num);
+    tablet_schema_pb->set_next_column_unique_id(_next_column_unique_id);
+    tablet_schema_pb->set_is_in_memory(_is_in_memory);
+    tablet_schema_pb->set_delete_sign_idx(_delete_sign_idx);
+    tablet_schema_pb->set_sequence_col_idx(_sequence_col_idx);
+    tablet_schema_pb->set_sort_type(_sort_type);
+    tablet_schema_pb->set_sort_col_num(_sort_col_num);
+    tablet_schema_pb->set_schema_version(_schema_version);
+    tablet_schema_pb->set_compression_type(_compression_type);
 }
 
 uint32_t TabletSchema::mem_size() const {
@@ -474,6 +638,11 @@ int32_t TabletSchema::field_index(const std::string& field_name) const {
     return (found == _field_name_to_index.end()) ? -1 : found->second;
 }
 
+int32_t TabletSchema::field_index(int32_t col_unique_id) const {
+    const auto& found = _field_id_to_index.find(col_unique_id);
+    return (found == _field_id_to_index.end()) ? -1 : found->second;
+}
+
 const std::vector<TabletColumn>& TabletSchema::columns() const {
     return _cols;
 }
@@ -488,6 +657,31 @@ void TabletSchema::init_field_index_for_test() {
     for (int i = 0; i < _cols.size(); ++i) {
         _field_name_to_index[_cols[i].name()] = i;
     }
+}
+
+vectorized::Block TabletSchema::create_block(
+        const std::vector<uint32_t>& return_columns,
+        const std::unordered_set<uint32_t>* tablet_columns_need_convert_null) const {
+    vectorized::Block block;
+    for (int i = 0; i < return_columns.size(); ++i) {
+        const auto& col = _cols[return_columns[i]];
+        bool is_nullable = (tablet_columns_need_convert_null != nullptr &&
+                            tablet_columns_need_convert_null->find(return_columns[i]) !=
+                                    tablet_columns_need_convert_null->end());
+        auto data_type = vectorized::DataTypeFactory::instance().create_data_type(col, is_nullable);
+        auto column = data_type->create_column();
+        block.insert({std::move(column), data_type, col.name()});
+    }
+    return block;
+}
+
+vectorized::Block TabletSchema::create_block() const {
+    vectorized::Block block;
+    for (const auto& col : _cols) {
+        auto data_type = vectorized::DataTypeFactory::instance().create_data_type(col);
+        block.insert({data_type->create_column(), data_type, col.name()});
+    }
+    return block;
 }
 
 bool operator==(const TabletColumn& a, const TabletColumn& b) {
@@ -509,11 +703,6 @@ bool operator==(const TabletColumn& a, const TabletColumn& b) {
     if (a._length != b._length) return false;
     if (a._index_length != b._index_length) return false;
     if (a._is_bf_column != b._is_bf_column) return false;
-    if (a._has_referenced_column != b._has_referenced_column) return false;
-    if (a._has_referenced_column) {
-        if (a._referenced_column_id != b._referenced_column_id) return false;
-        if (a._referenced_column != b._referenced_column) return false;
-    }
     if (a._has_bitmap_index != b._has_bitmap_index) return false;
     return true;
 }

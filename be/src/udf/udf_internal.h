@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/udf/udf-internal.h
+// and modified by Doris
 
-#ifndef DORIS_BE_UDF_UDF_INTERNAL_H
-#define DORIS_BE_UDF_UDF_INTERNAL_H
+#pragma once
 
 #include <string.h>
 
@@ -32,6 +34,7 @@ namespace doris {
 class FreePool;
 class MemPool;
 class RuntimeState;
+struct ColumnPtrWrapper;
 
 // This class actually implements the interface of FunctionContext. This is split to
 // hide the details from the external header.
@@ -66,6 +69,8 @@ public:
     doris_udf::FunctionContext* clone(MemPool* pool);
 
     void set_constant_args(const std::vector<doris_udf::AnyVal*>& constant_args);
+
+    void set_constant_cols(const std::vector<doris::ColumnPtrWrapper*>& cols);
 
     uint8_t* varargs_buffer() { return _varargs_buffer; }
 
@@ -169,6 +174,8 @@ private:
     // value of the argument.
     std::vector<doris_udf::AnyVal*> _constant_args;
 
+    std::vector<doris::ColumnPtrWrapper*> _constant_cols;
+
     // Used by ScalarFnCall to store the arguments when running without codegen. Allows us
     // to pass AnyVal* arguments to the scalar function directly, rather than codegening a
     // call that passes the correct AnyVal subclass pointer type.
@@ -181,5 +188,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

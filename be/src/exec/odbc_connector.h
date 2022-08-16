@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_QUERY_EXEC_ODBC_CONNECTOR_H
-#define DORIS_BE_SRC_QUERY_EXEC_ODBC_CONNECTOR_H
+#pragma once
 
 #include <fmt/format.h>
 #include <sql.h>
@@ -28,11 +27,14 @@
 
 #include "common/status.h"
 #include "exprs/expr_context.h"
-#include "gen_cpp/Types_types.h"
 #include "runtime/descriptors.h"
 #include "runtime/row_batch.h"
 
 namespace doris {
+
+namespace vectorized {
+class VExprContext;
+}
 
 struct ODBCConnectorParam {
     std::string connect_string;
@@ -74,7 +76,11 @@ public:
     // write for ODBC table
     Status init_to_write(RuntimeProfile* profile);
     Status append(const std::string& table_name, RowBatch* batch, uint32_t start_send_row,
-                  uint32_t* num_row_sent);
+                  uint32_t* num_rows_sent);
+
+    Status append(const std::string& table_name, vectorized::Block* block,
+                  const std::vector<vectorized::VExprContext*>& _output_vexpr_ctxs,
+                  uint32_t start_send_row, uint32_t* num_rows_sent);
 
     // use in ODBC transaction
     Status begin_trans();  // should be call after connect and before query or init_to_write
@@ -112,7 +118,6 @@ private:
     bool _is_in_transaction;
 
     SQLSMALLINT _field_num;
-    uint64_t _row_count;
 
     SQLHENV _env;
     SQLHDBC _dbc;
@@ -122,5 +127,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

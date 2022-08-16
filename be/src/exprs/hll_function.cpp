@@ -18,6 +18,7 @@
 #include "exprs/hll_function.h"
 
 #include "exprs/anyval_util.h"
+#include "olap/hll.h"
 #include "util/hash_util.hpp"
 #include "util/slice.h"
 
@@ -99,7 +100,7 @@ BigIntVal HllFunctions::hll_get_value(FunctionContext*, const StringVal& src) {
 
 BigIntVal HllFunctions::hll_cardinality(FunctionContext* ctx, const StringVal& input) {
     if (input.is_null) {
-        return BigIntVal::null();
+        return BigIntVal();
     }
     StringVal dst;
     hll_init(ctx, &dst);

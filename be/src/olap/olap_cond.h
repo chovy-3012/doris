@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_OLAP_COND_H
-#define DORIS_BE_SRC_OLAP_OLAP_COND_H
+#pragma once
 
 #include <functional>
 #include <map>
@@ -35,7 +34,7 @@
 namespace doris {
 
 class WrapperField;
-class RowCursorCell;
+struct RowCursorCell;
 
 enum CondOp {
     OP_NULL = -1, // invalid op
@@ -68,11 +67,10 @@ public:
     Cond() = default;
     ~Cond();
 
-    OLAPStatus init(const TCondition& tcond, const TabletColumn& column);
+    Status init(const TCondition& tcond, const TabletColumn& column);
 
     // 用一行数据的指定列同条件进行比较，如果符合过滤条件，
     // 即按照此条件，行应被过滤掉，则返回true，否则返回false
-    bool eval(const RowCursorCell& cell) const;
     bool eval(const KeyRange& statistic) const;
 
     // 通过单列上的单个删除条件对version进行过滤
@@ -103,11 +101,7 @@ public:
     }
     ~CondColumn();
 
-    OLAPStatus add_cond(const TCondition& tcond, const TabletColumn& column);
-
-    // 对一行数据中的指定列，用所有过滤条件进行比较，如果所有条件都满足，则过滤此行
-    // Return true means this row should be filtered out, otherwise return false
-    bool eval(const RowCursor& row) const;
+    Status add_cond(const TCondition& tcond, const TabletColumn& column);
 
     // Return true if the rowset should be pruned
     bool eval(const std::pair<WrapperField*, WrapperField*>& statistic) const;
@@ -132,7 +126,7 @@ public:
         return false;
     }
 
-    inline bool is_key() const { return _is_key; }
+    bool is_key() const { return _is_key; }
 
     const std::vector<Cond*>& conds() const { return _conds; }
 
@@ -164,23 +158,13 @@ public:
     bool empty() const { return _columns.empty(); }
 
     // TODO(yingchun): should do it in constructor
-    void set_tablet_schema(const TabletSchema* schema) { _schema = schema; }
+    void set_tablet_schema(TabletSchemaSPtr schema) { _schema = schema; }
 
     // 如果成功，则_columns中增加一项，如果失败则无视此condition，同时输出日志
     // 对于下列情况，将不会被处理
     // 1. column不属于key列
     // 2. column类型是double, float
-    OLAPStatus append_condition(const TCondition& condition);
-
-    // 通过所有列上的删除条件对RowCursor进行过滤
-    // Return true means this row should be filtered out, otherwise return false
-    bool delete_conditions_eval(const RowCursor& row) const;
-
-    // Return true if the rowset should be pruned
-    bool rowset_pruning_filter(const std::vector<KeyRange>& zone_maps) const;
-
-    // Whether the rowset satisfied delete condition
-    int delete_pruning_filter(const std::vector<KeyRange>& zone_maps) const;
+    Status append_condition(const TCondition& condition);
 
     const CondColumns& columns() const { return _columns; }
 
@@ -192,7 +176,7 @@ private:
     }
 
 private:
-    const TabletSchema* _schema = nullptr;
+    TabletSchemaSPtr _schema = nullptr;
     // CondColumns in _index_conds are in 'AND' relationship
     CondColumns _columns; // list of condition column
 
@@ -200,5 +184,3 @@ private:
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_OLAP_COND_H

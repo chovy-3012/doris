@@ -14,22 +14,23 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/agg-fn-evaluator.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_AGG_FN_EVALUATOR_H
-#define DORIS_BE_SRC_QUERY_EXPRS_AGG_FN_EVALUATOR_H
+#pragma once
 
 #include <string>
 #include <vector>
 
-#include "gen_cpp/Exprs_types.h"
-#include "udf/udf.h"
-//#include "exprs/opcode_registry.h"
 #include "exprs/expr_context.h"
 #include "exprs/hybrid_map.h"
+#include "gen_cpp/Exprs_types.h"
 #include "runtime/descriptors.h"
 #include "runtime/runtime_state.h"
 #include "runtime/tuple.h"
-#include "util/hash_util.hpp"
+#include "udf/udf.h"
+#include "udf/udf_internal.h"
 
 namespace doris {
 
@@ -37,7 +38,7 @@ class AggregationNode;
 class TExprNode;
 
 // This class evaluates aggregate functions. Aggregate functions can either be
-// builtins or external UDAs. For both of types types, they can either use codegen
+// builtins or external UDAs. For both of types, they can either use codegen
 // or not.
 // This class provides an interface that's 1:1 with the UDA interface and serves
 // as glue code between the TupleRow/Tuple signature used by the AggregationNode
@@ -79,8 +80,7 @@ public:
     // TODO: should we give them their own pool?
     Status prepare(RuntimeState* state, const RowDescriptor& desc, MemPool* pool,
                    const SlotDescriptor* intermediate_slot_desc,
-                   const SlotDescriptor* output_slot_desc,
-                   const std::shared_ptr<MemTracker>& mem_tracker, FunctionContext** agg_fn_ctx);
+                   const SlotDescriptor* output_slot_desc, FunctionContext** agg_fn_ctx);
 
     Status open(RuntimeState* state, FunctionContext* agg_fn_ctx);
 
@@ -146,8 +146,8 @@ public:
     // Indicate which type of this value : int type;
     static const size_t DATETIME_SIZE = 16;
 
-    inline void update_mem_limlits(int len);
-    inline void update_mem_trackers(bool is_filter, bool is_add_buckets, int len);
+    void update_mem_limlits(int len);
+    void update_mem_trackers(bool is_filter, bool is_add_buckets, int len);
     bool count_distinct_data_filter(TupleRow* row, Tuple* dst);
     bool sum_distinct_data_filter(TupleRow* row, Tuple* dst);
     bool is_multi_distinct() { return _is_multi_distinct; }
@@ -187,7 +187,7 @@ private:
     std::vector<ExprContext*> _input_exprs_ctxs;
     std::unique_ptr<char[]> _string_buffer;   //for count distinct
     int _string_buffer_len;                   //for count distinct
-    std::shared_ptr<MemTracker> _mem_tracker; // saved c'tor param
+    std::unique_ptr<MemTracker> _mem_tracker; // saved c'tor param
 
     const TypeDescriptor _return_type;
     const TypeDescriptor _intermediate_type;
@@ -343,5 +343,3 @@ inline void AggFnEvaluator::finalize(const std::vector<AggFnEvaluator*>& evaluat
 }
 
 } // namespace doris
-
-#endif

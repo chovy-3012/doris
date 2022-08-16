@@ -34,7 +34,6 @@ import org.apache.doris.qe.RowBatch;
 import org.apache.doris.thrift.TUniqueId;
 
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -57,8 +56,13 @@ public class PartitionCache extends Cache {
         return rewriteStmt;
     }
 
+    // only used for unit test
     public SelectStmt getNokeyStmt() {
         return nokeyStmt;
+    }
+
+    public String getSqlWithViewStmt() {
+        return nokeyStmt.toSql() + "|" + allViewExpandStmtListStr;
     }
 
     public PartitionCache(TUniqueId queryId, SelectStmt selectStmt) {
@@ -86,9 +90,8 @@ public class PartitionCache extends Cache {
             return null;
         }
 
-        String nokeyStmtWithViewStmt = nokeyStmt.toSql() + allViewExpandStmtListStr;
         InternalService.PFetchCacheRequest request = InternalService.PFetchCacheRequest.newBuilder()
-                .setSqlKey(CacheProxy.getMd5(nokeyStmtWithViewStmt))
+                .setSqlKey(CacheProxy.getMd5(getSqlWithViewStmt()))
                 .addAllParams(range.getPartitionSingleList().stream().map(
                         p -> InternalService.PCacheParam.newBuilder()
                                 .setPartitionKey(p.getCacheKey().realValue())
@@ -103,8 +106,6 @@ public class PartitionCache extends Cache {
             }
             cacheResult = cacheResult.toBuilder().setAllCount(range.getPartitionSingleList().size()).build();
             MetricRepo.COUNTER_CACHE_HIT_PARTITION.increase(1L);
-            MetricRepo.COUNTER_CACHE_PARTITION_ALL.increase((long) range.getPartitionSingleList().size());
-            MetricRepo.COUNTER_CACHE_PARTITION_HIT.increase((long) cacheResult.getValuesList().size());
         }
 
         range.setTooNewByID(latestTable.latestPartitionId);
@@ -130,9 +131,8 @@ public class PartitionCache extends Cache {
             return;
         }
 
-        String nokeyStmtWithViewStmt = nokeyStmt.toSql() + allViewExpandStmtListStr;
         InternalService.PUpdateCacheRequest updateRequest
-                = rowBatchBuilder.buildPartitionUpdateRequest(nokeyStmtWithViewStmt);
+                = rowBatchBuilder.buildPartitionUpdateRequest(getSqlWithViewStmt());
         if (updateRequest.getValuesCount() > 0) {
             CacheBeProxy proxy = new CacheBeProxy();
             Status status = new Status();
@@ -182,7 +182,7 @@ public class PartitionCache extends Cache {
 
     /**
      * Rewrite the query scope of partition key in the where condition
-     * origin expr : where eventdate>="2020-01-12" and eventdate<="2020-01-15" 
+     * origin expr : where eventdate>="2020-01-12" and eventdate<="2020-01-15"
      * rewrite expr : where eventdate>="2020-01-14" and eventdate<="2020-01-15"
      */
     private Expr rewriteWhereClause(Expr expr, CompoundPredicate predicate,

@@ -31,22 +31,20 @@ import org.apache.doris.resource.Tag;
 import org.apache.doris.system.Backend;
 import org.apache.doris.system.SystemInfoService;
 
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import mockit.Delegate;
+import mockit.Expectations;
+import mockit.Mocked;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import mockit.Delegate;
-import mockit.Expectations;
-import mockit.Mocked;
 
 public class ColocateTableCheckerAndBalancerTest {
     private ColocateTableCheckerAndBalancer balancer = ColocateTableCheckerAndBalancer.getInstance();
@@ -306,7 +304,7 @@ public class ColocateTableCheckerAndBalancerTest {
 
     public final class FakeBackendLoadStatistic extends BackendLoadStatistic {
         public FakeBackendLoadStatistic(long beId, String clusterName, SystemInfoService infoService,
-                                    TabletInvertedIndex invertedIndex) {
+                                        TabletInvertedIndex invertedIndex) {
             super(beId, clusterName, Tag.DEFAULT_BACKEND_TAG, infoService, invertedIndex);
         }
 
@@ -320,7 +318,7 @@ public class ColocateTableCheckerAndBalancerTest {
     public void testGetBeSeqIndexes() {
         List<Long> flatBackendsPerBucketSeq = Lists.newArrayList(1L, 2L, 2L, 3L, 4L, 2L);
         List<Integer> indexes = Deencapsulation.invoke(balancer, "getBeSeqIndexes", flatBackendsPerBucketSeq, 2L);
-        Assert.assertArrayEquals(new int[]{1, 2, 5}, indexes.stream().mapToInt(i->i).toArray());
+        Assert.assertArrayEquals(new int[]{1, 2, 5}, indexes.stream().mapToInt(i -> i).toArray());
         System.out.println("backend1 id is " + backend1.getId());
     }
 
@@ -331,7 +329,7 @@ public class ColocateTableCheckerAndBalancerTest {
                                                @Mocked Backend myBackend3,
                                                @Mocked Backend myBackend4,
                                                @Mocked Backend myBackend5
-                                               ) {
+    ) {
         GroupId groupId = new GroupId(10000, 10001);
         Tag tag = Tag.DEFAULT_BACKEND_TAG;
         Set<Long> allBackendsInGroup = Sets.newHashSet(1L, 2L, 3L, 4L, 5L);
@@ -348,7 +346,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend2.isScheduleAvailable();
                 result = true;
                 minTimes = 0;
-                myBackend2.getTag();
+                myBackend2.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -363,9 +361,9 @@ public class ColocateTableCheckerAndBalancerTest {
                 result = false;
                 minTimes = 0;
                 myBackend3.getLastUpdateMs();
-                result = System.currentTimeMillis() - Config.tablet_repair_delay_factor_second * 1000 * 20;
+                result = System.currentTimeMillis() - (Config.colocate_group_relocate_delay_second + 20) * 1000;
                 minTimes = 0;
-                myBackend3.getTag();
+                myBackend3.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -382,7 +380,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend4.getLastUpdateMs();
                 result = System.currentTimeMillis();
                 minTimes = 0;
-                myBackend4.getTag();
+                myBackend4.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -399,7 +397,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend5.isDecommissioned();
                 result = true;
                 minTimes = 0;
-                myBackend5.getTag();
+                myBackend5.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -441,7 +439,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend2.isScheduleAvailable();
                 result = true;
                 minTimes = 0;
-                myBackend2.getTag();
+                myBackend2.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -456,9 +454,9 @@ public class ColocateTableCheckerAndBalancerTest {
                 result = false;
                 minTimes = 0;
                 myBackend3.getLastUpdateMs();
-                result = System.currentTimeMillis() - Config.tablet_repair_delay_factor_second * 1000 * 20;
+                result = System.currentTimeMillis() - (Config.colocate_group_relocate_delay_second + 20) * 1000;
                 minTimes = 0;
-                myBackend3.getTag();
+                myBackend3.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -475,7 +473,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend4.getLastUpdateMs();
                 result = System.currentTimeMillis();
                 minTimes = 0;
-                myBackend4.getTag();
+                myBackend4.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -492,7 +490,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend5.isDecommissioned();
                 result = true;
                 minTimes = 0;
-                myBackend5.getTag();
+                myBackend5.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
 
@@ -509,7 +507,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend6.isDecommissioned();
                 result = false;
                 minTimes = 0;
-                myBackend6.getTag();
+                myBackend6.getLocationTag();
                 result = Tag.create(Tag.TYPE_LOCATION, "new_loc");
                 minTimes = 0;
 
@@ -526,7 +524,7 @@ public class ColocateTableCheckerAndBalancerTest {
                 myBackend7.isDecommissioned();
                 result = false;
                 minTimes = 0;
-                myBackend7.getTag();
+                myBackend7.getLocationTag();
                 result = Tag.DEFAULT_BACKEND_TAG;
                 minTimes = 0;
                 myBackend7.getId();

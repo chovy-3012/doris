@@ -44,6 +44,7 @@ std::shared_ptr<DorisScanRange> construct_scan_ranges() {
     doris_scan_range.hosts.push_back(host);
     doris_scan_range.__set_schema_hash("462300563");
     doris_scan_range.__set_version("94");
+    // Useless but it is required in TPaloScanRange
     doris_scan_range.__set_version_hash("0");
     doris_scan_range.engine_table_name.push_back("DorisTestStats");
     doris_scan_range.__set_db_name("olap");
@@ -79,15 +80,3 @@ void construct_one_tuple(TupleDescriptor& tuple_desc) {
 TEST(OlapIdlUtilTest, normalcase) {}
 
 } // namespace doris
-
-int main(int argc, char** argv) {
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    init_glog("be-test");
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::Init();
-    return RUN_ALL_TESTS();
-}

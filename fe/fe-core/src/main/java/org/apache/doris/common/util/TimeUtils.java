@@ -29,7 +29,6 @@ import org.apache.doris.qe.VariableMgr;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -62,7 +61,7 @@ public class TimeUtils {
     private static final SimpleDateFormat DATE_FORMAT;
     private static final SimpleDateFormat DATETIME_FORMAT;
     private static final SimpleDateFormat TIME_FORMAT;
-    
+
     private static final Pattern DATETIME_FORMAT_REG =
             Pattern.compile("^((\\d{2}(([02468][048])|([13579][26]))[\\-\\/\\s]?((((0?[13578])|(1[02]))[\\-\\/\\s]?"
                     + "((0?[1-9])|([1-2][0-9])|(3[01])))|(((0?[469])|(11))[\\-\\/\\s]?"
@@ -71,21 +70,24 @@ public class TimeUtils {
                     + "[\\-\\/\\s]?((0?[1-9])|([1-2][0-9])|(3[01])))|(((0?[469])|(11))[\\-\\/\\s]?"
                     + "((0?[1-9])|([1-2][0-9])|(30)))|(0?2[\\-\\/\\s]?((0?[1-9])|(1[0-9])|(2[0-8]))))))"
                     + "(\\s(((0?[0-9])|([1][0-9])|([2][0-3]))\\:([0-5]?[0-9])((\\s)|(\\:([0-5]?[0-9])))))?$");
-    
+
     private static final Pattern TIMEZONE_OFFSET_FORMAT_REG = Pattern.compile("^[+-]?\\d{1,2}:\\d{2}$");
 
     public static Date MIN_DATE = null;
     public static Date MAX_DATE = null;
-    
+
     public static Date MIN_DATETIME = null;
     public static Date MAX_DATETIME = null;
 
     private static ThreadLocal<SimpleDateFormat> datetimeFormatThreadLocal =
             ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyy-MM-dd HH:mm:ss"));
 
+    private static ThreadLocal<SimpleDateFormat> datetimeMSFormatThreadLocal =
+            ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS"));
+
     static {
         TIME_ZONE = new SimpleTimeZone(8 * 3600 * 1000, "");
-        
+
         DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd");
         DATE_FORMAT.setTimeZone(TIME_ZONE);
 
@@ -107,15 +109,15 @@ public class TimeUtils {
             System.exit(-1);
         }
     }
-    
+
     public static long getStartTime() {
         return System.nanoTime();
     }
-    
+
     public static long getEstimatedTime(long startTime) {
         return System.nanoTime() - startTime;
     }
-    
+
     public static synchronized String getCurrentFormatTime() {
         return DATETIME_FORMAT.format(new Date());
     }
@@ -142,7 +144,7 @@ public class TimeUtils {
         }
         return TimeZone.getTimeZone(ZoneId.of(timeZone, timeZoneAliasMap));
     }
-    
+
     public static String longToTimeString(long timeStamp, SimpleDateFormat dateFormat) {
         if (timeStamp <= 0L) {
             return FeConstants.null_string;
@@ -150,13 +152,22 @@ public class TimeUtils {
         return dateFormat.format(new Date(timeStamp));
     }
 
-    public static String longToTimeString(long timeStamp) {
-        SimpleDateFormat datetimeFormatTimeZone = datetimeFormatThreadLocal.get();
+    public static String longToTimeStringWithFormat(long timeStamp, SimpleDateFormat datetimeFormatTimeZone) {
         TimeZone timeZone = getTimeZone();
         datetimeFormatTimeZone.setTimeZone(timeZone);
         return longToTimeString(timeStamp, datetimeFormatTimeZone);
     }
-    
+
+    public static String longToTimeString(long timeStamp) {
+        SimpleDateFormat datetimeFormatTimeZone = datetimeFormatThreadLocal.get();
+        return longToTimeStringWithFormat(timeStamp, datetimeFormatTimeZone);
+    }
+
+    public static String longToTimeStringWithms(long timeStamp) {
+        SimpleDateFormat datatimeFormatTimeZone = datetimeMSFormatThreadLocal.get();
+        return longToTimeStringWithFormat(timeStamp, datatimeFormatTimeZone);
+    }
+
     public static synchronized Date getTimeAsDate(String timeString) {
         try {
             Date date = TIME_FORMAT.parse(timeString);

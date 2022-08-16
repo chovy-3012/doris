@@ -24,6 +24,7 @@ This module is doris builtin functions
 
 import sys
 import os
+import errno
 from string import Template
 import doris_builtins_functions
 
@@ -51,7 +52,8 @@ java_registry_preamble = '\
 \n\
 package org.apache.doris.builtins;\n\
 \n\
-import org.apache.doris.catalog.PrimitiveType;\n\
+import org.apache.doris.catalog.ArrayType;\n\
+import org.apache.doris.catalog.Type;\n\
 import org.apache.doris.catalog.Function;\n\
 import org.apache.doris.catalog.FunctionSet;\n\
 import com.google.common.collect.Sets;\n\
@@ -100,6 +102,20 @@ def add_function(fn_meta_data, user_visible):
 
 
 """
+generate fe data type, support nested ARRAY type.
+for example:
+    in[TINYINT]     --> out[Type.TINYINT]
+    in[INT]         --> out[Type.INT]
+    in[ARRAY_INT]   --> out[new ArrayType(Type.INT)]
+"""
+def generate_fe_datatype(str_type):
+    if str_type.startswith("ARRAY_"):
+        vec_type = str_type.split('_', 1);
+        if len(vec_type) > 1 and vec_type[0] == "ARRAY":
+            return "new ArrayType(" + generate_fe_datatype(vec_type[1]) + ")"
+    return "Type." + str_type
+
+"""
 Order of params:
 name, symbol, user_visible, prepare, close, nullable_mode, ret_type, has_var_args, args
 """
@@ -123,7 +139,7 @@ def generate_fe_entry(entry, name):
         java_output += ', null'
 
     java_output += ", Function.NullableMode." + entry["nullable_mode"]
-    java_output += ", PrimitiveType." + entry["ret_type"]
+    java_output += ", " + generate_fe_datatype(entry["ret_type"])
 
     # Check the last entry for varargs indicator.
     if entry["args"] and entry["args"][-1] == "...":
@@ -132,7 +148,7 @@ def generate_fe_entry(entry, name):
     else:
         java_output += ", false"
     for arg in entry["args"]:
-        java_output += ", PrimitiveType." + arg
+        java_output += ", " + generate_fe_datatype(arg)
     return java_output
 
 # Generates the FE builtins init file that registers all the builtins.
@@ -165,19 +181,28 @@ def generate_fe_registry_init(filename):
         java_registry_file.write("        nondeterministicFuncNames.add(\"%s\");\n" % entry)
     java_registry_file.write("        functionSet.buildNondeterministicFunctions(nondeterministicFuncNames);\n");
 
+    java_registry_file.write("        funcNames = Sets.newHashSet();\n")
+    for entry in doris_builtins_functions.null_result_with_one_null_param_functions:
+        java_registry_file.write("        funcNames.add(\"%s\");\n" % entry)
+    java_registry_file.write("        functionSet.buildNullResultWithOneNullParamFunction(funcNames);\n");
+
     java_registry_file.write(java_registry_epilogue)
     java_registry_file.close()
 
+if __name__ == "__main__":
 
-# Read the function metadata inputs
-for function in doris_builtins_functions.visible_functions:
-    add_function(function, True)
-for function in doris_builtins_functions.invisible_functions:
-    add_function(function, False)
+    try:
+        os.makedirs(FE_PATH)
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            pass
+        else:
+            raise
 
-if not os.path.exists(FE_PATH):
-    os.makedirs(FE_PATH)
+    # Read the function metadata inputs
+    for function in doris_builtins_functions.visible_functions:
+        add_function(function, True)
+    for function in doris_builtins_functions.invisible_functions:
+        add_function(function, False)
 
-generate_fe_registry_init(FE_PATH + "ScalarBuiltins.java")
-
-
+    generate_fe_registry_init(FE_PATH + "ScalarBuiltins.java")

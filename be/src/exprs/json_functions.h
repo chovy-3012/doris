@@ -15,13 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_JSON_FUNCTIONS_H
-#define DORIS_BE_SRC_QUERY_EXPRS_JSON_FUNCTIONS_H
+#pragma once
 
+#include <fmt/core.h>
 #include <rapidjson/document.h>
 
-#include "fmt/format.h"
-#include "runtime/string_value.h"
+#include <sstream>
+
+#include "udf/udf.h"
 
 namespace doris {
 
@@ -60,6 +61,26 @@ struct JsonPath {
             ss << "[*]";
         } else if (idx > -1) {
             ss << "[" << idx << "]";
+        }
+        return ss.str();
+    }
+
+    std::string to_simdjson_pointer(bool* valid) const {
+        std::stringstream ss;
+        if (!is_valid) {
+            *valid = false;
+            return "";
+        }
+        ss << "/";
+        if (!key.empty()) {
+            ss << key;
+        }
+        if (idx == -2) {
+            // not support [*]
+            *valid = false;
+            return "";
+        } else if (idx > -1) {
+            ss << "/" << idx;
         }
         return ss.str();
     }
@@ -103,16 +124,17 @@ public:
     /**
      * The `document` parameter must be has parsed.
      * return Value Is Array object
+     * wrap_explicitly is set to true when the returned Array is wrapped actively.
      */
     static rapidjson::Value* get_json_array_from_parsed_json(
             const std::vector<JsonPath>& parsed_paths, rapidjson::Value* document,
-            rapidjson::Document::AllocatorType& mem_allocator);
+            rapidjson::Document::AllocatorType& mem_allocator, bool* wrap_explicitly);
 
     // this is only for test, it will parse the json path inside,
     // so that we can easily pass a json path as string.
     static rapidjson::Value* get_json_array_from_parsed_json(
             const std::string& jsonpath, rapidjson::Value* document,
-            rapidjson::Document::AllocatorType& mem_allocator);
+            rapidjson::Document::AllocatorType& mem_allocator, bool* wrap_explicitly);
 
     static rapidjson::Value* get_json_object_from_parsed_json(
             const std::vector<JsonPath>& parsed_paths, rapidjson::Value* document,
@@ -139,4 +161,3 @@ private:
                                                 rapidjson::Document::AllocatorType& allocator);
 };
 } // namespace doris
-#endif

@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.ResourceMgr;
 import org.apache.doris.catalog.SparkResource;
 import org.apache.doris.common.AnalysisException;
@@ -32,18 +32,16 @@ import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.task.LoadTaskInfo;
 
+import com.google.common.collect.Lists;
+import mockit.Expectations;
+import mockit.Injectable;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import com.google.common.collect.Lists;
-
 import java.io.StringReader;
 import java.util.List;
-
-import mockit.Expectations;
-import mockit.Injectable;
-import mockit.Mocked;
 
 public class LoadStmtTest {
     private List<DataDescription> dataDescriptions;
@@ -79,25 +77,28 @@ public class LoadStmtTest {
     }
 
     @Test
-    public void testNormal(@Injectable DataDescription desc, @Mocked Catalog catalog,
+    public void testNormal(@Injectable DataDescription desc, @Mocked Env env,
                            @Injectable ResourceMgr resourceMgr, @Injectable PaloAuth auth) throws UserException, AnalysisException {
         List<DataDescription> dataDescriptionList = Lists.newArrayList();
         dataDescriptionList.add(desc);
         String resourceName = "spark0";
         SparkResource resource = new SparkResource(resourceName);
 
-        new Expectations(){
+        new Expectations() {
             {
                 desc.getMergeType();
                 result = LoadTask.MergeType.APPEND;
                 desc.toSql();
                 minTimes = 0;
                 result = "XXX";
-                catalog.getResourceMgr();
+                desc.getTableName();
+                minTimes = 0;
+                result = "testTbl";
+                env.getResourceMgr();
                 result = resourceMgr;
                 resourceMgr.getResource(resourceName);
                 result = resource;
-                catalog.getAuth();
+                env.getAuth();
                 result = auth;
                 auth.checkResourcePriv((ConnectContext) any, resourceName, PrivPredicate.USAGE);
                 result = true;
@@ -140,7 +141,7 @@ public class LoadStmtTest {
     }
 
     @Test
-    public void testRewrite() throws Exception{
+    public void testRewrite() throws Exception {
         LoadTaskInfo.ImportColumnDescs columnDescs = new LoadTaskInfo.ImportColumnDescs();
         List<ImportColumnDesc> columns1 = getColumns("c1,c2,c3,tmp_c4=c1 + 1, tmp_c5 = tmp_c4+1");
         columnDescs.descs = columns1;
@@ -182,8 +183,6 @@ public class LoadStmtTest {
     private List<ImportColumnDesc> getColumns(String columns) throws Exception {
         String columnsSQL = "COLUMNS (" + columns + ")";
         return ((ImportColumnsStmt) SqlParserUtils.getFirstStmt(
-            new SqlParser(
-                new SqlScanner(
-                    new StringReader(columnsSQL))))).getColumns();
+                new SqlParser(new SqlScanner(new StringReader(columnsSQL))))).getColumns();
     }
 }

@@ -30,7 +30,6 @@
 #include "runtime/descriptor_helper.h"
 #include "runtime/descriptors.h"
 #include "runtime/exec_env.h"
-#include "runtime/mem_tracker.h"
 #include "runtime/primitive_type.h"
 #include "runtime/row_batch.h"
 #include "runtime/tuple_row.h"
@@ -39,32 +38,29 @@
 namespace doris {
 
 std::unordered_map<int64_t, int> _k_tablet_recorder;
-OLAPStatus open_status;
-OLAPStatus add_status;
-OLAPStatus close_status;
+Status open_status;
+Status add_status;
+Status close_status;
 int64_t wait_lock_time_ns;
 
 // mock
-DeltaWriter::DeltaWriter(WriteRequest* req, const std::shared_ptr<MemTracker>& mem_tracker,
-                         StorageEngine* storage_engine)
-        : _req(*req) {}
+DeltaWriter::DeltaWriter(WriteRequest* req, StorageEngine* storage_engine) : _req(*req) {}
 
 DeltaWriter::~DeltaWriter() {}
 
-OLAPStatus DeltaWriter::init() {
-    return OLAP_SUCCESS;
+Status DeltaWriter::init() {
+    return Status::OK();
 }
 
-OLAPStatus DeltaWriter::open(WriteRequest* req, const std::shared_ptr<MemTracker>& mem_tracker,
-                             DeltaWriter** writer) {
-    if (open_status != OLAP_SUCCESS) {
+Status DeltaWriter::open(WriteRequest* req, DeltaWriter** writer) {
+    if (open_status != Status::OK()) {
         return open_status;
     }
-    *writer = new DeltaWriter(req, mem_tracker, nullptr);
+    *writer = new DeltaWriter(req, nullptr);
     return open_status;
 }
 
-OLAPStatus DeltaWriter::write(Tuple* tuple) {
+Status DeltaWriter::write(Tuple* tuple) {
     if (_k_tablet_recorder.find(_req.tablet_id) == std::end(_k_tablet_recorder)) {
         _k_tablet_recorder[_req.tablet_id] = 1;
     } else {
@@ -73,7 +69,7 @@ OLAPStatus DeltaWriter::write(Tuple* tuple) {
     return add_status;
 }
 
-OLAPStatus DeltaWriter::write(const RowBatch* row_batch, const std::vector<int>& row_idxs) {
+Status DeltaWriter::write(const RowBatch* row_batch, const std::vector<int>& row_idxs) {
     if (_k_tablet_recorder.find(_req.tablet_id) == std::end(_k_tablet_recorder)) {
         _k_tablet_recorder[_req.tablet_id] = 0;
     }
@@ -81,24 +77,25 @@ OLAPStatus DeltaWriter::write(const RowBatch* row_batch, const std::vector<int>&
     return add_status;
 }
 
-OLAPStatus DeltaWriter::close() {
-    return OLAP_SUCCESS;
+Status DeltaWriter::close() {
+    return Status::OK();
 }
 
-OLAPStatus DeltaWriter::close_wait(google::protobuf::RepeatedPtrField<PTabletInfo>* tablet_vec) {
+Status DeltaWriter::close_wait(google::protobuf::RepeatedPtrField<PTabletInfo>* tablet_vec,
+                               bool is_broken) {
     return close_status;
 }
 
-OLAPStatus DeltaWriter::cancel() {
-    return OLAP_SUCCESS;
+Status DeltaWriter::cancel() {
+    return Status::OK();
 }
 
-OLAPStatus DeltaWriter::flush_memtable_and_wait(bool need_wait) {
-    return OLAP_SUCCESS;
+Status DeltaWriter::flush_memtable_and_wait(bool need_wait) {
+    return Status::OK();
 }
 
-OLAPStatus DeltaWriter::wait_flush() {
-    return OLAP_SUCCESS;
+Status DeltaWriter::wait_flush() {
+    return Status::OK();
 }
 
 int64_t DeltaWriter::partition_id() const {
@@ -114,13 +111,15 @@ public:
     virtual ~LoadChannelMgrTest() {}
     void SetUp() override {
         _k_tablet_recorder.clear();
-        open_status = OLAP_SUCCESS;
-        add_status = OLAP_SUCCESS;
-        close_status = OLAP_SUCCESS;
+        open_status = Status::OK();
+        add_status = Status::OK();
+        close_status = Status::OK();
         config::streaming_load_rpc_max_alive_time_sec = 120;
     }
 
 private:
+    size_t uncompressed_size = 0;
+    size_t compressed_size = 0;
 };
 
 TEST_F(LoadChannelMgrTest, check_builder) {
@@ -139,10 +138,10 @@ TEST_F(LoadChannelMgrTest, check_builder) {
     ObjectPool obj_pool;
     DescriptorTbl::create(&obj_pool, table_builder.desc_tbl(), &desc_tbl);
     auto tuple = desc_tbl->get_tuple_descriptor(0);
-    ASSERT_EQ(32, tuple->byte_size());
-    ASSERT_EQ(4, tuple->slots()[0]->tuple_offset());
-    ASSERT_EQ(8, tuple->slots()[1]->tuple_offset());
-    ASSERT_EQ(16, tuple->slots()[2]->tuple_offset());
+    EXPECT_EQ(32, tuple->byte_size());
+    EXPECT_EQ(4, tuple->slots()[0]->tuple_offset());
+    EXPECT_EQ(8, tuple->slots()[1]->tuple_offset());
+    EXPECT_EQ(16, tuple->slots()[2]->tuple_offset());
 }
 
 TDescriptorTable create_descriptor_table() {
@@ -189,7 +188,6 @@ TEST_F(LoadChannelMgrTest, normal) {
     DescriptorTbl::create(&obj_pool, tdesc_tbl, &desc_tbl);
     auto tuple_desc = desc_tbl->get_tuple_descriptor(0);
     RowDescriptor row_desc(*desc_tbl, {0}, {false});
-    auto tracker = std::make_shared<MemTracker>();
     PUniqueId load_id;
     load_id.set_hi(2);
     load_id.set_lo(3);
@@ -208,7 +206,7 @@ TEST_F(LoadChannelMgrTest, normal) {
         request.set_need_gen_rollup(false);
         auto st = mgr.open(request);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
 
     // add a batch
@@ -224,7 +222,7 @@ TEST_F(LoadChannelMgrTest, normal) {
         request.add_tablet_ids(21);
         request.add_tablet_ids(20);
 
-        RowBatch row_batch(row_desc, 1024, tracker.get());
+        RowBatch row_batch(row_desc, 1024);
 
         // row1
         {
@@ -256,15 +254,15 @@ TEST_F(LoadChannelMgrTest, normal) {
             *(int64_t*)tuple->get_slot(tuple_desc->slots()[1]->tuple_offset()) = 76543234567;
             row_batch.commit_last_row();
         }
-        row_batch.serialize(request.mutable_row_batch());
-        google::protobuf::RepeatedPtrField<PTabletInfo> tablet_vec;
-        auto st = mgr.add_batch(request, &tablet_vec);
+        row_batch.serialize(request.mutable_row_batch(), &uncompressed_size, &compressed_size);
+        PTabletWriterAddBatchResult response;
+        auto st = mgr.add_batch(request, &response);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
     // check content
-    ASSERT_EQ(_k_tablet_recorder[20], 2);
-    ASSERT_EQ(_k_tablet_recorder[21], 1);
+    EXPECT_EQ(_k_tablet_recorder[20], 2);
+    EXPECT_EQ(_k_tablet_recorder[21], 1);
 }
 
 TEST_F(LoadChannelMgrTest, cancel) {
@@ -296,7 +294,7 @@ TEST_F(LoadChannelMgrTest, cancel) {
         request.set_need_gen_rollup(false);
         auto st = mgr.open(request);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
 
     // add a batch
@@ -306,7 +304,7 @@ TEST_F(LoadChannelMgrTest, cancel) {
         request.set_index_id(4);
         auto st = mgr.cancel(request);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
 }
 
@@ -337,10 +335,10 @@ TEST_F(LoadChannelMgrTest, open_failed) {
         }
         request.set_num_senders(1);
         request.set_need_gen_rollup(false);
-        open_status = OLAP_ERR_TABLE_NOT_FOUND;
+        open_status = Status::OLAPInternalError(OLAP_ERR_TABLE_NOT_FOUND);
         auto st = mgr.open(request);
         request.release_id();
-        ASSERT_FALSE(st.ok());
+        EXPECT_FALSE(st.ok());
     }
 }
 
@@ -355,7 +353,6 @@ TEST_F(LoadChannelMgrTest, add_failed) {
     DescriptorTbl::create(&obj_pool, tdesc_tbl, &desc_tbl);
     auto tuple_desc = desc_tbl->get_tuple_descriptor(0);
     RowDescriptor row_desc(*desc_tbl, {0}, {false});
-    auto tracker = std::make_shared<MemTracker>();
     PUniqueId load_id;
     load_id.set_hi(2);
     load_id.set_lo(3);
@@ -374,7 +371,7 @@ TEST_F(LoadChannelMgrTest, add_failed) {
         request.set_need_gen_rollup(false);
         auto st = mgr.open(request);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
 
     // add a batch
@@ -390,7 +387,7 @@ TEST_F(LoadChannelMgrTest, add_failed) {
         request.add_tablet_ids(21);
         request.add_tablet_ids(20);
 
-        RowBatch row_batch(row_desc, 1024, tracker.get());
+        RowBatch row_batch(row_desc, 1024);
 
         // row1
         {
@@ -422,12 +419,15 @@ TEST_F(LoadChannelMgrTest, add_failed) {
             *(int64_t*)tuple->get_slot(tuple_desc->slots()[1]->tuple_offset()) = 76543234567;
             row_batch.commit_last_row();
         }
-        row_batch.serialize(request.mutable_row_batch());
-        add_status = OLAP_ERR_TABLE_NOT_FOUND;
-        google::protobuf::RepeatedPtrField<PTabletInfo> tablet_vec;
-        auto st = mgr.add_batch(request, &tablet_vec);
+        row_batch.serialize(request.mutable_row_batch(), &uncompressed_size, &compressed_size);
+        // DeltaWriter's write will return -215
+        add_status = Status::OLAPInternalError(OLAP_ERR_TABLE_NOT_FOUND);
+        PTabletWriterAddBatchResult response;
+        auto st = mgr.add_batch(request, &response);
         request.release_id();
-        ASSERT_FALSE(st.ok());
+        // st is still ok.
+        EXPECT_TRUE(st.ok());
+        EXPECT_EQ(2, response.tablet_errors().size());
     }
 }
 
@@ -442,7 +442,6 @@ TEST_F(LoadChannelMgrTest, close_failed) {
     DescriptorTbl::create(&obj_pool, tdesc_tbl, &desc_tbl);
     auto tuple_desc = desc_tbl->get_tuple_descriptor(0);
     RowDescriptor row_desc(*desc_tbl, {0}, {false});
-    auto tracker = std::make_shared<MemTracker>();
     PUniqueId load_id;
     load_id.set_hi(2);
     load_id.set_lo(3);
@@ -461,7 +460,7 @@ TEST_F(LoadChannelMgrTest, close_failed) {
         request.set_need_gen_rollup(false);
         auto st = mgr.open(request);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
 
     // add a batch
@@ -480,7 +479,7 @@ TEST_F(LoadChannelMgrTest, close_failed) {
         request.add_partition_ids(10);
         request.add_partition_ids(11);
 
-        RowBatch row_batch(row_desc, 1024, tracker.get());
+        RowBatch row_batch(row_desc, 1024);
 
         // row1
         {
@@ -512,14 +511,14 @@ TEST_F(LoadChannelMgrTest, close_failed) {
             *(int64_t*)tuple->get_slot(tuple_desc->slots()[1]->tuple_offset()) = 76543234567;
             row_batch.commit_last_row();
         }
-        row_batch.serialize(request.mutable_row_batch());
-        close_status = OLAP_ERR_TABLE_NOT_FOUND;
-        google::protobuf::RepeatedPtrField<PTabletInfo> tablet_vec;
-        auto st = mgr.add_batch(request, &tablet_vec);
+        row_batch.serialize(request.mutable_row_batch(), &uncompressed_size, &compressed_size);
+        close_status = Status::OLAPInternalError(OLAP_ERR_TABLE_NOT_FOUND);
+        PTabletWriterAddBatchResult response;
+        auto st = mgr.add_batch(request, &response);
         request.release_id();
         // even if delta close failed, the return status is still ok, but tablet_vec is empty
-        ASSERT_TRUE(st.ok());
-        ASSERT_TRUE(tablet_vec.empty());
+        EXPECT_TRUE(st.ok());
+        EXPECT_TRUE(response.tablet_vec().empty());
     }
 }
 
@@ -534,7 +533,6 @@ TEST_F(LoadChannelMgrTest, unknown_tablet) {
     DescriptorTbl::create(&obj_pool, tdesc_tbl, &desc_tbl);
     auto tuple_desc = desc_tbl->get_tuple_descriptor(0);
     RowDescriptor row_desc(*desc_tbl, {0}, {false});
-    auto tracker = std::make_shared<MemTracker>();
     PUniqueId load_id;
     load_id.set_hi(2);
     load_id.set_lo(3);
@@ -553,7 +551,7 @@ TEST_F(LoadChannelMgrTest, unknown_tablet) {
         request.set_need_gen_rollup(false);
         auto st = mgr.open(request);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
 
     // add a batch
@@ -569,7 +567,7 @@ TEST_F(LoadChannelMgrTest, unknown_tablet) {
         request.add_tablet_ids(22);
         request.add_tablet_ids(20);
 
-        RowBatch row_batch(row_desc, 1024, tracker.get());
+        RowBatch row_batch(row_desc, 1024);
 
         // row1
         {
@@ -601,11 +599,11 @@ TEST_F(LoadChannelMgrTest, unknown_tablet) {
             *(int64_t*)tuple->get_slot(tuple_desc->slots()[1]->tuple_offset()) = 76543234567;
             row_batch.commit_last_row();
         }
-        row_batch.serialize(request.mutable_row_batch());
-        google::protobuf::RepeatedPtrField<PTabletInfo> tablet_vec;
-        auto st = mgr.add_batch(request, &tablet_vec);
+        row_batch.serialize(request.mutable_row_batch(), &uncompressed_size, &compressed_size);
+        PTabletWriterAddBatchResult response;
+        auto st = mgr.add_batch(request, &response);
         request.release_id();
-        ASSERT_FALSE(st.ok());
+        EXPECT_FALSE(st.ok());
     }
 }
 
@@ -620,7 +618,6 @@ TEST_F(LoadChannelMgrTest, duplicate_packet) {
     DescriptorTbl::create(&obj_pool, tdesc_tbl, &desc_tbl);
     auto tuple_desc = desc_tbl->get_tuple_descriptor(0);
     RowDescriptor row_desc(*desc_tbl, {0}, {false});
-    auto tracker = std::make_shared<MemTracker>();
     PUniqueId load_id;
     load_id.set_hi(2);
     load_id.set_lo(3);
@@ -639,7 +636,7 @@ TEST_F(LoadChannelMgrTest, duplicate_packet) {
         request.set_need_gen_rollup(false);
         auto st = mgr.open(request);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
 
     // add a batch
@@ -655,7 +652,7 @@ TEST_F(LoadChannelMgrTest, duplicate_packet) {
         request.add_tablet_ids(21);
         request.add_tablet_ids(20);
 
-        RowBatch row_batch(row_desc, 1024, tracker.get());
+        RowBatch row_batch(row_desc, 1024);
 
         // row1
         {
@@ -687,14 +684,14 @@ TEST_F(LoadChannelMgrTest, duplicate_packet) {
             *(int64_t*)tuple->get_slot(tuple_desc->slots()[1]->tuple_offset()) = 76543234567;
             row_batch.commit_last_row();
         }
-        row_batch.serialize(request.mutable_row_batch());
-        google::protobuf::RepeatedPtrField<PTabletInfo> tablet_vec1;
-        auto st = mgr.add_batch(request, &tablet_vec1);
-        ASSERT_TRUE(st.ok());
-        google::protobuf::RepeatedPtrField<PTabletInfo> tablet_vec2;
-        st = mgr.add_batch(request, &tablet_vec2);
+        row_batch.serialize(request.mutable_row_batch(), &uncompressed_size, &compressed_size);
+        PTabletWriterAddBatchResult response;
+        auto st = mgr.add_batch(request, &response);
+        EXPECT_TRUE(st.ok());
+        PTabletWriterAddBatchResult response2;
+        st = mgr.add_batch(request, &response2);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
     // close
     {
@@ -704,20 +701,14 @@ TEST_F(LoadChannelMgrTest, duplicate_packet) {
         request.set_sender_id(0);
         request.set_eos(true);
         request.set_packet_seq(0);
-        google::protobuf::RepeatedPtrField<PTabletInfo> tablet_vec;
-        auto st = mgr.add_batch(request, &tablet_vec);
+        PTabletWriterAddBatchResult response;
+        auto st = mgr.add_batch(request, &response);
         request.release_id();
-        ASSERT_TRUE(st.ok());
+        EXPECT_TRUE(st.ok());
     }
     // check content
-    ASSERT_EQ(_k_tablet_recorder[20], 2);
-    ASSERT_EQ(_k_tablet_recorder[21], 1);
+    EXPECT_EQ(_k_tablet_recorder[20], 2);
+    EXPECT_EQ(_k_tablet_recorder[21], 1);
 }
 
 } // namespace doris
-
-int main(int argc, char* argv[]) {
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
-}

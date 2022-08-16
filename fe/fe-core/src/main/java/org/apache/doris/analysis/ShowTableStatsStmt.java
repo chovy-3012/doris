@@ -22,21 +22,24 @@ import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.qe.ShowResultSetMetaData;
 import org.apache.doris.statistics.TableStats;
 
 import com.google.common.collect.ImmutableList;
-
+import com.google.common.collect.Lists;
 import org.apache.parquet.Preconditions;
 import org.apache.parquet.Strings;
+
+import java.util.List;
 
 public class ShowTableStatsStmt extends ShowStmt {
 
     private static final ImmutableList<String> TITLE_NAMES =
             new ImmutableList.Builder<String>()
                     .add("table_name")
-                    .add(TableStats.ROW_COUNT)
-                    .add(TableStats.DATA_SIZE)
+                    .add(TableStats.ROW_COUNT.getValue())
+                    .add(TableStats.DATA_SIZE.getValue())
                     .build();
 
     private TableName tableName;
@@ -76,6 +79,8 @@ public class ShowTableStatsStmt extends ShowStmt {
             return;
         }
         tableName.analyze(analyzer);
+        // disallow external catalog
+        Util.prohibitExternalCatalog(tableName.getCtl(), this.getClass().getSimpleName());
     }
 
     @Override
@@ -86,5 +91,10 @@ public class ShowTableStatsStmt extends ShowStmt {
             builder.addColumn(new Column(title, ScalarType.createVarchar(30)));
         }
         return builder.build();
+    }
+
+    public List<String> getPartitionNames() {
+        // TODO(WZT): partition statistics
+        return Lists.newArrayList();
     }
 }

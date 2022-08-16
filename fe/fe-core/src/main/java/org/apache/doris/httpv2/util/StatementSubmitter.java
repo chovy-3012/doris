@@ -20,7 +20,6 @@ package org.apache.doris.httpv2.util;
 
 import org.apache.doris.analysis.DdlStmt;
 import org.apache.doris.analysis.ExportStmt;
-import org.apache.doris.analysis.InsertStmt;
 import org.apache.doris.analysis.QueryStmt;
 import org.apache.doris.analysis.ShowStmt;
 import org.apache.doris.analysis.SqlParser;
@@ -32,11 +31,10 @@ import org.apache.doris.common.ThreadPoolManager;
 import org.apache.doris.common.util.SqlParserUtils;
 import org.apache.doris.qe.ConnectContext;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.StringReader;
 import java.sql.Connection;
@@ -69,8 +67,8 @@ public class StatementSubmitter {
     private static final String TYPE_RESULT_SET = "result_set";
     private static final String TYPE_EXEC_STATUS = "exec_status";
 
-    private static final String JDBC_DRIVER = "com.mysql.jdbc.Driver";
-    private static final String DB_URL_PATTERN = "jdbc:mysql://127.0.0.1:%d/%s";
+    private static final String JDBC_DRIVER = "org.mariadb.jdbc.Driver";
+    private static final String DB_URL_PATTERN = "jdbc:mariadb://127.0.0.1:%d/%s";
 
     private ThreadPoolExecutor executor = ThreadPoolManager.newDaemonCacheThreadPool(2, "SQL submitter", true);
 
@@ -101,14 +99,15 @@ public class StatementSubmitter {
                 conn = DriverManager.getConnection(dbUrl, queryCtx.user, queryCtx.passwd);
                 long startTime = System.currentTimeMillis();
                 if (stmtBase instanceof QueryStmt || stmtBase instanceof ShowStmt) {
-                    stmt = conn.prepareStatement(queryCtx.stmt, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-                    // set fetch size to MIN_VALUE to enable streaming result set to avoid OOM.
-                    ((PreparedStatement) stmt).setFetchSize(Integer.MIN_VALUE);
+                    stmt = conn.prepareStatement(
+                            queryCtx.stmt, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+                    // set fetch size to 1 to enable streaming result set to avoid OOM.
+                    ((PreparedStatement) stmt).setFetchSize(1);
                     ResultSet rs = ((PreparedStatement) stmt).executeQuery();
                     ExecutionResultSet resultSet = generateResultSet(rs, startTime);
                     rs.close();
                     return resultSet;
-                } else if (stmtBase instanceof InsertStmt || stmtBase instanceof DdlStmt || stmtBase instanceof ExportStmt) {
+                } else if (stmtBase instanceof DdlStmt || stmtBase instanceof ExportStmt) {
                     stmt = conn.createStatement();
                     stmt.execute(queryCtx.stmt);
                     ExecutionResultSet resultSet = generateExecStatus(startTime);
@@ -125,7 +124,9 @@ public class StatementSubmitter {
                     LOG.warn("failed to close stmt", se2);
                 }
                 try {
-                    if (conn != null) conn.close();
+                    if (conn != null) {
+                        conn.close();
+                    }
                 } catch (SQLException se) {
                     LOG.warn("failed to close connection", se);
                 }
@@ -172,7 +173,13 @@ public class StatementSubmitter {
                 List<Object> row = Lists.newArrayListWithCapacity(colNum);
                 // index start from 1
                 for (int i = 1; i <= colNum; ++i) {
-                    row.add(rs.getObject(i));
+                    String type = rs.getMetaData().getColumnTypeName(i);
+                    if ("DATE".equalsIgnoreCase(type) || "DATETIME".equalsIgnoreCase(type)
+                            || "DATEV2".equalsIgnoreCase(type) || "DATETIMEV2".equalsIgnoreCase(type)) {
+                        row.add(rs.getString(i));
+                    } else {
+                        row.add(rs.getObject(i));
+                    }
                 }
                 rows.add(row);
                 rowCount++;
@@ -230,4 +237,3 @@ public class StatementSubmitter {
         }
     }
 }
-

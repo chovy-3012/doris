@@ -17,8 +17,8 @@
 
 package org.apache.doris.clone;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.DiskInfo;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.Replica.ReplicaState;
 import org.apache.doris.catalog.TabletInvertedIndex;
@@ -30,7 +30,6 @@ import org.apache.doris.thrift.TStorageMedium;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
-
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -44,7 +43,7 @@ public class ClusterLoadStatisticsTest {
     private Backend be2;
     private Backend be3;
 
-    private Catalog catalog;
+    private Env env;
     private SystemInfoService systemInfoService;
     private TabletInvertedIndex invertedIndex;
 
@@ -70,11 +69,11 @@ public class ClusterLoadStatisticsTest {
         diskInfo3.setAvailableCapacityB(490000);
         diskInfo3.setDataUsedCapacityB(10000);
         disks.put(diskInfo3.getRootPath(), diskInfo3);
-        
+
         be1.setDisks(ImmutableMap.copyOf(disks));
         be1.setAlive(true);
         be1.setOwnerClusterName(SystemInfoService.DEFAULT_CLUSTER);
-        
+
 
         // be2
         be2 = new Backend(10002, "192.168.0.2", 9052);
@@ -124,7 +123,7 @@ public class ClusterLoadStatisticsTest {
         systemInfoService.addBackend(be1);
         systemInfoService.addBackend(be2);
         systemInfoService.addBackend(be3);
-        
+
         // tablet
         invertedIndex = new TabletInvertedIndex();
 
@@ -148,7 +147,6 @@ public class ClusterLoadStatisticsTest {
                 Tag.DEFAULT_BACKEND_TAG, systemInfoService, invertedIndex);
         loadStatistic.init();
         List<List<String>> infos = loadStatistic.getClusterStatistic(TStorageMedium.HDD);
-        System.out.println(infos);
         Assert.assertEquals(3, infos.size());
     }
 

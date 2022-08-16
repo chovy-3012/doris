@@ -18,7 +18,6 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.persist.gson.GsonPostProcessable;
@@ -57,8 +56,9 @@ public class TempPartitions implements Writable, GsonPostProcessable {
         idToPartition.put(partition.getId(), partition);
         nameToPartition.put(partition.getName(), partition);
     }
+
     public long getUpdateTime() {
-        long updateTime = -1l;
+        long updateTime = -1L;
         for (Partition p : idToPartition.values()) {
             if (p.getVisibleVersionTime() > updateTime) {
                 updateTime = p.getVisibleVersionTime();
@@ -76,8 +76,8 @@ public class TempPartitions implements Writable, GsonPostProcessable {
         if (partition != null) {
             idToPartition.remove(partition.getId());
             nameToPartition.remove(partitionName);
-            if (!Catalog.isCheckpointThread() && needDropTablet) {
-                TabletInvertedIndex invertedIndex = Catalog.getCurrentInvertedIndex();
+            if (!Env.isCheckpointThread() && needDropTablet) {
+                TabletInvertedIndex invertedIndex = Env.getCurrentInvertedIndex();
                 for (MaterializedIndex index : partition.getMaterializedIndices(IndexExtState.ALL)) {
                     for (Tablet tablet : index.getTablets()) {
                         invertedIndex.deleteTablet(tablet.getId());
@@ -132,14 +132,8 @@ public class TempPartitions implements Writable, GsonPostProcessable {
     }
 
     public static TempPartitions read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_77) {
-            TempPartitions tempPartitions = new TempPartitions();
-            tempPartitions.readFields(in);
-            return tempPartitions;
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, TempPartitions.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, TempPartitions.class);
     }
 
     @Deprecated

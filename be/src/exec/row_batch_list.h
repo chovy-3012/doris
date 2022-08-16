@@ -14,14 +14,15 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/row-batch-list.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXEC_ROW_BATCH_LIST_H
-#define DORIS_BE_SRC_QUERY_EXEC_ROW_BATCH_LIST_H
+#pragma once
 
 #include <string>
 #include <vector>
 
-#include "common/logging.h"
 #include "runtime/row_batch.h"
 #include "runtime/tuple_row.h"
 
@@ -127,5 +128,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

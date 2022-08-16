@@ -18,8 +18,9 @@
 package org.apache.doris.qe;
 
 import org.apache.doris.analysis.AccessTestUtil;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.jmockit.Deencapsulation;
+import org.apache.doris.datasource.CatalogIf;
 import org.apache.doris.metric.MetricRepo;
 import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlCommand;
@@ -31,6 +32,8 @@ import org.apache.doris.plugin.AuditEvent.AuditEventBuilder;
 import org.apache.doris.proto.Data;
 import org.apache.doris.thrift.TUniqueId;
 
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -39,9 +42,6 @@ import org.junit.Test;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-
-import mockit.Expectations;
-import mockit.Mocked;
 
 public class ConnectProcessorTest {
     private static ByteBuffer initDbPacket;
@@ -60,43 +60,43 @@ public class ConnectProcessorTest {
     @BeforeClass
     public static void setUpClass() {
         // Init Database packet
-        {
+        { // CHECKSTYLE IGNORE THIS LINE
             MysqlSerializer serializer = MysqlSerializer.newInstance();
             serializer.writeInt1(2);
             serializer.writeEofString("testCluster:testDb");
             initDbPacket = serializer.toByteBuffer();
-        }
+        } // CHECKSTYLE IGNORE THIS LINE
 
         // Ping packet
-        {
+        { // CHECKSTYLE IGNORE THIS LINE
             MysqlSerializer serializer = MysqlSerializer.newInstance();
             serializer.writeInt1(14);
             pingPacket = serializer.toByteBuffer();
-        }
+        } // CHECKSTYLE IGNORE THIS LINE
 
         // Quit packet
-        {
+        { // CHECKSTYLE IGNORE THIS LINE
             MysqlSerializer serializer = MysqlSerializer.newInstance();
             serializer.writeInt1(1);
             quitPacket = serializer.toByteBuffer();
-        }
+        } // CHECKSTYLE IGNORE THIS LINE
 
         // Query packet
-        {
+        { // CHECKSTYLE IGNORE THIS LINE
             MysqlSerializer serializer = MysqlSerializer.newInstance();
             serializer.writeInt1(3);
             serializer.writeEofString("select * from a");
             queryPacket = serializer.toByteBuffer();
-        }
+        } // CHECKSTYLE IGNORE THIS LINE
 
         // Field list packet
-        {
+        { // CHECKSTYLE IGNORE THIS LINE
             MysqlSerializer serializer = MysqlSerializer.newInstance();
             serializer.writeInt1(4);
             serializer.writeNulTerminateString("testTbl");
             serializer.writeEofString("");
             fieldListPacket = serializer.toByteBuffer();
-        }
+        } // CHECKSTYLE IGNORE THIS LINE
         statistics = statistics.toBuilder().setCpuMs(0L).setScanRows(0).setScanBytes(0).build();
 
         MetricRepo.init();
@@ -153,29 +153,34 @@ public class ConnectProcessorTest {
         }
     }
 
-    private static ConnectContext initMockContext(MysqlChannel channel, Catalog catalog) {
+    private static ConnectContext initMockContext(MysqlChannel channel, Env env) {
         ConnectContext context = new ConnectContext(socketChannel) {
             private boolean firstTimeToSetCommand = true;
             @Override
             public void setKilled() {
                 myContext.setKilled();
             }
+
             @Override
             public MysqlSerializer getSerializer() {
                 return myContext.getSerializer();
             }
+
             @Override
             public QueryState getState() {
                 return myContext.getState();
             }
+
             @Override
             public void setStartTime() {
                 myContext.setStartTime();
             }
+
             @Override
             public String getDatabase() {
                 return myContext.getDatabase();
             }
+
             @Override
             public void setCommand(MysqlCommand command) {
                 if (firstTimeToSetCommand) {
@@ -186,6 +191,8 @@ public class ConnectProcessorTest {
                 }
             }
         };
+
+        CatalogIf catalog = env.getCurrentCatalog();
 
         new Expectations(context) {
             {
@@ -198,9 +205,9 @@ public class ConnectProcessorTest {
                 maxTimes = 3;
                 returns(false, true, false);
 
-                context.getCatalog();
+                context.getEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
                 context.getAuditEventBuilder();
                 minTimes = 0;
@@ -232,6 +239,10 @@ public class ConnectProcessorTest {
                 context.queryId();
                 minTimes = 0;
                 result = new TUniqueId();
+
+                context.getCurrentCatalog();
+                minTimes = 0;
+                result = catalog;
             }
         };
 

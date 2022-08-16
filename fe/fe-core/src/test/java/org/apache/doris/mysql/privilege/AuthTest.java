@@ -29,12 +29,14 @@ import org.apache.doris.analysis.TablePattern;
 import org.apache.doris.analysis.UserDesc;
 import org.apache.doris.analysis.UserIdentity;
 import org.apache.doris.catalog.AccessPrivilege;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.DomainResolver;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
+import org.apache.doris.common.ExceptionChecker;
 import org.apache.doris.common.UserException;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.persist.EditLog;
 import org.apache.doris.persist.PrivInfo;
 import org.apache.doris.qe.ConnectContext;
@@ -42,7 +44,8 @@ import org.apache.doris.qe.QueryState;
 import org.apache.doris.system.SystemInfoService;
 
 import com.google.common.collect.Lists;
-
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -51,14 +54,11 @@ import java.lang.reflect.InvocationTargetException;
 import java.util.List;
 import java.util.Set;
 
-import mockit.Expectations;
-import mockit.Mocked;
-
 public class AuthTest {
 
     private PaloAuth auth;
     @Mocked
-    public Catalog catalog;
+    public Env env;
     @Mocked
     private Analyzer analyzer;
     @Mocked
@@ -87,6 +87,8 @@ public class AuthTest {
                     resolvedIPs.add("20.1.1.2");
                     resolvedIPs.add("20.1.1.3");
                     break;
+                default:
+                    break;
             }
             return true;
         }
@@ -102,15 +104,19 @@ public class AuthTest {
                 minTimes = 0;
                 result = SystemInfoService.DEFAULT_CLUSTER;
 
-                Catalog.getCurrentCatalog();
+                analyzer.getDefaultCatalog();
                 minTimes = 0;
-                result = catalog;
+                result = InternalCatalog.INTERNAL_CATALOG_NAME;
 
-                catalog.getAuth();
+                Env.getCurrentEnv();
+                minTimes = 0;
+                result = env;
+
+                env.getAuth();
                 minTimes = 0;
                 result = auth;
 
-                catalog.getEditLog();
+                env.getEditLog();
                 minTimes = 0;
                 result = editLog;
 
@@ -143,7 +149,8 @@ public class AuthTest {
     }
 
     @Test
-    public void test() throws IllegalAccessException, IllegalArgumentException, InvocationTargetException {
+    public void test()
+            throws IllegalAccessException, IllegalArgumentException, InvocationTargetException, UserException {
         // 1. create cmy@%
         UserIdentity userIdentity = new UserIdentity("cmy", "%");
         UserDesc userDesc = new UserDesc(userIdentity, "12345", true);
@@ -160,6 +167,43 @@ public class AuthTest {
         } catch (DdlException e) {
             Assert.fail();
         }
+
+        // 1.1 create cmy@% again with IF NOT EXISTS
+        userIdentity = new UserIdentity("cmy", "%");
+        userDesc = new UserDesc(userIdentity, "54321", true);
+        createUserStmt = new CreateUserStmt(true, userDesc, null);
+        try {
+            createUserStmt.analyze(analyzer);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+
+        try {
+            auth.createUser(createUserStmt);
+        } catch (DdlException e) {
+            Assert.fail();
+        }
+
+        // 1.2 create cmy@% again without IF NOT EXISTS
+        userIdentity = new UserIdentity("cmy", "%");
+        userDesc = new UserDesc(userIdentity, "54321", true);
+        createUserStmt = new CreateUserStmt(false, userDesc, null);
+        try {
+            createUserStmt.analyze(analyzer);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+
+        boolean hasException = false;
+        try {
+            auth.createUser(createUserStmt);
+        } catch (DdlException e) {
+            e.printStackTrace();
+            hasException = true;
+        }
+        Assert.assertTrue(hasException);
 
         // 2. check if cmy from specified ip can access to palo
         List<UserIdentity> currentUser = Lists.newArrayList();
@@ -205,7 +249,7 @@ public class AuthTest {
             Assert.fail();
         }
 
-        boolean hasException = false;
+        hasException = false;
         try {
             auth.createUser(createUserStmt);
         } catch (DdlException e) {
@@ -769,6 +813,40 @@ public class AuthTest {
             Assert.fail();
         }
 
+        // 24.1 create role again with IF NOT EXISTS
+        roleStmt = new CreateRoleStmt(true, "role1");
+        try {
+            roleStmt.analyze(analyzer);
+        } catch (UserException e1) {
+            e1.printStackTrace();
+            Assert.fail();
+        }
+
+        try {
+            auth.createRole(roleStmt);
+        } catch (DdlException e1) {
+            e1.printStackTrace();
+            Assert.fail();
+        }
+
+        // 24.2 create role again without IF NOT EXISTS
+        roleStmt = new CreateRoleStmt(false, "role1");
+        try {
+            roleStmt.analyze(analyzer);
+        } catch (UserException e1) {
+            e1.printStackTrace();
+            Assert.fail();
+        }
+
+        hasException = false;
+        try {
+            auth.createRole(roleStmt);
+        } catch (DdlException e1) {
+            e1.printStackTrace();
+            hasException = true;
+        }
+        Assert.assertTrue(hasException);
+
         // 25. grant auth to non exist role, will create this new role
         privileges = Lists.newArrayList(AccessPrivilege.DROP_PRIV, AccessPrivilege.SELECT_PRIV);
         grantStmt = new GrantStmt(null, "role2", new TablePattern("*", "*"), privileges);
@@ -917,6 +995,40 @@ public class AuthTest {
         Assert.assertFalse(auth.checkDbPriv(currentUser2.get(0), SystemInfoService.DEFAULT_CLUSTER + ":db4",
                 PrivPredicate.DROP));
 
+        // 31.1 drop role again with IF EXISTS
+        dropRoleStmt = new DropRoleStmt(true, "role1");
+        try {
+            dropRoleStmt.analyze(analyzer);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+
+        try {
+            auth.dropRole(dropRoleStmt);
+        } catch (DdlException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+
+        // 31.2 drop role again without IF EXISTS
+        dropRoleStmt = new DropRoleStmt(false, "role1");
+        try {
+            dropRoleStmt.analyze(analyzer);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+
+        hasException = false;
+        try {
+            auth.dropRole(dropRoleStmt);
+        } catch (DdlException e) {
+            e.printStackTrace();
+            hasException = true;
+        }
+        Assert.assertTrue(hasException);
+
         // 32. drop user cmy@"%"
         DropUserStmt dropUserStmt = new DropUserStmt(new UserIdentity("cmy", "%"));
         try {
@@ -935,6 +1047,39 @@ public class AuthTest {
         Assert.assertFalse(auth.checkPlainPassword(SystemInfoService.DEFAULT_CLUSTER + ":cmy", "192.168.0.1", "12345", null));
         Assert.assertTrue(auth.checkPlainPassword(SystemInfoService.DEFAULT_CLUSTER + ":zhangsan", "192.168.0.1",
                 "12345", null));
+
+        // 32.1 drop user cmy@"%" again with IF EXISTS
+        dropUserStmt = new DropUserStmt(true, new UserIdentity("cmy", "%"));
+        try {
+            dropUserStmt.analyze(analyzer);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+
+        try {
+            auth.dropUser(dropUserStmt);
+        } catch (DdlException e) {
+            Assert.fail();
+        }
+
+        // 32.2 drop user cmy@"%" again without IF EXISTS
+        dropUserStmt = new DropUserStmt(false, new UserIdentity("cmy", "%"));
+        try {
+            dropUserStmt.analyze(analyzer);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+
+        hasException = false;
+        try {
+            auth.dropUser(dropUserStmt);
+        } catch (DdlException e) {
+            e.printStackTrace();
+            hasException = true;
+        }
+        Assert.assertTrue(hasException);
 
         // 33. drop user zhangsan@"192.%"
         dropUserStmt = new DropUserStmt(new UserIdentity("zhangsan", "192.%"));
@@ -1068,6 +1213,127 @@ public class AuthTest {
             Assert.fail();
         } catch (UserException e) {
             e.printStackTrace();
+        }
+
+        // 40. create new user and grant node_priv to it
+        final UserIdentity opUser = new UserIdentity("op_user", "%");
+        userDesc = new UserDesc(opUser, "12345", true);
+        createUserStmt = new CreateUserStmt(false, userDesc, null);
+        createUserStmt.analyze(analyzer);
+        auth.createUser(createUserStmt);
+
+        privileges = Lists.newArrayList(AccessPrivilege.NODE_PRIV);
+        // 40.1 grant to non-global level, which is not allowed
+        grantStmt = new GrantStmt(opUser, null, new TablePattern("db1", "*"), privileges);
+        try {
+            grantStmt.analyze(analyzer);
+            Assert.fail();
+        } catch (UserException e) {
+            e.printStackTrace();
+        }
+
+        grantStmt = new GrantStmt(opUser, null, new TablePattern("db1", "tbl"), privileges);
+        try {
+            grantStmt.analyze(analyzer);
+            Assert.fail();
+        } catch (UserException e) {
+            e.printStackTrace();
+        }
+        // 40.2 grant to global level
+        new Expectations() {
+            {
+                ctx.getCurrentUserIdentity();
+                minTimes = 1;
+                result = opUser;
+            }
+        };
+        Assert.assertFalse(auth.checkGlobalPriv(ctx, PrivPredicate.OPERATOR));
+        grantStmt = new GrantStmt(opUser, null, new TablePattern("*", "*", "*"), privileges);
+        // first, use op_user itself to grant node_priv, which is not allowed
+        try {
+            new Expectations() {
+                {
+                    ctx.getCurrentUserIdentity();
+                    minTimes = 1;
+                    result = opUser;
+                }
+            };
+            grantStmt.analyze(analyzer);
+            Assert.fail();
+        } catch (UserException e) {
+            e.printStackTrace();
+        }
+        // second, use root to grant node_priv
+        try {
+            new Expectations() {
+                {
+                    ctx.getCurrentUserIdentity();
+                    minTimes = 1;
+                    result = UserIdentity.ROOT;
+                }
+            };
+            grantStmt.analyze(analyzer);
+            auth.grant(grantStmt);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+        // switch to op_user to check it has node_priv
+        new Expectations() {
+            {
+                ctx.getCurrentUserIdentity();
+                minTimes = 2;
+                result = opUser;
+            }
+        };
+        Assert.assertTrue(auth.checkGlobalPriv(ctx, PrivPredicate.OPERATOR));
+        // Now, op_user only has node_priv, it can not grant node_priv to other user.
+        // create otherOpUser first
+        UserIdentity otherOpUser = new UserIdentity("other_op_user", "%");
+        userDesc = new UserDesc(otherOpUser, "12345", true);
+        createUserStmt = new CreateUserStmt(false, userDesc, null);
+        createUserStmt.analyze(analyzer);
+        auth.createUser(createUserStmt);
+        // try grant, it should fail
+        grantStmt = new GrantStmt(otherOpUser, null, new TablePattern("*", "*"), privileges);
+        try {
+            grantStmt.analyze(analyzer);
+            Assert.fail();
+        } catch (UserException e) {
+            e.printStackTrace();
+        }
+        // Now, we grant grant_priv to opUser, and check if it can than grant node_priv to other user
+        privileges = Lists.newArrayList(AccessPrivilege.GRANT_PRIV);
+        grantStmt = new GrantStmt(opUser, null, new TablePattern("*", "*"), privileges);
+        try {
+            new Expectations() {
+                {
+                    ctx.getCurrentUserIdentity();
+                    minTimes = 2;
+                    result = UserIdentity.ROOT;
+                }
+            };
+            grantStmt.analyze(analyzer);
+            auth.grant(grantStmt);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
+        }
+        // grant node_priv to other_op_user
+        grantStmt = new GrantStmt(otherOpUser, null, new TablePattern("*", "*"), privileges);
+        try {
+            new Expectations() {
+                {
+                    ctx.getCurrentUserIdentity();
+                    minTimes = 1;
+                    result = opUser;
+                }
+            };
+            grantStmt.analyze(analyzer);
+            auth.grant(grantStmt);
+        } catch (UserException e) {
+            e.printStackTrace();
+            Assert.fail();
         }
     }
 
@@ -1326,15 +1592,14 @@ public class AuthTest {
 
         // 2. grant resource priv to db table
         TablePattern tablePattern = new TablePattern("db1", "*");
-        grantStmt = new GrantStmt(userIdentity, null, tablePattern, usagePrivileges);
-        hasException = false;
-        try {
-            grantStmt.analyze(analyzer);
-            auth.grant(grantStmt);
-        } catch (UserException e) {
-            e.printStackTrace();
-            hasException = true;
-        }
-        Assert.assertTrue(hasException);
+        GrantStmt grantStmt2 = new GrantStmt(userIdentity, null, tablePattern, usagePrivileges);
+        ExceptionChecker.expectThrowsWithMsg(AnalysisException.class,
+                "Can not grant/revoke USAGE_PRIV to/from database or table", () -> grantStmt2.analyze(analyzer));
+
+        // 3. grant resource prov to role on db.table
+        tablePattern = new TablePattern("db1", "*");
+        GrantStmt grantStmt3 = new GrantStmt(userIdentity, "test_role", tablePattern, usagePrivileges);
+        ExceptionChecker.expectThrowsWithMsg(AnalysisException.class,
+                "Can not grant/revoke USAGE_PRIV to/from database or table", () -> grantStmt3.analyze(analyzer));
     }
 }

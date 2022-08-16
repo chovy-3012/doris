@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.10.0/be/src/exprs/agg-fn-evaluator.cc
+// and modified by Doris
 
 #include "exprs/new_agg_fn_evaluator.h"
 
@@ -21,20 +24,14 @@
 
 #include <sstream>
 
-#include "common/logging.h"
 #include "exprs/agg_fn.h"
-#include "exprs/aggregate_functions.h"
 #include "exprs/anyval_util.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
-#include "exprs/scalar_fn_call.h"
-#include "gutil/strings/substitute.h"
-#include "runtime/mem_tracker.h"
 #include "runtime/raw_value.h"
 #include "runtime/runtime_state.h"
 #include "runtime/string_value.h"
 #include "udf/udf_internal.h"
-#include "util/debug_util.h"
 
 using namespace doris;
 using namespace doris_udf;
@@ -88,21 +85,13 @@ typedef StringVal (*SerializeFn)(FunctionContext*, const StringVal&);
 typedef AnyVal (*GetValueFn)(FunctionContext*, const AnyVal&);
 typedef AnyVal (*FinalizeFn)(FunctionContext*, const AnyVal&);
 
-const int DEFAULT_MULTI_DISTINCT_COUNT_STRING_BUFFER_SIZE = 1024;
-
-NewAggFnEvaluator::NewAggFnEvaluator(const AggFn& agg_fn, MemPool* mem_pool,
-                                     const std::shared_ptr<MemTracker>& tracker, bool is_clone)
-        : _total_mem_consumption(0),
-          _accumulated_mem_consumption(0),
+NewAggFnEvaluator::NewAggFnEvaluator(const AggFn& agg_fn, MemPool* mem_pool, bool is_clone)
+        : _accumulated_mem_consumption(0),
           is_clone_(is_clone),
           agg_fn_(agg_fn),
-          mem_pool_(mem_pool),
-          _mem_tracker(tracker) {}
+          mem_pool_(mem_pool) {}
 
 NewAggFnEvaluator::~NewAggFnEvaluator() {
-    if (UNLIKELY(_total_mem_consumption > 0)) {
-        _mem_tracker->Release(_total_mem_consumption);
-    }
     DCHECK(closed_);
 }
 
@@ -116,16 +105,14 @@ const TypeDescriptor& NewAggFnEvaluator::intermediate_type() const {
 
 Status NewAggFnEvaluator::Create(const AggFn& agg_fn, RuntimeState* state, ObjectPool* pool,
                                  MemPool* mem_pool, NewAggFnEvaluator** result,
-                                 const std::shared_ptr<MemTracker>& tracker,
                                  const RowDescriptor& row_desc) {
     *result = nullptr;
 
     // Create a new AggFn evaluator.
-    NewAggFnEvaluator* agg_fn_eval =
-            pool->add(new NewAggFnEvaluator(agg_fn, mem_pool, tracker, false));
+    NewAggFnEvaluator* agg_fn_eval = pool->add(new NewAggFnEvaluator(agg_fn, mem_pool, false));
 
     agg_fn_eval->agg_fn_ctx_.reset(FunctionContextImpl::create_context(
-            state, mem_pool, agg_fn.GetIntermediateTypeDesc(), agg_fn.GetOutputTypeDesc(),
+            state, mem_pool, agg_fn.get_intermediate_type_desc(), agg_fn.get_output_type_desc(),
             agg_fn.arg_type_descs(), 0, false));
 
     Status status;
@@ -134,7 +121,7 @@ Status NewAggFnEvaluator::Create(const AggFn& agg_fn, RuntimeState* state, Objec
         // TODO chenhao replace ExprContext with ScalarFnEvaluator
         ExprContext* input_eval = pool->add(new ExprContext(input_expr));
         if (input_eval == nullptr) goto cleanup;
-        input_eval->prepare(state, row_desc, tracker);
+        input_eval->prepare(state, row_desc);
         agg_fn_eval->input_evals_.push_back(input_eval);
         Expr* root = input_eval->root();
         DCHECK(root == input_expr);
@@ -170,15 +157,14 @@ cleanup:
     return status;
 }
 
-Status NewAggFnEvaluator::Create(const vector<AggFn*>& agg_fns, RuntimeState* state,
+Status NewAggFnEvaluator::Create(const std::vector<AggFn*>& agg_fns, RuntimeState* state,
                                  ObjectPool* pool, MemPool* mem_pool,
-                                 vector<NewAggFnEvaluator*>* evals,
-                                 const std::shared_ptr<MemTracker>& tracker,
+                                 std::vector<NewAggFnEvaluator*>* evals,
                                  const RowDescriptor& row_desc) {
     for (const AggFn* agg_fn : agg_fns) {
         NewAggFnEvaluator* agg_fn_eval;
-        RETURN_IF_ERROR(NewAggFnEvaluator::Create(*agg_fn, state, pool, mem_pool, &agg_fn_eval,
-                                                  tracker, row_desc));
+        RETURN_IF_ERROR(
+                NewAggFnEvaluator::Create(*agg_fn, state, pool, mem_pool, &agg_fn_eval, row_desc));
         evals->push_back(agg_fn_eval);
     }
     return Status::OK();
@@ -192,7 +178,7 @@ Status NewAggFnEvaluator::Open(RuntimeState* state) {
     // Now that we have opened all our input exprs, it is safe to evaluate any constant
     // values for the UDA's FunctionContext (we cannot evaluate exprs before calling Open()
     // on them).
-    vector<AnyVal*> constant_args(input_evals_.size(), nullptr);
+    std::vector<AnyVal*> constant_args(input_evals_.size(), nullptr);
     for (int i = 0; i < input_evals_.size(); ++i) {
         ExprContext* eval = input_evals_[i];
         RETURN_IF_ERROR(eval->get_const_value(state, *(agg_fn_.get_child(i)), &constant_args[i]));
@@ -201,7 +187,7 @@ Status NewAggFnEvaluator::Open(RuntimeState* state) {
     return Status::OK();
 }
 
-Status NewAggFnEvaluator::Open(const vector<NewAggFnEvaluator*>& evals, RuntimeState* state) {
+Status NewAggFnEvaluator::Open(const std::vector<NewAggFnEvaluator*>& evals, RuntimeState* state) {
     for (NewAggFnEvaluator* eval : evals) RETURN_IF_ERROR(eval->Open(state));
     return Status::OK();
 }
@@ -223,7 +209,7 @@ void NewAggFnEvaluator::Close(RuntimeState* state) {
     input_evals_.clear();
 }
 
-void NewAggFnEvaluator::Close(const vector<NewAggFnEvaluator*>& evals, RuntimeState* state) {
+void NewAggFnEvaluator::Close(const std::vector<NewAggFnEvaluator*>& evals, RuntimeState* state) {
     for (NewAggFnEvaluator* eval : evals) eval->Close(state);
 }
 
@@ -267,6 +253,7 @@ void NewAggFnEvaluator::SetDstSlot(const AnyVal* src, const SlotDescriptor& dst_
     case TYPE_VARCHAR:
     case TYPE_HLL:
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING:
         *reinterpret_cast<StringValue*>(slot) =
                 StringValue::from_string_val(*reinterpret_cast<const StringVal*>(src));
@@ -288,7 +275,7 @@ void NewAggFnEvaluator::SetDstSlot(const AnyVal* src, const SlotDescriptor& dst_
 // This function would be replaced in codegen.
 void NewAggFnEvaluator::Init(Tuple* dst) {
     DCHECK(opened_);
-    DCHECK(agg_fn_.init_fn_ != nullptr);
+    DCHECK(agg_fn_._init_fn != nullptr);
     for (ExprContext* input_eval : input_evals_) {
         DCHECK(input_eval->opened());
     }
@@ -305,7 +292,7 @@ void NewAggFnEvaluator::Init(Tuple* dst) {
         sv->ptr = reinterpret_cast<uint8_t*>(slot);
         sv->len = type.len;
     }
-    reinterpret_cast<InitFn>(agg_fn_.init_fn_)(agg_fn_ctx_.get(), staging_intermediate_val_);
+    reinterpret_cast<InitFn>(agg_fn_._init_fn)(agg_fn_ctx_.get(), staging_intermediate_val_);
     SetDstSlot(staging_intermediate_val_, slot_desc, dst);
     agg_fn_ctx_->impl()->set_num_updates(0);
     agg_fn_ctx_->impl()->set_num_removes(0);
@@ -364,6 +351,7 @@ inline void NewAggFnEvaluator::set_any_val(const void* slot, const TypeDescripto
     case TYPE_VARCHAR:
     case TYPE_HLL:
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING:
         reinterpret_cast<const StringValue*>(slot)->to_string_val(
                 reinterpret_cast<StringVal*>(dst));
@@ -522,12 +510,12 @@ void NewAggFnEvaluator::Update(const TupleRow* row, Tuple* dst, void* fn) {
 }
 
 void NewAggFnEvaluator::Merge(Tuple* src, Tuple* dst) {
-    DCHECK(agg_fn_.merge_fn_ != nullptr);
+    DCHECK(agg_fn_._merge_fn != nullptr);
     const SlotDescriptor& slot_desc = intermediate_slot_desc();
     SetAnyVal(slot_desc, dst, staging_intermediate_val_);
     SetAnyVal(slot_desc, src, staging_merge_input_val_);
     // The merge fn always takes one input argument.
-    reinterpret_cast<UpdateFn1>(agg_fn_.merge_fn_)(agg_fn_ctx_.get(), *staging_merge_input_val_,
+    reinterpret_cast<UpdateFn1>(agg_fn_._merge_fn)(agg_fn_ctx_.get(), *staging_merge_input_val_,
                                                    staging_intermediate_val_);
     SetDstSlot(staging_intermediate_val_, slot_desc, dst);
 }
@@ -606,6 +594,7 @@ void NewAggFnEvaluator::SerializeOrFinalize(Tuple* src, const SlotDescriptor& ds
     case TYPE_VARCHAR:
     case TYPE_HLL:
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING: {
         typedef StringVal (*Fn)(FunctionContext*, AnyVal*);
         StringVal v = reinterpret_cast<Fn>(fn)(agg_fn_ctx_.get(), staging_intermediate_val_);
@@ -633,7 +622,7 @@ void NewAggFnEvaluator::SerializeOrFinalize(Tuple* src, const SlotDescriptor& ds
 void NewAggFnEvaluator::ShallowClone(ObjectPool* pool, MemPool* mem_pool,
                                      NewAggFnEvaluator** cloned_eval) const {
     DCHECK(opened_);
-    *cloned_eval = pool->add(new NewAggFnEvaluator(agg_fn_, mem_pool, _mem_tracker, true));
+    *cloned_eval = pool->add(new NewAggFnEvaluator(agg_fn_, mem_pool, true));
     (*cloned_eval)->agg_fn_ctx_.reset(agg_fn_ctx_->impl()->clone(mem_pool));
     DCHECK_EQ((*cloned_eval)->input_evals_.size(), 0);
     (*cloned_eval)->input_evals_ = input_evals_;
@@ -644,21 +633,11 @@ void NewAggFnEvaluator::ShallowClone(ObjectPool* pool, MemPool* mem_pool,
 }
 
 void NewAggFnEvaluator::ShallowClone(ObjectPool* pool, MemPool* mem_pool,
-                                     const vector<NewAggFnEvaluator*>& evals,
-                                     vector<NewAggFnEvaluator*>* cloned_evals) {
+                                     const std::vector<NewAggFnEvaluator*>& evals,
+                                     std::vector<NewAggFnEvaluator*>* cloned_evals) {
     for (const NewAggFnEvaluator* eval : evals) {
         NewAggFnEvaluator* cloned_eval;
         eval->ShallowClone(pool, mem_pool, &cloned_eval);
         cloned_evals->push_back(cloned_eval);
     }
 }
-
-//
-//void NewAggFnEvaluator::FreeLocalAllocations() {
-//  ExprContext::FreeLocalAllocations(input_evals_);
-//  agg_fn_ctx_->impl()->FreeLocalAllocations();
-//}
-
-//void NewAggFnEvaluator::FreeLocalAllocations(const vector<NewAggFnEvaluator*>& evals) {
-//  for (NewAggFnEvaluator* eval : evals) eval->FreeLocalAllocations();
-//}

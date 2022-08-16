@@ -21,6 +21,9 @@ import org.apache.doris.analysis.AccessTestUtil;
 import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlProto;
 
+import mockit.Delegate;
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -29,10 +32,6 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.atomic.AtomicLong;
-
-import mockit.Delegate;
-import mockit.Expectations;
-import mockit.Mocked;
 
 public class ConnectSchedulerTest {
     private static final Logger LOG = LoggerFactory.getLogger(ConnectScheduler.class);
@@ -89,9 +88,9 @@ public class ConnectSchedulerTest {
         for (int i = 0; i < 2; ++i) {
             ConnectContext context = new ConnectContext(socketChannel);
             if (i == 1) {
-                context.setCatalog(AccessTestUtil.fetchBlockCatalog());
+                context.setEnv(AccessTestUtil.fetchBlockCatalog());
             } else {
-                context.setCatalog(AccessTestUtil.fetchAdminCatalog());
+                context.setEnv(AccessTestUtil.fetchAdminCatalog());
             }
             context.setQualifiedUser("root");
             Assert.assertTrue(scheduler.submit(context));
@@ -111,7 +110,7 @@ public class ConnectSchedulerTest {
         ConnectScheduler scheduler = new ConnectScheduler(10);
 
         ConnectContext context = new ConnectContext(socketChannel);
-        context.setCatalog(AccessTestUtil.fetchAdminCatalog());
+        context.setEnv(AccessTestUtil.fetchAdminCatalog());
         context.setQualifiedUser("root");
         Assert.assertTrue(scheduler.submit(context));
         Assert.assertEquals(0, context.getConnectionId());

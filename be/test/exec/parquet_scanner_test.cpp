@@ -24,10 +24,10 @@
 
 #include "common/object_pool.h"
 #include "exec/broker_scan_node.h"
-#include "exec/local_file_reader.h"
 #include "exprs/cast_functions.h"
 #include "gen_cpp/Descriptors_types.h"
 #include "gen_cpp/PlanNodes_types.h"
+#include "io/local_file_reader.h"
 #include "runtime/descriptors.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
@@ -40,7 +40,7 @@ class ParquetScannerTest : public testing::Test {
 public:
     ParquetScannerTest() : _runtime_state(TQueryGlobals()) {
         init();
-        _runtime_state._instance_mem_tracker.reset(new MemTracker());
+        _runtime_state.init_instance_mem_tracker();
     }
     void init();
     static void SetUpTestCase() {
@@ -58,6 +58,7 @@ private:
     int create_dst_tuple(TDescriptorTable& t_desc_table, int next_slot_id);
     void create_expr_info();
     void init_desc_table();
+    void init_filter_expr();
     RuntimeState _runtime_state;
     ObjectPool _obj_pool;
     std::map<std::string, SlotDescriptor*> _slots_map;
@@ -96,7 +97,7 @@ int ParquetScannerTest::create_src_tuple(TDescriptorTable& t_desc_table, int nex
         slot_desc.slotType = type;
         slot_desc.columnPos = i;
         // Skip the first 8 bytes These 8 bytes are used to indicate whether the field is a null value
-        slot_desc.byteOffset = i * 16 + 8; 
+        slot_desc.byteOffset = i * 16 + 8;
         slot_desc.nullIndicatorByte = i / 8;
         slot_desc.nullIndicatorBit = i % 8;
         slot_desc.colName = columnNames[i];
@@ -111,7 +112,7 @@ int ParquetScannerTest::create_src_tuple(TDescriptorTable& t_desc_table, int nex
         TTupleDescriptor t_tuple_desc;
         t_tuple_desc.id = TUPLE_ID_SRC;
         //Here 8 bytes in order to handle null values
-        t_tuple_desc.byteSize = COLUMN_NUMBERS * 16 + 8; 
+        t_tuple_desc.byteSize = COLUMN_NUMBERS * 16 + 8;
         t_tuple_desc.numNullBytes = 0;
         t_tuple_desc.tableId = 0;
         t_tuple_desc.__isset.tableId = true;
@@ -121,8 +122,9 @@ int ParquetScannerTest::create_src_tuple(TDescriptorTable& t_desc_table, int nex
 }
 
 int ParquetScannerTest::create_dst_tuple(TDescriptorTable& t_desc_table, int next_slot_id) {
-    int32_t byteOffset = 8; // Skip the first 8 bytes These 8 bytes are used to indicate whether the field is a null value
-    {                       //log_version
+    int32_t byteOffset =
+            8; // Skip the first 8 bytes These 8 bytes are used to indicate whether the field is a null value
+    {          //log_version
         TSlotDescriptor slot_desc;
 
         slot_desc.id = next_slot_id++;
@@ -405,10 +407,70 @@ void ParquetScannerTest::create_expr_info() {
     _params.__set_src_tuple_id(TUPLE_ID_SRC);
 }
 
+void ParquetScannerTest::init_filter_expr() {
+    TTypeDesc bool_type;
+    {
+        TTypeNode node;
+        node.__set_type(TTypeNodeType::SCALAR);
+        TScalarType scalar_type;
+        scalar_type.__set_type(TPrimitiveType::BOOLEAN);
+        scalar_type.__set_len(5000);
+        node.__set_scalar_type(scalar_type);
+        bool_type.types.push_back(node);
+    }
+    TTypeDesc int_type;
+    {
+        TTypeNode node;
+        node.__set_type(TTypeNodeType::SCALAR);
+        TScalarType scalar_type;
+        scalar_type.__set_type(TPrimitiveType::BIGINT);
+        node.__set_scalar_type(scalar_type);
+        int_type.types.push_back(node);
+    }
+
+    // create predicate
+    ::doris::TExpr expr;
+
+    // create predicate elements: LeftExpr op RightExpr
+    // expr: log_time > 1
+    ::doris::TExprNode op;
+    op.node_type = TExprNodeType::BINARY_PRED;
+    op.opcode = TExprOpcode::GT;
+    op.type = bool_type;
+    op.num_children = 2;
+    op.child_type = TPrimitiveType::BIGINT;
+    op.__isset.opcode = true;
+    expr.nodes.push_back(op);
+
+    // log_time
+    ::doris::TExprNode slot_ref;
+    slot_ref.node_type = TExprNodeType::SLOT_REF;
+    slot_ref.type = int_type;
+    slot_ref.slot_ref.slot_id = 1;
+    slot_ref.slot_ref.tuple_id = 0;
+    slot_ref.num_children = 0;
+    slot_ref.__isset.slot_ref = true;
+    expr.nodes.push_back(slot_ref);
+
+    ::doris::TExprNode int_expr;
+    int_expr.node_type = TExprNodeType::INT_LITERAL;
+    int_expr.type = int_type;
+    int_expr.int_literal.value = 1;
+    int_expr.num_children = 0;
+    int_expr.__isset.int_literal = true;
+
+    expr.nodes.push_back(int_expr);
+
+    std::vector<::doris::TExpr> conjuncts;
+    conjuncts.push_back(expr);
+    // push down conjuncts;
+    _tnode.__set_conjuncts(conjuncts);
+}
+
 void ParquetScannerTest::init() {
     create_expr_info();
     init_desc_table();
-
+    init_filter_expr();
     // Node Id
     _tnode.node_id = 0;
     _tnode.node_type = TPlanNodeType::SCHEMA_SCAN_NODE;
@@ -418,13 +480,14 @@ void ParquetScannerTest::init() {
     _tnode.nullable_tuples.push_back(false);
     _tnode.broker_scan_node.tuple_id = 0;
     _tnode.__isset.broker_scan_node = true;
+    _tnode.__isset.conjuncts = true;
 }
 
 TEST_F(ParquetScannerTest, normal) {
     BrokerScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
     scan_node.init(_tnode);
     auto status = scan_node.prepare(&_runtime_state);
-    ASSERT_TRUE(status.ok());
+    EXPECT_TRUE(status.ok());
 
     // set scan range
     std::vector<TScanRangeParams> scan_ranges;
@@ -439,7 +502,7 @@ TEST_F(ParquetScannerTest, normal) {
         range.format_type = TFileFormatType::FORMAT_PARQUET;
         range.splittable = true;
 
-        std::vector<std::string> columns_from_path{"value"};
+        std::vector<std::string> columns_from_path {"value"};
         range.__set_columns_from_path(columns_from_path);
         range.__set_num_of_columns_from_file(19);
 #if 1
@@ -460,29 +523,28 @@ TEST_F(ParquetScannerTest, normal) {
 
     scan_node.set_scan_ranges(scan_ranges);
     status = scan_node.open(&_runtime_state);
-    ASSERT_TRUE(status.ok());
+    EXPECT_TRUE(status.ok());
 
-    auto tracker = std::make_shared<MemTracker>();
     // Get batch
-    RowBatch batch(scan_node.row_desc(), _runtime_state.batch_size(), tracker.get());
+    RowBatch batch(scan_node.row_desc(), _runtime_state.batch_size());
     bool eof = false;
     for (int i = 0; i < 14; i++) {
         status = scan_node.get_next(&_runtime_state, &batch, &eof);
-        ASSERT_TRUE(status.ok());
-        ASSERT_EQ(2048, batch.num_rows());
-        ASSERT_FALSE(eof);
+        EXPECT_TRUE(status.ok());
+        EXPECT_EQ(2048, batch.num_rows());
+        EXPECT_FALSE(eof);
         batch.reset();
     }
 
     status = scan_node.get_next(&_runtime_state, &batch, &eof);
-    ASSERT_TRUE(status.ok());
-    ASSERT_EQ(1328, batch.num_rows());
-    ASSERT_FALSE(eof);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(1328, batch.num_rows());
+    EXPECT_FALSE(eof);
     batch.reset();
     status = scan_node.get_next(&_runtime_state, &batch, &eof);
-    ASSERT_TRUE(status.ok());
-    ASSERT_EQ(0, batch.num_rows());
-    ASSERT_TRUE(eof);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(0, batch.num_rows());
+    EXPECT_TRUE(eof);
 
     scan_node.close(&_runtime_state);
     {
@@ -493,9 +555,3 @@ TEST_F(ParquetScannerTest, normal) {
 }
 
 } // namespace doris
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
-}

@@ -26,9 +26,10 @@ import org.apache.doris.analysis.TableName;
 import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.rewrite.ExprRewriteRule;
+import org.apache.doris.rewrite.ExprRewriter;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -46,11 +47,11 @@ import java.util.List;
  *    or  select k1, approx_count_distinct(k2) from table group by k1
  * Rewritten query: select k1, hll_union_agg(mv_hll_union_k2) from table group by k1
  */
-public class NDVToHll implements ExprRewriteRule{
+public class NDVToHll implements ExprRewriteRule {
     public static final ExprRewriteRule INSTANCE = new NDVToHll();
 
     @Override
-    public Expr apply(Expr expr, Analyzer analyzer) throws AnalysisException {
+    public Expr apply(Expr expr, Analyzer analyzer, ExprRewriter.ClauseType clauseType) throws AnalysisException {
         // meet condition
         if (!(expr instanceof FunctionCallExpr)) {
             return expr;
@@ -65,7 +66,7 @@ public class NDVToHll implements ExprRewriteRule{
         }
         SlotRef fnChild0 = (SlotRef) fnExpr.getChild(0);
         Column column = fnChild0.getColumn();
-        Table table = fnChild0.getTable();
+        TableIf table = fnChild0.getTable();
         if (column == null || table == null || !(table instanceof OlapTable)) {
             return expr;
         }

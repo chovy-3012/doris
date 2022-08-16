@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/InlineViewRef.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
@@ -29,7 +32,6 @@ import org.apache.doris.rewrite.ExprRewriter;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -97,20 +99,27 @@ public class InlineViewRef extends TableRef {
     public InlineViewRef(View view, TableRef origTblRef) {
         super(origTblRef.getName(), origTblRef.getExplicitAlias());
         queryStmt = view.getQueryStmt().clone();
-        if (view.isLocalView()) queryStmt.reset();
+        if (view.isLocalView()) {
+            queryStmt.reset();
+        }
         this.view = view;
         sMap = new ExprSubstitutionMap();
         baseTblSmap = new ExprSubstitutionMap();
         setJoinAttrs(origTblRef);
         explicitColLabels = view.getColLabels();
         // Set implicit aliases if no explicit one was given.
-        if (hasExplicitAlias()) return;
+        if (hasExplicitAlias()) {
+            return;
+        }
         // TODO(zc)
         // view_.getTableName().toString().toLowerCase(), view.getName().toLowerCase()
         if (view.isLocalView()) {
-            aliases_ = new String[] { view.getName() };
+            aliases = new String[]{view.getName()};
         } else {
-            aliases_ = new String[] { name.toString(), view.getName() };
+            aliases = new String[]{name.toString(), view.getName()};
+        }
+        if (origTblRef.getLateralViewRefs() != null) {
+            lateralViewRefs = (ArrayList<LateralViewRef>) origTblRef.getLateralViewRefs().clone();
         }
     }
 
@@ -127,7 +136,9 @@ public class InlineViewRef extends TableRef {
         baseTblSmap = other.baseTblSmap.clone();
     }
 
-    public List<String> getExplicitColLabels() { return explicitColLabels; }
+    public List<String> getExplicitColLabels() {
+        return explicitColLabels;
+    }
 
     public List<String> getColLabels() {
         if (explicitColLabels != null) {
@@ -139,12 +150,12 @@ public class InlineViewRef extends TableRef {
 
     @Override
     public void reset() {
-      super.reset();
-      queryStmt.reset();
-      inlineViewAnalyzer = null;
-      materializedTupleIds.clear();
-      sMap.clear();
-      baseTblSmap.clear();
+        super.reset();
+        queryStmt.reset();
+        inlineViewAnalyzer = null;
+        materializedTupleIds.clear();
+        sMap.clear();
+        baseTblSmap.clear();
     }
 
     @Override
@@ -174,14 +185,14 @@ public class InlineViewRef extends TableRef {
 
         // Analyze the inline view query statement with its own analyzer
         inlineViewAnalyzer = new Analyzer(analyzer);
-
+        inlineViewAnalyzer.setInlineView(true);
         queryStmt.analyze(inlineViewAnalyzer);
-        correlatedTupleIds_.addAll(queryStmt.getCorrelatedTupleIds(inlineViewAnalyzer));
+        correlatedTupleIds.addAll(queryStmt.getCorrelatedTupleIds(inlineViewAnalyzer));
 
         queryStmt.getMaterializedTupleIds(materializedTupleIds);
         if (view != null && !hasExplicitAlias() && !view.isLocalView()) {
             name = analyzer.getFqTableName(name);
-            aliases_ = new String[] { name.toString(), view.getName() };
+            aliases = new String[] { name.toString(), view.getName() };
         }
         //TODO(chenhao16): fix TableName in Db.Table style
         // name.analyze(analyzer);
@@ -195,8 +206,7 @@ public class InlineViewRef extends TableRef {
             desc.setIsMaterialized(true);
             materializedTupleIds.add(desc.getId());
         }
-
-        // create smap_ and baseTblSmap_ and register auxiliary eq predicates between our
+        // create sMap and baseTblSmap and register auxiliary eq predicates between our
         // tuple descriptor's slots and our *unresolved* select list exprs;
         // we create these auxiliary predicates so that the analyzer can compute the value
         // transfer graph through this inline view correctly (ie, predicates can get
@@ -211,6 +221,7 @@ public class InlineViewRef extends TableRef {
             String colName = getColLabels().get(i);
             SlotDescriptor slotDesc = analyzer.registerColumnRef(getAliasAsName(), colName);
             Expr colExpr = queryStmt.getResultExprs().get(i);
+            slotDesc.setSourceExpr(colExpr);
             SlotRef slotRef = new SlotRef(slotDesc);
             sMap.put(slotRef, colExpr);
             baseTblSmap.put(slotRef, queryStmt.getBaseTblResultExprs().get(i));
@@ -223,7 +234,14 @@ public class InlineViewRef extends TableRef {
             LOG.debug("inline view " + getUniqueAlias() + " baseTblSmap: " + baseTblSmap.debugString());
         }
 
+        // analyzeLateralViewRefs
+        analyzeLateralViewRef(analyzer);
+
         // Now do the remaining join analysis
+        // In general, we should do analyze join before do RegisterColumnRef. However, We cannot move analyze join
+        // before generate sMap and baseTblSmap, because generate sMap and baseTblSmap will register all column refs
+        // in the inline view. If inline view is on right side of left semi join, exception will be thrown.
+        // Instead, we do a little trick in RegisterColumnRef to avoid this problem.
         analyzeJoin(analyzer);
     }
 
@@ -270,12 +288,14 @@ public class InlineViewRef extends TableRef {
                     false, null, selectItemExpr.isNullable(),
                     null, ""));
         }
-        InlineView inlineView = (view != null) ? new InlineView(view, columnList) : new InlineView(getExplicitAlias(), columnList);
+        InlineView inlineView = (view != null) ? new InlineView(view, columnList)
+                : new InlineView(getExplicitAlias(), columnList);
 
         // Create the non-materialized tuple and set the fake table in it.
         TupleDescriptor result = analyzer.getDescTbl().createTupleDescriptor();
         result.setIsMaterialized(false);
         result.setTable(inlineView);
+        analyzer.registerInlineViewTupleId(result.getId());
         return result;
     }
 
@@ -366,19 +386,6 @@ public class InlineViewRef extends TableRef {
             return true;
         }
         return true;
-
-//        // Replace all SlotRefs in expr with NullLiterals, and wrap the result
-//        // into an IS NOT NULL predicate.
-//        Expr isNotNullLiteralPred = new IsNullPredicate(expr.clone(nullSMap), true);
-//        Preconditions.checkState(isNotNullLiteralPred.isConstant());
-//        // analyze to insert casts, etc.
-//        try {
-//            isNotNullLiteralPred.analyze(analyzer);
-//        } catch (AnalysisException e) {
-//            // this should never happen
-//            throw new InternalException("couldn't analyze predicate " + isNotNullLiteralPred.toSql(), e);
-//        }
-//        return FeSupport.EvalPredicate(isNotNullLiteralPred, analyzer.getQueryGlobals());
     }
 
     @Override
@@ -426,25 +433,46 @@ public class InlineViewRef extends TableRef {
         return view;
     }
 
+    public QueryStmt getQueryStmt() {
+        return queryStmt;
+    }
+
     @Override
-    public String tableRefToSql() {
+    public String tableNameToSql() {
         // Enclose the alias in quotes if Hive cannot parse it without quotes.
         // This is needed for view compatibility between Impala and Hive.
+        if (view != null) {
+            // FIXME: this may result in a sql cache problem
+            // See pr #6736 and issue #6735
+            return super.tableNameToSql();
+        }
+
         String aliasSql = null;
         String alias = getExplicitAlias();
         if (alias != null) {
             aliasSql = ToSqlUtils.getIdentSql(alias);
         }
+        StringBuilder sb = new StringBuilder();
+        sb.append("(").append(queryStmt.toSql()).append(") ")
+            .append(aliasSql);
 
+        return sb.toString();
+    }
+
+    @Override
+    public String tableRefToDigest() {
+        String aliasSql = null;
+        String alias = getExplicitAlias();
+        if (alias != null) {
+            aliasSql = ToSqlUtils.getIdentSql(alias);
+        }
         if (view != null) {
-            // FIXME: this may result in a sql cache problem
-            // See pr #6736 and issue #6735
             return name.toSql() + (aliasSql == null ? "" : " " + aliasSql);
         }
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("(")
-                .append(queryStmt.toSql())
+        StringBuilder sb = new StringBuilder()
+                .append("(")
+                .append(queryStmt.toDigest())
                 .append(") ")
                 .append(aliasSql);
 

@@ -22,7 +22,6 @@ import org.apache.doris.catalog.DataProperty;
 import org.apache.doris.catalog.ReplicaAllocation;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.FeNameFormat;
-import org.apache.doris.common.Pair;
 import org.apache.doris.common.util.PrintableMap;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.thrift.TTabletType;
@@ -46,7 +45,8 @@ public class SinglePartitionDesc {
     private ReplicaAllocation replicaAlloc;
     private boolean isInMemory = false;
     private TTabletType tabletType = TTabletType.TABLET_TYPE_DISK;
-    private Pair<Long, Long> versionInfo;
+    private Long versionInfo;
+    private String storagePolicy;
 
     public SinglePartitionDesc(boolean ifNotExists, String partName, PartitionKeyDesc partitionKeyDesc,
                                Map<String, String> properties) {
@@ -60,6 +60,7 @@ public class SinglePartitionDesc {
 
         this.partitionDataProperty = DataProperty.DEFAULT_DATA_PROPERTY;
         this.replicaAlloc = ReplicaAllocation.DEFAULT_ALLOCATION;
+        this.storagePolicy = "";
     }
 
     public boolean isSetIfNotExists() {
@@ -90,7 +91,7 @@ public class SinglePartitionDesc {
         return tabletType;
     }
 
-    public Pair<Long, Long> getVersionInfo() {
+    public Long getVersionInfo() {
         return versionInfo;
     }
 
@@ -101,6 +102,19 @@ public class SinglePartitionDesc {
     public void analyze(int partColNum, Map<String, String> otherProperties) throws AnalysisException {
         if (isAnalyzed) {
             return;
+        }
+
+        boolean hasStoragePolicy = false;
+        if (properties != null) {
+            hasStoragePolicy = properties.keySet().stream()
+                    .anyMatch(iter -> {
+                        boolean equal = iter.compareToIgnoreCase(PropertyAnalyzer.PROPERTIES_STORAGE_POLICY) == 0;
+                        // when find has storage policy properties, here will set it in partition
+                        if (equal) {
+                            storagePolicy = properties.get(iter);
+                        }
+                        return equal;
+                    });
         }
 
         FeNameFormat.checkPartitionName(partName);
@@ -133,8 +147,10 @@ public class SinglePartitionDesc {
         if (otherProperties == null) {
             // check unknown properties
             if (properties != null && !properties.isEmpty()) {
-                MapJoiner mapJoiner = Joiner.on(", ").withKeyValueSeparator(" = ");
-                throw new AnalysisException("Unknown properties: " + mapJoiner.join(properties));
+                if (!hasStoragePolicy) {
+                    MapJoiner mapJoiner = Joiner.on(", ").withKeyValueSeparator(" = ");
+                    throw new AnalysisException("Unknown properties: " + mapJoiner.join(properties));
+                }
             }
         }
 
@@ -143,6 +159,10 @@ public class SinglePartitionDesc {
 
     public boolean isAnalyzed() {
         return this.isAnalyzed;
+    }
+
+    public String getStoragePolicy() {
+        return this.storagePolicy;
     }
 
     public String toSql() {

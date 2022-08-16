@@ -27,6 +27,8 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.gson.annotations.SerializedName;
 
+import java.util.Objects;
+
 /**
  * Describes an ARRAY type.
  */
@@ -35,20 +37,33 @@ public class ArrayType extends Type {
     @SerializedName(value = "itemType")
     private Type itemType;
 
+    @SerializedName(value = "containsNull")
+    private boolean containsNull;
+
     public ArrayType() {
-        this.itemType = NULL;
+        itemType = NULL;
+        containsNull = false;
     }
 
     public ArrayType(Type itemType) {
-        this.itemType = itemType;
+        this(itemType, true);
     }
 
-    public void setItemType(Type itemType) {
+    public ArrayType(Type itemType, boolean containsNull) {
         this.itemType = itemType;
+        this.containsNull = containsNull;
     }
 
     public Type getItemType() {
         return itemType;
+    }
+
+    public boolean getContainsNull() {
+        return containsNull;
+    }
+
+    public void setContainsNull(boolean containsNull) {
+        this.containsNull = containsNull;
     }
 
     @Override
@@ -66,27 +81,35 @@ public class ArrayType extends Type {
             return false;
         }
 
-        if (itemType.isNull()) {
+        // Array(Null) is a virtual Array type, can match any Array(...) type
+        if (itemType.isNull() || ((ArrayType) t).getItemType().isNull()) {
             return true;
         }
 
-        return itemType.matchesType(((ArrayType) t).itemType);
+        return itemType.matchesType(((ArrayType) t).itemType)
+                && (((ArrayType) t).containsNull || !containsNull);
     }
 
     public static ArrayType create() {
         return new ArrayType();
     }
 
-    public static ArrayType create(Type type) {
-        return new ArrayType(type);
+    public static ArrayType create(Type type, boolean containsNull) {
+        return new ArrayType(type, containsNull);
     }
 
     @Override
     public String toSql(int depth) {
-        if (depth >= MAX_NESTING_DEPTH) {
-            return "ARRAY<...>";
+        if (!containsNull) {
+            return "array<not_null(" + itemType.toSql(depth + 1) + ")>";
+        } else {
+            return "array<" + itemType.toSql(depth + 1) + ">";
         }
-        return String.format("ARRAY<%s>", itemType.toSql(depth + 1));
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(itemType, containsNull);
     }
 
     @Override
@@ -95,7 +118,17 @@ public class ArrayType extends Type {
             return false;
         }
         ArrayType otherArrayType = (ArrayType) other;
-        return otherArrayType.itemType.equals(itemType);
+        return otherArrayType.itemType.equals(itemType) && otherArrayType.containsNull == containsNull;
+    }
+
+    public static boolean canCastTo(ArrayType type, ArrayType targetType) {
+        if (!targetType.containsNull && type.containsNull) {
+            return false;
+        }
+        if (targetType.getItemType().isStringType() && type.getItemType().isStringType()) {
+            return true;
+        }
+        return Type.canCastTo(type.getItemType(), targetType.getItemType());
     }
 
     @Override
@@ -104,6 +137,7 @@ public class ArrayType extends Type {
         container.types.add(node);
         Preconditions.checkNotNull(itemType);
         node.setType(TTypeNodeType.ARRAY);
+        node.setContainsNull(containsNull);
         itemType.toThrift(container);
     }
 
@@ -115,26 +149,21 @@ public class ArrayType extends Type {
         }
         // Pass in the padding to make sure nested fields are aligned properly,
         // even if we then strip the top-level padding.
-        String structStr = itemType.prettyPrint(lpad);
-        structStr = structStr.substring(lpad);
+        String structStr = itemType.prettyPrint(lpad).substring(lpad);
         return String.format("%sARRAY<%s>", leftPadding, structStr);
     }
 
     @Override
     public boolean isSupported() {
-        if (!Config.enable_complex_type_support) {
+        if (!Config.enable_array_type) {
             return false;
         }
-
-        if (itemType.isNull()) {
-            return false;
-        }
-        return true;
+        return !itemType.isNull();
     }
 
     @Override
     public String toString() {
-        return toSql(0);
+        return toSql(0).toUpperCase();
     }
 
     @Override
@@ -151,10 +180,7 @@ public class ArrayType extends Type {
 
     @Override
     public boolean supportsTablePartitioning() {
-        if (!isSupported() || isComplexType()) {
-            return false;
-        }
-        return true;
+        return isSupported() && !isComplexType();
     }
 
     @Override

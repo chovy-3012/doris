@@ -22,7 +22,6 @@
 #include <string>
 
 #include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
 
 namespace doris {
 
@@ -36,8 +35,7 @@ void validate_string(const std::string& std_str, const StringBuffer& str) {
 }
 
 TEST(StringBufferTest, Basic) {
-    MemTracker tracker;
-    MemPool pool(&tracker);
+    MemPool pool;
     StringBuffer str(&pool);
     std::string std_str;
 
@@ -74,16 +72,3 @@ TEST(StringBufferTest, Basic) {
 }
 
 } // namespace doris
-
-int main(int argc, char** argv) {
-#if 0
-    std::string conffile = std::string(getenv("DORIS_HOME")) + "/conf/be.conf";
-    if (!doris::config::init(conffile.c_str(), false)) {
-        fprintf(stderr, "error read config file. \n");
-        return -1;
-    }
-    init_glog("be-test");
-#endif
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

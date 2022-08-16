@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_DORIS_METRICS_H
-#define DORIS_BE_SRC_COMMON_UTIL_DORIS_METRICS_H
+#pragma once
 
 #include <set>
 #include <string>
@@ -28,26 +27,25 @@
 
 namespace doris {
 
-#define REGISTER_ENTITY_HOOK_METRIC(entity, owner, metric, func)                                \
-    owner->metric = (UIntGauge*)(entity->register_metric<UIntGauge>(&METRIC_##metric));         \
+#define REGISTER_ENTITY_HOOK_METRIC(entity, owner, metric, func)                        \
+    owner->metric = (UIntGauge*)(entity->register_metric<UIntGauge>(&METRIC_##metric)); \
     entity->register_hook(#metric, [&]() { owner->metric->set_value(func()); });
 
-#define REGISTER_HOOK_METRIC(metric, func)                                                      \
-    REGISTER_ENTITY_HOOK_METRIC(DorisMetrics::instance()->server_entity(), DorisMetrics::instance(), metric, func)
+#define REGISTER_HOOK_METRIC(metric, func)                                 \
+    REGISTER_ENTITY_HOOK_METRIC(DorisMetrics::instance()->server_entity(), \
+                                DorisMetrics::instance(), metric, func)
 
-#define DEREGISTER_ENTITY_HOOK_METRIC(entity, name)                                             \
-    entity->deregister_metric(&METRIC_##name);                                                  \
+#define DEREGISTER_ENTITY_HOOK_METRIC(entity, name) \
+    entity->deregister_metric(&METRIC_##name);      \
     entity->deregister_hook(#name);
 
-#define DEREGISTER_HOOK_METRIC(name)                                                            \
+#define DEREGISTER_HOOK_METRIC(name) \
     DEREGISTER_ENTITY_HOOK_METRIC(DorisMetrics::instance()->server_entity(), name)
 
 class DorisMetrics {
 public:
     IntCounter* fragment_requests_total;
     IntCounter* fragment_request_duration_us;
-    IntCounter* http_requests_total;
-    IntCounter* http_request_send_bytes;
     IntCounter* query_scan_bytes;
     IntCounter* query_scan_rows;
 
@@ -75,6 +73,8 @@ public:
     IntCounter* create_rollup_requests_total;
     IntCounter* create_rollup_requests_failed;
     IntCounter* storage_migrate_requests_total;
+    IntCounter* storage_migrate_v2_requests_total;
+    IntCounter* storage_migrate_v2_requests_failed;
     IntCounter* delete_requests_total;
     IntCounter* delete_requests_failed;
     IntCounter* clone_requests_total;
@@ -107,15 +107,10 @@ public:
     IntCounter* segment_read_total;
     // total number of rows in queried segments (before index pruning)
     IntCounter* segment_row_total;
-    // total number of rows selected by short key index
-    IntCounter* segment_rows_by_short_key;
-    // total number of rows selected by zone map index
-    IntCounter* segment_rows_read_by_zone_map;
 
-    IntCounter* txn_begin_request_total;
-    IntCounter* txn_commit_request_total;
-    IntCounter* txn_rollback_request_total;
-    IntCounter* txn_exec_plan_total;
+    IntCounter* stream_load_txn_begin_request_total;
+    IntCounter* stream_load_txn_commit_request_total;
+    IntCounter* stream_load_txn_rollback_request_total;
     IntCounter* stream_receive_bytes_total;
     IntCounter* stream_load_rows_total;
     IntCounter* load_rows;
@@ -123,6 +118,12 @@ public:
 
     IntCounter* memtable_flush_total;
     IntCounter* memtable_flush_duration_us;
+
+    IntCounter* attach_task_thread_count;
+    IntCounter* add_thread_mem_tracker_consumer_count;
+    IntCounter* thread_mem_tracker_exceed_call_back_count;
+    // brpc server response count
+    IntCounter* switch_bthread_count;
 
     IntGauge* memory_pool_bytes_total;
     IntGauge* process_thread_num;
@@ -145,22 +146,22 @@ public:
 
     // The following metrics will be calculated
     // by metric calculator
-    IntGauge* push_request_write_bytes_per_second;
     IntGauge* query_scan_bytes_per_second;
     IntGauge* max_disk_io_util_percent;
     IntGauge* max_network_send_bytes_rate;
     IntGauge* max_network_receive_bytes_rate;
 
-    // Metrics related with BlockManager
-    IntCounter* readable_blocks_total;
-    IntCounter* writable_blocks_total;
-    IntCounter* blocks_created_total;
-    IntCounter* blocks_deleted_total;
-    IntCounter* bytes_read_total;
-    IntCounter* bytes_written_total;
-    IntCounter* disk_sync_total;
-    IntGauge* blocks_open_reading;
-    IntGauge* blocks_open_writing;
+    // Metrics related with file reader/writer
+    IntCounter* local_file_reader_total;
+    IntCounter* s3_file_reader_total;
+    IntCounter* local_file_writer_total;
+    IntCounter* file_created_total;
+    IntCounter* local_bytes_read_total;
+    IntCounter* s3_bytes_read_total;
+    IntCounter* local_bytes_written_total;
+    IntGauge* local_file_open_reading;
+    IntGauge* s3_file_open_reading;
+    IntGauge* local_file_open_writing;
 
     // Size of some global containers
     UIntGauge* rowset_count_generated_and_in_use;
@@ -177,12 +178,15 @@ public:
     UIntGauge* small_file_cache_count;
     UIntGauge* stream_load_pipe_count;
     UIntGauge* brpc_endpoint_stub_count;
+    UIntGauge* brpc_function_endpoint_stub_count;
     UIntGauge* tablet_writer_count;
 
     UIntGauge* compaction_mem_consumption;
     UIntGauge* load_mem_consumption;
+    UIntGauge* load_channel_mem_consumption;
     UIntGauge* query_mem_consumption;
     UIntGauge* schema_change_mem_consumption;
+    UIntGauge* storage_migration_mem_consumption;
     UIntGauge* tablet_meta_mem_consumption;
 
     // Cache metrics
@@ -191,10 +195,14 @@ public:
     UIntGauge* query_cache_partition_total_count;
 
     UIntGauge* scanner_thread_pool_queue_size;
-    UIntGauge* etl_thread_pool_queue_size;
     UIntGauge* add_batch_task_queue_size;
     UIntGauge* send_batch_thread_pool_thread_num;
     UIntGauge* send_batch_thread_pool_queue_size;
+
+    // Upload metrics
+    UIntGauge* upload_total_byte;
+    IntCounter* upload_rowset_count;
+    IntCounter* upload_fail_count;
 
     static DorisMetrics* instance() {
         static DorisMetrics instance;
@@ -234,5 +242,3 @@ private:
 };
 
 }; // namespace doris
-
-#endif

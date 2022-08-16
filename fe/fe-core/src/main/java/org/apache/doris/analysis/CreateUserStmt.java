@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -30,7 +30,6 @@ import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Strings;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -135,7 +134,8 @@ public class CreateUserStmt extends DdlStmt {
         }
 
         // check if current user has GRANT priv on GLOBAL or DATABASE level.
-        if (!Catalog.getCurrentCatalog().getAuth().checkHasPriv(ConnectContext.get(), PrivPredicate.GRANT, PrivLevel.GLOBAL, PrivLevel.DATABASE)) {
+        if (!Env.getCurrentEnv().getAuth().checkHasPriv(ConnectContext.get(),
+                PrivPredicate.GRANT, PrivLevel.GLOBAL, PrivLevel.DATABASE)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "GRANT");
         }
     }

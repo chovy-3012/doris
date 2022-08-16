@@ -24,7 +24,6 @@ import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.common.FeConstants;
@@ -35,6 +34,8 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -55,6 +56,8 @@ import java.util.Set;
  * [PROPERTIES ("key" = "value")]
  */
 public class CreateMaterializedViewStmt extends DdlStmt {
+    private static final Logger LOG = LogManager.getLogger(CreateMaterializedViewStmt.class);
+
     public static final String MATERIALIZED_VIEW_NAME_PREFIX = "mv_";
     public static final Map<String, MVColumnPattern> FN_NAME_TO_PATTERN;
 
@@ -88,11 +91,18 @@ public class CreateMaterializedViewStmt extends DdlStmt {
     private String baseIndexName;
     private String dbName;
     private KeysType mvKeysType = KeysType.DUP_KEYS;
+    //if process is replaying log, isReplay is true, otherwise is false, avoid replay process error report,
+    // only in Rollup or MaterializedIndexMeta is true
+    private boolean isReplay = false;
 
     public CreateMaterializedViewStmt(String mvName, SelectStmt selectStmt, Map<String, String> properties) {
         this.mvName = mvName;
         this.selectStmt = selectStmt;
         this.properties = properties;
+    }
+
+    public void setIsReplay(boolean isReplay) {
+        this.isReplay = isReplay;
     }
 
     public String getMVName() {
@@ -125,9 +135,6 @@ public class CreateMaterializedViewStmt extends DdlStmt {
 
     @Override
     public void analyze(Analyzer analyzer) throws UserException {
-        if (!Config.enable_materialized_view) {
-            throw new AnalysisException("The materialized view is disabled");
-        }
         super.analyze(analyzer);
         FeNameFormat.checkTableName(mvName);
         // TODO(ml): The mv name in from clause should pass the analyze without error.
@@ -136,7 +143,7 @@ public class CreateMaterializedViewStmt extends DdlStmt {
         if (selectStmt.getAggInfo() != null) {
             mvKeysType = KeysType.AGG_KEYS;
         }
-        analyzeSelectClause();
+        analyzeSelectClause(analyzer);
         analyzeFromClause();
         if (selectStmt.getWhereClause() != null) {
             throw new AnalysisException("The where clause is not supported in add materialized view clause, expr:"
@@ -153,7 +160,7 @@ public class CreateMaterializedViewStmt extends DdlStmt {
         }
     }
 
-    public void analyzeSelectClause() throws AnalysisException {
+    public void analyzeSelectClause(Analyzer analyzer) throws AnalysisException {
         SelectList selectList = selectStmt.getSelectList();
         if (selectList.getItems().isEmpty()) {
             throw new AnalysisException("The materialized view must contain at least one column");
@@ -193,14 +200,17 @@ public class CreateMaterializedViewStmt extends DdlStmt {
                 // Function must match pattern.
                 FunctionCallExpr functionCallExpr = (FunctionCallExpr) selectListItemExpr;
                 String functionName = functionCallExpr.getFnName().getFunction();
-                MVColumnPattern mvColumnPattern = FN_NAME_TO_PATTERN.get(functionName.toLowerCase());
-                if (mvColumnPattern == null) {
-                    throw new AnalysisException(
-                            "Materialized view does not support this function:" + functionCallExpr.toSqlImpl());
-                }
-                if (!mvColumnPattern.match(functionCallExpr)) {
-                    throw new AnalysisException(
-                            "The function " + functionName + " must match pattern:" + mvColumnPattern.toString());
+                // current version not support count(distinct) function in creating materialized view
+                if (!isReplay) {
+                    MVColumnPattern mvColumnPattern = FN_NAME_TO_PATTERN.get(functionName.toLowerCase());
+                    if (mvColumnPattern == null) {
+                        throw new AnalysisException(
+                                "Materialized view does not support this function:" + functionCallExpr.toSqlImpl());
+                    }
+                    if (!mvColumnPattern.match(functionCallExpr)) {
+                        throw new AnalysisException(
+                                "The function " + functionName + " must match pattern:" + mvColumnPattern.toString());
+                    }
                 }
                 // check duplicate column
                 List<SlotRef> slots = new ArrayList<>();
@@ -216,7 +226,7 @@ public class CreateMaterializedViewStmt extends DdlStmt {
                 }
                 meetAggregate = true;
                 // build mv column item
-                mvColumnItemList.add(buildMVColumnItem(functionCallExpr));
+                mvColumnItemList.add(buildMVColumnItem(analyzer, functionCallExpr));
                 // TODO(ml): support REPLACE, REPLACE_IF_NOT_NULL, bitmap_union, hll_union only for aggregate table
                 // TODO(ml): support different type of column, int -> bigint(sum)
             }
@@ -312,7 +322,8 @@ public class CreateMaterializedViewStmt extends DdlStmt {
             for (; theBeginIndexOfValue < mvColumnItemList.size(); theBeginIndexOfValue++) {
                 MVColumnItem column = mvColumnItemList.get(theBeginIndexOfValue);
                 keySizeByte += column.getType().getIndexSize();
-                if (theBeginIndexOfValue + 1 > FeConstants.shortkey_max_column_count || keySizeByte > FeConstants.shortkey_maxsize_bytes) {
+                if (theBeginIndexOfValue + 1 > FeConstants.shortkey_max_column_count
+                        || keySizeByte > FeConstants.shortkey_maxsize_bytes) {
                     if (theBeginIndexOfValue == 0 && column.getType().getPrimitiveType().isCharFamily()) {
                         column.setIsKey(true);
                         theBeginIndexOfValue++;
@@ -340,7 +351,8 @@ public class CreateMaterializedViewStmt extends DdlStmt {
         }
     }
 
-    private MVColumnItem buildMVColumnItem(FunctionCallExpr functionCallExpr) throws AnalysisException {
+    private MVColumnItem buildMVColumnItem(Analyzer analyzer, FunctionCallExpr functionCallExpr)
+            throws AnalysisException {
         String functionName = functionCallExpr.getFnName().getFunction();
         List<SlotRef> slots = new ArrayList<>();
         functionCallExpr.collect(SlotRef.class, slots);
@@ -403,13 +415,13 @@ public class CreateMaterializedViewStmt extends DdlStmt {
                 defineExpr = new CaseExpr(null, Lists.newArrayList(new CaseWhenClause(
                         new IsNullPredicate(baseColumnRef, false),
                         new IntLiteral(0, Type.BIGINT))), new IntLiteral(1, Type.BIGINT));
+                defineExpr.analyze(analyzer);
                 type = Type.BIGINT;
                 break;
             default:
                 throw new AnalysisException("Unsupported function:" + functionName);
         }
-        MVColumnItem mvColumnItem = new MVColumnItem(mvColumnName, type, mvAggregateType, false, defineExpr, baseColumnName);
-        return mvColumnItem;
+        return new MVColumnItem(mvColumnName, type, mvAggregateType, false, defineExpr, baseColumnName);
     }
 
     public Map<String, Expr> parseDefineExprWithoutAnalyze() throws AnalysisException {

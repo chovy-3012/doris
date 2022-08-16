@@ -27,7 +27,6 @@
 #include "exec/base_scanner.h"
 #include "gen_cpp/PlanNodes_types.h"
 #include "gen_cpp/Types_types.h"
-#include "gen_cpp/internal_service.pb.h"
 #include "runtime/mem_pool.h"
 #include "util/runtime_profile.h"
 #include "util/slice.h"
@@ -36,7 +35,7 @@ namespace doris {
 
 class Tuple;
 class SlotDescriptor;
-class Slice;
+struct Slice;
 class TextConverter;
 class FileReader;
 class LineReader;
@@ -46,7 +45,6 @@ class ExprContext;
 class TupleDescriptor;
 class TupleRow;
 class RowDescriptor;
-class MemTracker;
 class RuntimeProfile;
 class StreamLoadPipe;
 
@@ -57,23 +55,34 @@ public:
                   const TBrokerScanRangeParams& params, const std::vector<TBrokerRangeDesc>& ranges,
                   const std::vector<TNetworkAddress>& broker_addresses,
                   const std::vector<TExpr>& pre_filter_texprs, ScannerCounter* counter);
-    ~BrokerScanner();
+    ~BrokerScanner() override;
 
     // Open this scanner, will initialize information need to
     Status open() override;
 
     // Get next tuple
-    Status get_next(Tuple* tuple, MemPool* tuple_pool, bool* eof) override;
+    virtual Status get_next(Tuple* tuple, MemPool* tuple_pool, bool* eof,
+                            bool* fill_tuple) override;
+
+    Status get_next(vectorized::Block* block, bool* eof) override {
+        return Status::NotSupported("Not Implemented get block");
+    }
 
     // Close this scanner
     void close() override;
+
+protected:
+    // Read next buffer from reader
+    Status open_next_reader();
+
+    Status _line_to_src_tuple(const Slice& line);
+
+    Status _line_split_to_values(const Slice& line);
 
 private:
     Status open_file_reader();
     Status create_decompressor(TFileFormatType::type type);
     Status open_line_reader();
-    // Read next buffer from reader
-    Status open_next_reader();
 
     // Split one text line to values
     void split_line(const Slice& line);
@@ -87,17 +96,9 @@ private:
     // Convert one row to one tuple
     //  'ptr' and 'len' is csv text line
     //  output is tuple
-    bool convert_one_row(const Slice& line, Tuple* tuple, MemPool* tuple_pool);
+    Status _convert_one_row(const Slice& line, Tuple* tuple, MemPool* tuple_pool, bool* fill_tuple);
 
-    Status line_to_src_tuple();
-    bool line_to_src_tuple(const Slice& line);
-
-private:
-    const std::vector<TBrokerRangeDesc>& _ranges;
-    const std::vector<TNetworkAddress>& _broker_addresses;
-
-    std::unique_ptr<TextConverter> _text_converter;
-
+protected:
     std::string _value_separator;
     std::string _line_delimiter;
     TFileFormatType::type _file_format_type;
@@ -105,20 +106,16 @@ private:
     int _line_delimiter_length;
 
     // Reader
-    FileReader* _cur_file_reader;
+    std::shared_ptr<FileReader> _cur_file_reader;
     LineReader* _cur_line_reader;
     Decompressor* _cur_decompressor;
-    int _next_range;
     bool _cur_line_reader_eof;
 
-    bool _scanner_eof;
+    // When we fetch range start from 0, header_type="csv_with_names" skip first line
+    // When we fetch range start from 0, header_type="csv_with_names_and_types" skip first two line
+    // When we fetch range doesn't start from 0 will always skip the first line
+    int _skip_lines;
 
-    // When we fetch range doesn't start from 0,
-    // we will read to one ahead, and skip the first line
-    bool _skip_next_line;
-
-    // used to hold current StreamLoadPipe
-    std::shared_ptr<StreamLoadPipe> _stream_load_pipe;
     std::vector<Slice> _split_values;
 };
 

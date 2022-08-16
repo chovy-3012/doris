@@ -17,14 +17,14 @@
 
 package org.apache.doris.mysql;
 
-import java.io.ByteArrayOutputStream;
-import java.io.UnsupportedEncodingException;
-import java.nio.ByteBuffer;
-
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.PrimitiveType;
 
 import com.google.common.base.Strings;
+
+import java.io.ByteArrayOutputStream;
+import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
 
 // used for serialize memory data to byte stream of MySQL protocol
 public class MysqlSerializer {
@@ -249,10 +249,11 @@ public class MysqlSerializer {
             case DOUBLE:
                 return 22;
             case TIME:
-                return 10;
+            case DATEV2:
             case DATE:
                 return 10;
-            case DATETIME: {
+            case DATETIME:
+            case DATETIMEV2: {
                 if (type.isTimeType()) {
                     return 10;
                 }  else {
@@ -261,10 +262,7 @@ public class MysqlSerializer {
             }
             // todo:It needs to be obtained according to the field length set during the actual creation,
             // todo:which is not supported for the time being.default is 255
-//            case DECIMAL:
-//            case DECIMALV2:
-//            case CHAR:
-//            case VARCHAR:
+            //  DECIMAL,DECIMALV2,CHAR,VARCHAR:
             default:
                 return 255;
         }

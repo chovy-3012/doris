@@ -17,15 +17,13 @@
 
 package org.apache.doris.task;
 
-import mockit.Expectations;
-import mockit.Mocked;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.util.UnitTestUtil;
-import org.apache.doris.load.DppConfig;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.load.DppScheduler;
 import org.apache.doris.load.EtlSubmitResult;
 import org.apache.doris.load.Load;
@@ -37,8 +35,10 @@ import org.apache.doris.load.TableLoadInfo;
 import org.apache.doris.persist.EditLog;
 import org.apache.doris.thrift.TStatus;
 import org.apache.doris.thrift.TStatusCode;
-
 import org.apache.doris.transaction.GlobalTransactionMgr;
+
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -58,7 +58,9 @@ public class LoadPendingTaskTest {
 
     private String label;
     @Mocked
-    private Catalog catalog;
+    private Env env;
+    @Mocked
+    private InternalCatalog catalog;
     @Mocked
     private EditLog editLog;
     @Mocked
@@ -76,23 +78,27 @@ public class LoadPendingTaskTest {
         indexId = 0L;
         tabletId = 0L;
         backendId = 0L;
-        
+
         label = "test_label";
         UnitTestUtil.initDppConfig();
     }
-    
+
     @Test
     public void testRunPendingTask() throws Exception {
         // mock catalog
-        db = UnitTestUtil.createDb(dbId, tableId, partitionId, indexId, tabletId, backendId, 1L, 0L);
+        db = UnitTestUtil.createDb(dbId, tableId, partitionId, indexId, tabletId, backendId, 1L);
 
-        GlobalTransactionMgr globalTransactionMgr = new GlobalTransactionMgr(catalog);
+        GlobalTransactionMgr globalTransactionMgr = new GlobalTransactionMgr(env);
         globalTransactionMgr.setEditLog(editLog);
         globalTransactionMgr.addDatabaseTransactionMgr(db.getId());
 
         // mock catalog
-        new Expectations(catalog) {
+        new Expectations(env, catalog) {
             {
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
+
                 catalog.getDbNullable(dbId);
                 minTimes = 0;
                 result = db;
@@ -101,20 +107,20 @@ public class LoadPendingTaskTest {
                 minTimes = 0;
                 result = db;
 
-                catalog.getEditLog();
+                env.getEditLog();
                 minTimes = 0;
                 result = editLog;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
-                Catalog.getCurrentGlobalTransactionMgr();
+                Env.getCurrentGlobalTransactionMgr();
                 minTimes = 0;
                 result = globalTransactionMgr;
             }
         };
-        
+
         // create job
         LoadJob job = new LoadJob(label);
         job.setState(JobState.PENDING);
@@ -149,7 +155,7 @@ public class LoadPendingTaskTest {
                 times = 1;
                 result = null;
 
-                catalog.getLoadInstance();
+                env.getLoadInstance();
                 times = 1;
                 result = load;
 

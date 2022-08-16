@@ -17,29 +17,28 @@
 
 package org.apache.doris.qe.cache;
 
-import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.BinaryPredicate;
+import org.apache.doris.analysis.CompoundPredicate;
 import org.apache.doris.analysis.DateLiteral;
-import org.apache.doris.analysis.InPredicate;
-import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.analysis.Expr;
-import org.apache.doris.analysis.LiteralExpr;
+import org.apache.doris.analysis.InPredicate;
 import org.apache.doris.analysis.IntLiteral;
-import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.catalog.PartitionItem;
-import org.apache.doris.catalog.RangePartitionInfo;
+import org.apache.doris.analysis.LiteralExpr;
+import org.apache.doris.analysis.PartitionValue;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
+import org.apache.doris.catalog.PartitionItem;
 import org.apache.doris.catalog.PartitionKey;
+import org.apache.doris.catalog.RangePartitionInfo;
 import org.apache.doris.catalog.RangePartitionItem;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Type;
+import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.Config;
 import org.apache.doris.planner.PartitionColumnFilter;
 
-import org.apache.doris.common.AnalysisException;
-
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -47,6 +46,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Convert the range of the partition to the list
@@ -118,7 +118,7 @@ public class PartitionRange {
             this.tooNew = false;
         }
 
-        public void Debug() {
+        public void debug() {
             if (partition != null) {
                 LOG.info("partition id {}, cacheKey {}, version {}, time {}, fromCache {}, tooNew {} ",
                         partitionId, cacheKey.realValue(),
@@ -176,10 +176,15 @@ public class PartitionRange {
             switch (type.getPrimitiveType()) {
                 case BOOLEAN:
                 case TIME:
+                case TIMEV2:
                 case DATETIME:
+                case DATETIMEV2:
                 case FLOAT:
                 case DOUBLE:
                 case DECIMALV2:
+                case DECIMAL32:
+                case DECIMAL64:
+                case DECIMAL128:
                 case CHAR:
                 case VARCHAR:
                 case STRING:
@@ -187,6 +192,7 @@ public class PartitionRange {
                     LOG.info("PartitionCache not support such key type {}", type.toSql());
                     return false;
                 case DATE:
+                case DATEV2:
                     date = getDateValue(expr);
                     keyType = KeyType.DATE;
                     break;
@@ -197,6 +203,8 @@ public class PartitionRange {
                     value = expr.getLongValue();
                     keyType = KeyType.LONG;
                     break;
+                default:
+                    return true;
             }
             return true;
         }
@@ -243,6 +251,7 @@ public class PartitionRange {
             try {
                 dt = df8.parse(String.valueOf(value));
             } catch (Exception e) {
+                // CHECKSTYLE IGNORE THIS LINE
             }
             return dt;
         }
@@ -353,8 +362,10 @@ public class PartitionRange {
     }
 
     /**
-     * Only the range query of the key of the partition is supported, and the separated partition key query is not supported.
-     * Because a query can only be divided into two parts, part1 get data from cache, part2 fetch_data by scan node from BE.
+     * Only the range query of the key of the partition is supported, and the separated partition key query is not
+     * supported.
+     * Because a query can only be divided into two parts, part1 get data from cache, part2 fetch_data by scan node
+     * from BE.
      * Partition cache : 20191211-20191215
      * Hit cache parameter : [20191211 - 20191215], [20191212 - 20191214], [20191212 - 20191216],[20191210 - 20191215]
      * Miss cache parameter: [20191210 - 20191216]
@@ -449,7 +460,7 @@ public class PartitionRange {
                 LiteralExpr newLiteral;
                 if (key.keyType == KeyType.DATE) {
                     try {
-                        newLiteral = new DateLiteral(key.toString(), Type.DATE);
+                        newLiteral = new DateLiteral(key.toString(), ScalarType.getDefaultDateType(Type.DATE));
                     } catch (Exception e) {
                         LOG.warn("Date's format is error {},{}", key.toString(), e);
                         continue;
@@ -503,6 +514,10 @@ public class PartitionRange {
         for (PartitionSingle single : partitionSingleList) {
             single.setPartition(table.getPartition(single.getPartitionId()));
         }
+
+        // filter the partitions in predicate but not in OlapTable
+        partitionSingleList =
+                partitionSingleList.stream().filter(p -> p.getPartition() != null).collect(Collectors.toList());
     }
 
     /**
@@ -555,7 +570,6 @@ public class PartitionRange {
             return null;
         }
         PartitionColumnFilter partitionColumnFilter = new PartitionColumnFilter();
-        ;
         for (Expr expr : partitionKeyPredicate.getChildren()) {
             if (expr instanceof BinaryPredicate) {
                 BinaryPredicate binPredicate = (BinaryPredicate) expr;

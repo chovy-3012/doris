@@ -18,7 +18,7 @@
 package org.apache.doris.ldap;
 
 import org.apache.doris.analysis.UserIdentity;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -28,9 +28,8 @@ import org.apache.doris.qe.ConnectContext;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-
-import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.List;
 
@@ -49,8 +48,8 @@ public class LdapAuthenticate {
 
     {
         if (LdapConfig.user_max_connections <= 0 || LdapConfig.user_max_connections > 10000) {
-            LOG.warn("Ldap config user_max_connections is invalid. It should be set between 1 and 10000. " +
-                    "And now, it is set to the default value.");
+            LOG.warn("Ldap config user_max_connections is invalid. It should be set between 1 and 10000. "
+                    + "And now, it is set to the default value.");
         } else {
             userMaxConn = LdapConfig.user_max_connections;
         }
@@ -73,7 +72,7 @@ public class LdapAuthenticate {
         try {
             if (!LdapClient.checkPassword(userName, password)) {
                 LOG.debug("user:{} use error LDAP password.", userName);
-                ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, qualifiedUser, usePasswd);
+                ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, qualifiedUser, context.getRemoteIP(), usePasswd);
                 return false;
             }
         } catch (Exception e) {
@@ -93,7 +92,7 @@ public class LdapAuthenticate {
         String remoteIp = context.getMysqlChannel().getRemoteIp();
         UserIdentity tempUserIdentity = UserIdentity.createAnalyzedUserIdentWithIp(qualifiedUser, remoteIp);
         // Search the user in doris.
-        UserIdentity userIdentity = Catalog.getCurrentCatalog().getAuth().getCurrentUserIdentity(tempUserIdentity);
+        UserIdentity userIdentity = Env.getCurrentEnv().getAuth().getCurrentUserIdentity(tempUserIdentity);
         if (userIdentity == null) {
             userIdentity = tempUserIdentity;
             LOG.debug("User:{} does not exists in doris, login as temporary users.", userName);
@@ -123,7 +122,7 @@ public class LdapAuthenticate {
         List<String> rolesNames = Lists.newArrayList();
         for (String group : ldapGroups) {
             String qualifiedRole = ClusterNamespace.getFullName(clusterName, group);
-            if (Catalog.getCurrentCatalog().getAuth().doesRoleExist(qualifiedRole)) {
+            if (Env.getCurrentEnv().getAuth().doesRoleExist(qualifiedRole)) {
                 rolesNames.add(qualifiedRole);
             }
         }
@@ -134,7 +133,7 @@ public class LdapAuthenticate {
             return null;
         } else {
             PaloRole ldapGroupsPrivs = new PaloRole(LDAP_GROUPS_PRIVS_NAME);
-            Catalog.getCurrentCatalog().getAuth().mergeRolesNoCheckName(rolesNames, ldapGroupsPrivs);
+            Env.getCurrentEnv().getAuth().mergeRolesNoCheckName(rolesNames, ldapGroupsPrivs);
             return ldapGroupsPrivs;
         }
     }

@@ -17,16 +17,17 @@
 
 package org.apache.doris.common.proc;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.util.NetUtils;
 import org.apache.doris.common.util.TimeUtils;
+import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.system.Frontend;
 
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -47,23 +48,23 @@ public class FrontendsProcNode implements ProcNodeInterface {
             .add("ReplayedJournalId").add("LastHeartbeat").add("IsHelper").add("ErrMsg").add("Version")
             .add("CurrentConnected")
             .build();
-    
+
     public static final int HOSTNAME_INDEX = 2;
 
-    private Catalog catalog;
-    
-    public FrontendsProcNode(Catalog catalog) {
-        this.catalog = catalog;
+    private Env env;
+
+    public FrontendsProcNode(Env env) {
+        this.env = env;
     }
-    
+
     @Override
     public ProcResult fetchResult() {
         BaseProcResult result = new BaseProcResult();
         result.setNames(TITLE_NAMES);
-        
+
         List<List<String>> infos = Lists.newArrayList();
 
-        getFrontendsInfo(catalog, infos);
+        getFrontendsInfo(env, infos);
 
         for (List<String> info : infos) {
             result.addRow(info);
@@ -72,11 +73,11 @@ public class FrontendsProcNode implements ProcNodeInterface {
         return result;
     }
 
-    public static void getFrontendsInfo(Catalog catalog, List<List<String>> infos) {
+    public static void getFrontendsInfo(Env env, List<List<String>> infos) {
         String masterIp = "";
         int masterPort = -1;
         try {
-            InetSocketAddress master = catalog.getHaProtocol().getLeader();
+            InetSocketAddress master = env.getHaProtocol().getLeader();
             masterIp = master.getAddress().getHostAddress();
             masterPort = master.getPort();
         } catch (Exception e) {
@@ -85,14 +86,19 @@ public class FrontendsProcNode implements ProcNodeInterface {
         }
 
         // get all node which are joined in bdb group
-        List<InetSocketAddress> allFe = catalog.getHaProtocol().getElectableNodes(true /* include leader */);
-        allFe.addAll(catalog.getHaProtocol().getObserverNodes());
+        List<InetSocketAddress> allFe = env.getHaProtocol().getElectableNodes(true /* include leader */);
+        allFe.addAll(env.getHaProtocol().getObserverNodes());
         List<Pair<String, Integer>> allFeHosts = convertToHostPortPair(allFe);
-        List<Pair<String, Integer>> helperNodes = catalog.getHelperNodes();
+        List<Pair<String, Integer>> helperNodes = env.getHelperNodes();
 
-        Pair<String, Integer> selfNode = Catalog.getCurrentCatalog().getSelfNode();
+        // Because the `show frontend` stmt maybe forwarded from other FE.
+        // if we only get self node from currrent catalog, the "CurrentConnected" field will always points to Msater FE.
+        String selfNode = Env.getCurrentEnv().getSelfNode().first;
+        if (ConnectContext.get() != null && !Strings.isNullOrEmpty(ConnectContext.get().getCurrentConnectedFEIp())) {
+            selfNode = ConnectContext.get().getCurrentConnectedFEIp();
+        }
 
-        for (Frontend fe : catalog.getFrontends(null /* all */)) {
+        for (Frontend fe : env.getFrontends(null /* all */)) {
 
             List<String> info = new ArrayList<String>();
             info.add(fe.getNodeName());
@@ -102,7 +108,7 @@ public class FrontendsProcNode implements ProcNodeInterface {
             info.add(Integer.toString(fe.getEditLogPort()));
             info.add(Integer.toString(Config.http_port));
 
-            if (fe.getHost().equals(catalog.getSelfNode().first)) {
+            if (fe.getHost().equals(env.getSelfNode().first)) {
                 info.add(Integer.toString(Config.query_port));
                 info.add(Integer.toString(Config.rpc_port));
             } else {
@@ -113,12 +119,12 @@ public class FrontendsProcNode implements ProcNodeInterface {
             info.add(fe.getRole().name());
             info.add(String.valueOf(fe.getHost().equals(masterIp) && fe.getEditLogPort() == masterPort));
 
-            info.add(Integer.toString(catalog.getClusterId()));
+            info.add(Integer.toString(env.getClusterId()));
             info.add(String.valueOf(isJoin(allFeHosts, fe)));
-            
-            if (fe.getHost().equals(catalog.getSelfNode().first)) {
+
+            if (fe.getHost().equals(env.getSelfNode().first)) {
                 info.add("true");
-                info.add(Long.toString(catalog.getEditLog().getMaxJournalId()));
+                info.add(Long.toString(env.getEditLog().getMaxJournalId()));
             } else {
                 info.add(String.valueOf(fe.isAlive()));
                 info.add(Long.toString(fe.getReplayedJournalId()));
@@ -128,12 +134,12 @@ public class FrontendsProcNode implements ProcNodeInterface {
             info.add(fe.getHeartbeatErrMsg());
             info.add(fe.getVersion());
             // To indicate which FE we currently connected
-            info.add(fe.getHost().equals(selfNode.first) ? "Yes" : "No");
+            info.add(fe.getHost().equals(selfNode) ? "Yes" : "No");
 
             infos.add(info);
         }
     }
-    
+
     private static boolean isHelperNode(List<Pair<String, Integer>> helperNodes, Frontend fe) {
         return helperNodes.stream().anyMatch(p -> p.first.equals(fe.getHost()) && p.second == fe.getEditLogPort());
     }
@@ -146,7 +152,7 @@ public class FrontendsProcNode implements ProcNodeInterface {
         }
         return false;
     }
-    
+
     private static List<Pair<String, Integer>> convertToHostPortPair(List<InetSocketAddress> addrs) {
         List<Pair<String, Integer>> hostPortPair = Lists.newArrayList();
         for (InetSocketAddress addr : addrs) {
@@ -155,4 +161,3 @@ public class FrontendsProcNode implements ProcNodeInterface {
         return hostPortPair;
     }
 }
-

@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/anyval-util.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_ANYVAL_UTIL_H
-#define DORIS_BE_SRC_QUERY_EXPRS_ANYVAL_UTIL_H
+#pragma once
 
 #include "common/status.h"
 #include "exprs/expr.h"
@@ -181,6 +183,17 @@ public:
             DecimalV2Val val;
             type_limit<DecimalV2Value>::min().to_decimal_val(&val);
             return val;
+        } else if constexpr (std::is_same_v<Val, DateV2Val>) {
+            DateV2Val val;
+            type_limit<doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>>::min()
+                    .to_datev2_val(&val);
+            return val;
+        } else if constexpr (std::is_same_v<Val, DateTimeV2Val>) {
+            DateTimeV2Val val;
+            type_limit<
+                    doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>>::min()
+                    .to_datetimev2_val(&val);
+            return val;
         } else {
             return Val(type_limit<decltype(std::declval<Val>().val)>::min());
         }
@@ -193,6 +206,7 @@ public:
             StringVal max_val;
             max_val.ptr = ctx->allocate(sv.len);
             memcpy(max_val.ptr, sv.ptr, sv.len);
+            max_val.len = sv.len;
 
             return max_val;
         } else if constexpr (std::is_same_v<Val, DateTimeVal>) {
@@ -202,6 +216,17 @@ public:
         } else if constexpr (std::is_same_v<Val, DecimalV2Val>) {
             DecimalV2Val val;
             type_limit<DecimalV2Value>::max().to_decimal_val(&val);
+            return val;
+        } else if constexpr (std::is_same_v<Val, DateV2Val>) {
+            DateV2Val val;
+            type_limit<doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>>::max()
+                    .to_datev2_val(&val);
+            return val;
+        } else if constexpr (std::is_same_v<Val, DateTimeV2Val>) {
+            DateTimeV2Val val;
+            type_limit<
+                    doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>>::max()
+                    .to_datetimev2_val(&val);
             return val;
         } else {
             return Val(type_limit<decltype(std::declval<Val>().val)>::max());
@@ -236,12 +261,17 @@ public:
             return sizeof(doris_udf::DoubleVal);
 
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_HLL:
         case TYPE_CHAR:
         case TYPE_VARCHAR:
         case TYPE_STRING:
             return sizeof(doris_udf::StringVal);
 
+        case TYPE_DATEV2:
+            return sizeof(doris_udf::DateV2Val);
+        case TYPE_DATETIMEV2:
+            return sizeof(doris_udf::DateTimeV2Val);
         case TYPE_DATE:
         case TYPE_DATETIME:
             return sizeof(doris_udf::DateTimeVal);
@@ -278,6 +308,7 @@ public:
         case TYPE_DOUBLE:
             return alignof(DoubleVal);
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_HLL:
         case TYPE_VARCHAR:
         case TYPE_CHAR:
@@ -286,6 +317,10 @@ public:
         case TYPE_DATETIME:
         case TYPE_DATE:
             return alignof(DateTimeVal);
+        case TYPE_DATEV2:
+            return alignof(DateV2Val);
+        case TYPE_DATETIMEV2:
+            return alignof(DateTimeV2Val);
         case TYPE_DECIMALV2:
             return alignof(DecimalV2Val);
         case TYPE_ARRAY:
@@ -370,6 +405,7 @@ public:
                     *reinterpret_cast<const float*>(slot);
             return;
         case TYPE_TIME:
+        case TYPE_TIMEV2:
         case TYPE_DOUBLE:
             reinterpret_cast<doris_udf::DoubleVal*>(dst)->val =
                     *reinterpret_cast<const double*>(slot);
@@ -378,6 +414,7 @@ public:
         case TYPE_VARCHAR:
         case TYPE_HLL:
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_STRING:
             reinterpret_cast<const StringValue*>(slot)->to_string_val(
                     reinterpret_cast<doris_udf::StringVal*>(dst));
@@ -386,6 +423,18 @@ public:
             reinterpret_cast<doris_udf::DecimalV2Val*>(dst)->val =
                     reinterpret_cast<const PackedInt128*>(slot)->value;
             return;
+        case TYPE_DECIMAL32:
+            reinterpret_cast<doris_udf::Decimal32Val*>(dst)->val =
+                    *reinterpret_cast<const int32_t*>(slot);
+            return;
+        case TYPE_DECIMAL64:
+            reinterpret_cast<doris_udf::Decimal64Val*>(dst)->val =
+                    *reinterpret_cast<const int64_t*>(slot);
+            return;
+        case TYPE_DECIMAL128:
+            memcpy(&reinterpret_cast<doris_udf::Decimal128Val*>(dst)->val, slot, sizeof(__int128));
+            return;
+
         case TYPE_DATE:
             reinterpret_cast<const DateTimeValue*>(slot)->to_datetime_val(
                     reinterpret_cast<doris_udf::DateTimeVal*>(dst));
@@ -393,6 +442,17 @@ public:
         case TYPE_DATETIME:
             reinterpret_cast<const DateTimeValue*>(slot)->to_datetime_val(
                     reinterpret_cast<doris_udf::DateTimeVal*>(dst));
+
+        case TYPE_DATEV2:
+            reinterpret_cast<
+                    const doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(slot)
+                    ->to_datev2_val(reinterpret_cast<doris_udf::DateV2Val*>(dst));
+            return;
+        case TYPE_DATETIMEV2:
+            reinterpret_cast<
+                    const doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>*>(
+                    slot)
+                    ->to_datev2_val(reinterpret_cast<doris_udf::DateV2Val*>(dst));
             return;
         case TYPE_ARRAY:
             reinterpret_cast<const CollectionValue*>(slot)->to_collection_val(
@@ -405,30 +465,30 @@ public:
 
     /// Templated equality functions. These assume the input values are not nullptr.
     template <typename T>
-    static inline bool equals(const PrimitiveType& type, const T& x, const T& y) {
+    static bool equals(const PrimitiveType& type, const T& x, const T& y) {
         return equals_internal(x, y);
     }
 
     /// Templated equality functions. These assume the input values are not nullptr.
     template <typename T>
-    static inline bool equals(const T& x, const T& y) {
+    static bool equals(const T& x, const T& y) {
         return equals_internal(x, y);
     }
 
     template <typename T>
-    static inline bool equals(const TypeDescriptor& type, const T& x, const T& y) {
+    static bool equals(const TypeDescriptor& type, const T& x, const T& y) {
         return equals_internal(x, y);
     }
 
     template <typename T>
-    static inline bool equals(const FunctionContext::TypeDesc& type, const T& x, const T& y) {
+    static bool equals(const FunctionContext::TypeDesc& type, const T& x, const T& y) {
         return equals_internal(x, y);
     }
 
 private:
     /// Implementations of Equals().
     template <typename T>
-    static inline bool equals_internal(const T& x, const T& y);
+    static bool equals_internal(const T& x, const T& y);
 };
 
 template <typename T>
@@ -474,4 +534,3 @@ Status allocate_any_val(RuntimeState* state, MemPool* pool, const TypeDescriptor
                         const std::string& mem_limit_exceeded_msg, AnyVal** result);
 
 } // namespace doris
-#endif

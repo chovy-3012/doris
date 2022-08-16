@@ -22,34 +22,27 @@ set(LIBRARY_OUTPUT_PATH "${BUILD_DIR}/src/olap")
 set(EXECUTABLE_OUTPUT_PATH "${BUILD_DIR}/src/olap")
 
 add_subdirectory(rowset)
-add_subdirectory(fs)
-add_subdirectory(memory)
 
 add_library(Olap STATIC
     aggregate_func.cpp
     base_compaction.cpp
     base_tablet.cpp
     bloom_filter.hpp
-    bloom_filter_reader.cpp
-    bloom_filter_writer.cpp
     block_column_predicate.cpp
     byte_buffer.cpp
     collect_iterator.cpp
     compaction.cpp
     compaction_permit_limiter.cpp
-    comparison_predicate.cpp
     compress.cpp
     cumulative_compaction.cpp
     cumulative_compaction_policy.cpp
     delete_handler.cpp
     delta_writer.cpp
     file_helper.cpp
-    file_stream.cpp
     generic_iterators.cpp
     hll.cpp
-    in_list_predicate.cpp
     bloom_filter_predicate.cpp
-    in_stream.cpp
+    like_column_predicate.cpp
     key_coder.cpp
     lru_cache.cpp
     memtable.cpp
@@ -57,11 +50,9 @@ add_library(Olap STATIC
     merger.cpp
     null_predicate.cpp
     olap_cond.cpp
-    olap_index.cpp
     olap_meta.cpp
     olap_server.cpp
     options.cpp
-    out_stream.cpp
     page_cache.cpp
     push_handler.cpp
     reader.cpp
@@ -72,25 +63,22 @@ add_library(Olap STATIC
     version_graph.cpp
     schema.cpp
     schema_change.cpp
-    serialize.cpp
     storage_engine.cpp
     data_dir.cpp
     short_key_index.cpp
     snapshot_manager.cpp
     stream_index_common.cpp
-    stream_index_reader.cpp
-    stream_index_writer.cpp
     stream_name.cpp
     tablet.cpp
     tablet_manager.cpp
     tablet_meta.cpp
     tablet_meta_manager.cpp
     tablet_schema.cpp
-    tablet_sync_service.cpp
     txn_manager.cpp
     types.cpp 
     utils.cpp
     wrapper_field.cpp
+    primary_key_index.cpp
     rowset/segment_v2/bitmap_index_reader.cpp
     rowset/segment_v2/bitmap_index_writer.cpp
     rowset/segment_v2/bitshuffle_page.cpp
@@ -120,7 +108,7 @@ add_library(Olap STATIC
     task/engine_storage_migration_task.cpp
     task/engine_publish_version_task.cpp
     task/engine_alter_tablet_task.cpp
-    olap_snapshot_converter.cpp
     column_vector.cpp
     segment_loader.cpp
+    storage_policy_mgr.cpp
 )

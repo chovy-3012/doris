@@ -48,7 +48,6 @@ import org.apache.doris.thrift.TStorageType;
 import org.apache.doris.thrift.TTabletType;
 
 import com.google.common.collect.Maps;
-
 import org.junit.Assert;
 
 import java.lang.reflect.Method;
@@ -65,15 +64,15 @@ public class UnitTestUtil {
     public static final int SCHEMA_HASH = 0;
 
     public static Database createDb(long dbId, long tableId, long partitionId, long indexId,
-                                    long tabletId, long backendId, long version, long versionHash) {
+                                    long tabletId, long backendId, long version) {
         // Catalog.getCurrentInvertedIndex().clear();
 
         // replica
         long replicaId = 0;
-        Replica replica1 = new Replica(replicaId, backendId, ReplicaState.NORMAL, version, versionHash, 0);
-        Replica replica2 = new Replica(replicaId + 1, backendId + 1, ReplicaState.NORMAL, version, versionHash, 0);
-        Replica replica3 = new Replica(replicaId + 2, backendId + 2, ReplicaState.NORMAL, version, versionHash, 0);
-        
+        Replica replica1 = new Replica(replicaId, backendId, ReplicaState.NORMAL, version, 0);
+        Replica replica2 = new Replica(replicaId + 1, backendId + 1, ReplicaState.NORMAL, version, 0);
+        Replica replica3 = new Replica(replicaId + 2, backendId + 2, ReplicaState.NORMAL, version, 0);
+
         // tablet
         Tablet tablet = new Tablet(tabletId);
 
@@ -126,7 +125,7 @@ public class UnitTestUtil {
         db.createTable(table);
         return db;
     }
-    
+
     public static Backend createBackend(long id, String host, int heartPort, int bePort, int httpPort) {
         Backend backend = new Backend(id, host, heartPort);
         backend.updateOnce(bePort, httpPort, 10000);
@@ -143,7 +142,7 @@ public class UnitTestUtil {
         backend.updateDisks(backendDisks);
         return backend;
     }
-    
+
     public static Method getPrivateMethod(Class c, String methodName, Class[] params) {
         Method method = null;
         try {
@@ -154,7 +153,7 @@ public class UnitTestUtil {
         }
         return method;
     }
-    
+
     public static Class getInnerClass(Class c, String className) {
         Class innerClass = null;
         for (Class tmpClass : c.getDeclaredClasses()) {
@@ -165,7 +164,7 @@ public class UnitTestUtil {
         }
         return innerClass;
     }
-    
+
     public static void initDppConfig() {
         Map<String, String> defaultConfigs = Maps.newHashMap();
         defaultConfigs.put("hadoop_palo_path", "/user/palo2");

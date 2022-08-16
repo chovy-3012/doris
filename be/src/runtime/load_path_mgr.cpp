@@ -53,12 +53,12 @@ LoadPathMgr::~LoadPathMgr() {
 Status LoadPathMgr::init() {
     _path_vec.clear();
     for (auto& path : _exec_env->store_paths()) {
-        _path_vec.push_back(path.path + MINI_PREFIX);
+        _path_vec.push_back(path.path + "/" + MINI_PREFIX);
     }
     LOG(INFO) << "Load path configured to [" << boost::join(_path_vec, ",") << "]";
 
     // error log is saved in first root path
-    _error_log_dir = _exec_env->store_paths()[0].path + ERROR_LOG_PREFIX;
+    _error_log_dir = _exec_env->store_paths()[0].path + "/" + ERROR_LOG_PREFIX;
     // check and make dir
     RETURN_IF_ERROR(FileUtils::create_dir(_error_log_dir));
 
@@ -68,7 +68,7 @@ Status LoadPathMgr::init() {
             "LoadPathMgr", "clean_expired_temp_path",
             [this]() {
                 // TODO(zc): add this thread to cgroup for control resource it use
-                while (!_stop_background_threads_latch.wait_for(MonoDelta::FromSeconds(3600))) {
+                while (!_stop_background_threads_latch.wait_for(std::chrono::seconds(3600))) {
                     this->clean();
                 }
             },

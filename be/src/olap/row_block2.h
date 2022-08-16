@@ -28,7 +28,8 @@
 #include "olap/selection_vector.h"
 #include "olap/types.h"
 #include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
+#include "runtime/memory/mem_tracker.h"
+#include "vec/columns/column.h"
 
 namespace doris {
 
@@ -37,13 +38,11 @@ class RowBlockRow;
 class RowCursor;
 
 // This struct contains a block of rows, in which each column's data is stored
-// in a vector. We don't use VectorizedRowBatch because it doesn't own the data
 // in block, however it is used by old code, which we don't want to change.
 class RowBlockV2 {
 public:
     RowBlockV2(const Schema& schema, uint16_t capacity);
 
-    RowBlockV2(const Schema& schema, uint16_t capacity, std::shared_ptr<MemTracker> parent);
     ~RowBlockV2();
 
     // update number of rows contained in this block
@@ -72,6 +71,9 @@ public:
 
     // convert RowBlockV2 to RowBlock
     Status convert_to_row_block(RowCursor* helper, RowBlock* dst);
+
+    // convert RowBlockV2 to vectorized::Block
+    Status convert_to_vec_block(vectorized::Block* block);
 
     // low-level API to access memory for each column block(including data array and nullmap).
     // `cid` must be one of `schema()->column_ids()`.
@@ -106,7 +108,11 @@ public:
     std::string debug_string();
 
 private:
-    Schema _schema;
+    Status _copy_data_to_column(int cid, vectorized::MutableColumnPtr& mutable_column_ptr);
+    Status _append_data_to_column(const ColumnVectorBatch* batch, size_t start, uint32_t len,
+                                  vectorized::MutableColumnPtr& mutable_column_ptr);
+
+    const Schema& _schema;
     size_t _capacity;
     // _column_vector_batches[cid] == null if cid is not in `_schema`.
     // memory are not allocated from `_pool` because we don't wan't to reallocate them in clear()
@@ -114,7 +120,6 @@ private:
 
     size_t _num_rows;
     // manages the memory for slice's data
-    std::shared_ptr<MemTracker> _tracker;
     std::unique_ptr<MemPool> _pool;
 
     // index of selected rows for rows passed the predicate

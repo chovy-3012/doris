@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/data-sink.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXEC_DATA_SINK_H
-#define DORIS_BE_SRC_QUERY_EXEC_DATA_SINK_H
+#pragma once
 
 #include <vector>
 
@@ -24,8 +26,8 @@
 #include "gen_cpp/DataSinks_types.h"
 #include "gen_cpp/Exprs_types.h"
 #include "runtime/descriptors.h"
-#include "runtime/mem_tracker.h"
 #include "runtime/query_statistics.h"
+#include "util/telemetry/telemetry.h"
 
 namespace doris {
 
@@ -33,10 +35,12 @@ class ObjectPool;
 class RowBatch;
 class RuntimeProfile;
 class RuntimeState;
-class TPlanExecRequest;
-class TPlanExecParams;
 class TPlanFragmentExecParams;
 class RowDescriptor;
+
+namespace vectorized {
+class Block;
+}
 
 // Superclass of all data sinks.
 class DataSink {
@@ -56,14 +60,17 @@ public:
     // Send a row batch into this sink.
     // eos should be true when the last batch is passed to send()
     virtual Status send(RuntimeState* state, RowBatch* batch) = 0;
-    // virtual Status send(RuntimeState* state, RowBatch* batch, bool eos) = 0;
 
+    // Send a Block into this sink.
+    virtual Status send(RuntimeState* state, vectorized::Block* block) {
+        return Status::NotSupported("Not support send block");
+    };
     // Releases all resources that were allocated in prepare()/send().
     // Further send() calls are illegal after calling close().
     // It must be okay to call this multiple times. Subsequent calls should
     // be ignored.
     virtual Status close(RuntimeState* state, Status exec_status) {
-        _expr_mem_tracker.reset();
+        profile()->add_to_span();
         _closed = true;
         return Status::OK();
     }
@@ -83,16 +90,22 @@ public:
         _query_statistics = statistics;
     }
 
+    void end_send_span() {
+        if (_send_span) {
+            _send_span->End();
+        }
+    }
+
 protected:
     // Set to true after close() has been called. subclasses should check and set this in
     // close().
     bool _closed;
-    std::shared_ptr<MemTracker> _expr_mem_tracker;
     std::string _name;
 
     // Maybe this will be transferred to BufferControlBlock.
     std::shared_ptr<QueryStatistics> _query_statistics;
+
+    OpentelemetrySpan _send_span {};
 };
 
 } // namespace doris
-#endif

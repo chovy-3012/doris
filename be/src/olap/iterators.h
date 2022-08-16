@@ -20,9 +20,11 @@
 #include <memory>
 
 #include "common/status.h"
-#include "olap/olap_common.h"
-#include "olap/column_predicate.h"
 #include "olap/block_column_predicate.h"
+#include "olap/column_predicate.h"
+#include "olap/olap_common.h"
+#include "olap/tablet_schema.h"
+#include "vec/core/block.h"
 
 namespace doris {
 
@@ -70,7 +72,15 @@ public:
     // delete conditions used by column index to filter pages
     std::vector<const Conditions*> delete_conditions;
 
-    std::shared_ptr<AndBlockColumnPredicate> delete_condition_predicates = std::make_shared<AndBlockColumnPredicate>();
+    // For unique-key merge-on-write, the effect is similar to delete_conditions
+    // that filters out rows that are deleted in realtime.
+    // For a particular row, if delete_bitmap.contains(rowid) means that row is
+    // marked deleted and invisible to user anymore.
+    // segment_id -> roaring::Roaring*
+    std::unordered_map<uint32_t, std::shared_ptr<roaring::Roaring>> delete_bitmap;
+
+    std::shared_ptr<AndBlockColumnPredicate> delete_condition_predicates =
+            std::make_shared<AndBlockColumnPredicate>();
     // reader's column predicate, nullptr if not existed
     // used to fiter rows in row block
     // TODO(hkp): refactor the column predicate framework
@@ -80,6 +90,14 @@ public:
     // REQUIRED (null is not allowed)
     OlapReaderStatistics* stats = nullptr;
     bool use_page_cache = false;
+    int block_row_max = 4096;
+
+    TabletSchemaSPtr tablet_schema = nullptr;
+    bool record_rowids = false;
+    // used for special optimization for query : ORDER BY key DESC LIMIT n
+    bool read_orderby_key_reverse = false;
+    // columns for orderby keys
+    std::vector<uint32_t>* read_orderby_key_columns = nullptr;
 };
 
 // Used to read data in RowBlockV2 one by one
@@ -99,7 +117,17 @@ public:
     // into input batch with Status::OK() returned
     // If there is no data to read, will return Status::EndOfFile.
     // If other error happens, other error code will be returned.
-    virtual Status next_batch(RowBlockV2* block) = 0;
+    virtual Status next_batch(RowBlockV2* block) {
+        return Status::NotSupported("to be implemented");
+    }
+
+    virtual Status next_batch(vectorized::Block* block) {
+        return Status::NotSupported("to be implemented");
+    }
+
+    virtual Status current_block_row_locations(std::vector<RowLocation>* block_row_locations) {
+        return Status::NotSupported("to be implemented");
+    }
 
     // return schema for this Iterator
     virtual const Schema& schema() const = 0;
@@ -110,9 +138,6 @@ public:
     // Return the data id such as segment id, used for keep the insert order when do
     // merge sort in priority queue
     virtual uint64_t data_id() const { return 0; }
-
-protected:
-    std::shared_ptr<MemTracker> _mem_tracker;
 };
 
 } // namespace doris

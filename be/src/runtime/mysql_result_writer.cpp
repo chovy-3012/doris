@@ -17,7 +17,6 @@
 
 #include "runtime/mysql_result_writer.h"
 
-#include "exprs/expr.h"
 #include "exprs/expr_context.h"
 #include "gen_cpp/PaloInternalService_types.h"
 #include "runtime/buffer_control_block.h"
@@ -25,16 +24,17 @@
 #include "runtime/result_buffer_mgr.h"
 #include "runtime/row_batch.h"
 #include "runtime/tuple_row.h"
-#include "util/date_func.h"
 #include "util/mysql_row_buffer.h"
 #include "util/types.h"
+#include "vec/columns/column_vector.h"
+#include "vec/core/block.h"
 
 namespace doris {
 
 MysqlResultWriter::MysqlResultWriter(BufferControlBlock* sinker,
                                      const std::vector<ExprContext*>& output_expr_ctxs,
-                                     RuntimeProfile* parent_profile)
-        : ResultWriter(),
+                                     RuntimeProfile* parent_profile, bool output_object_data)
+        : ResultWriter(output_object_data),
           _sinker(sinker),
           _output_expr_ctxs(output_expr_ctxs),
           _row_buffer(nullptr),
@@ -114,8 +114,20 @@ int MysqlResultWriter::_add_row_value(int index, const TypeDescriptor& type, voi
     }
 
     case TYPE_HLL:
-    case TYPE_OBJECT: {
-        buf_ret = _row_buffer->push_null();
+    case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE: {
+        if (_output_object_data) {
+            const StringValue* string_val = (const StringValue*)(item);
+
+            if (string_val->ptr == nullptr) {
+                buf_ret = _row_buffer->push_null();
+            } else {
+                buf_ret = _row_buffer->push_string(string_val->ptr, string_val->len);
+            }
+        } else {
+            buf_ret = _row_buffer->push_null();
+        }
+
         break;
     }
 
@@ -141,16 +153,18 @@ int MysqlResultWriter::_add_row_value(int index, const TypeDescriptor& type, voi
 
     case TYPE_DECIMALV2: {
         DecimalV2Value decimal_val(reinterpret_cast<const PackedInt128*>(item)->value);
-        int output_scale = _output_expr_ctxs[index]->root()->output_scale();
-        buf_ret = _row_buffer->push_decimal(decimal_val, output_scale);
+        // TODO: Support decimal output_scale after we support FE can sure
+        // accuracy of output_scale
+        // int output_scale = _output_expr_ctxs[index]->root()->output_scale();
+        buf_ret = _row_buffer->push_decimal(decimal_val, -1);
         break;
     }
 
     case TYPE_ARRAY: {
-        auto children_type = type.children[0].type;
+        auto child_type = type.children[0];
         auto array_value = (const CollectionValue*)(item);
 
-        ArrayIterator iter = array_value->iterator(children_type);
+        ArrayIterator iter = array_value->iterator(child_type.type);
 
         _row_buffer->open_dynamic_mode();
 
@@ -161,13 +175,26 @@ int MysqlResultWriter::_add_row_value(int index, const TypeDescriptor& type, voi
             if (begin != 0) {
                 buf_ret = _row_buffer->push_string(", ", 2);
             }
-
-            if (children_type == TYPE_CHAR || children_type == TYPE_VARCHAR) {
-                buf_ret = _row_buffer->push_string("'", 1);
-                buf_ret = _add_row_value(index, children_type, iter.value());
-                buf_ret = _row_buffer->push_string("'", 1);
+            if (!iter.get()) {
+                buf_ret = _row_buffer->push_string("NULL", 4);
             } else {
-                buf_ret = _add_row_value(index, children_type, iter.value());
+                if (child_type.is_string_type()) {
+                    buf_ret = _row_buffer->push_string("'", 1);
+                    buf_ret = _add_row_value(index, child_type, iter.get());
+                    buf_ret = _row_buffer->push_string("'", 1);
+                } else if (child_type.is_date_type()) {
+                    DateTimeVal data;
+                    iter.get(&data);
+                    auto datetime_value = DateTimeValue::from_datetime_val(data);
+                    buf_ret = _add_row_value(index, child_type, &datetime_value);
+                } else if (child_type.is_decimal_type()) {
+                    DecimalV2Val data;
+                    iter.get(&data);
+                    auto decimal_value = DecimalV2Value::from_decimal_val(data);
+                    buf_ret = _add_row_value(index, child_type, &decimal_value);
+                } else {
+                    buf_ret = _add_row_value(index, child_type, iter.get());
+                }
             }
 
             iter.next();
@@ -193,7 +220,6 @@ int MysqlResultWriter::_add_row_value(int index, const TypeDescriptor& type, voi
 }
 
 Status MysqlResultWriter::_add_one_row(TupleRow* row) {
-    SCOPED_TIMER(_convert_tuple_timer);
     _row_buffer->reset();
     int num_columns = _output_expr_ctxs.size();
     int buf_ret = 0;

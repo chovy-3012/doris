@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/partitioned-aggregation-node.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_EXEC_NEW_PARTITIONED_AGGREGATION_NODE_H
-#define DORIS_BE_SRC_EXEC_NEW_PARTITIONED_AGGREGATION_NODE_H
+#pragma once
 
 #include <deque>
 
@@ -26,7 +28,6 @@
 #include "runtime/bufferpool/suballocator.h"
 #include "runtime/descriptors.h" // for TupleId
 #include "runtime/mem_pool.h"
-#include "runtime/string_value.h"
 
 namespace doris {
 
@@ -323,9 +324,6 @@ private:
     /// Expose the minimum reduction factor to continue growing the hash tables.
     RuntimeProfile::Counter* preagg_streaming_ht_min_reduction_;
 
-    /// The estimated number of input rows from the planner.
-    int64_t estimated_input_cardinality_;
-
     /////////////////////////////////////////
     /// BEGIN: Members that must be Reset()
 
@@ -406,7 +404,7 @@ private:
         void Close(bool finalize_rows);
 
         /// Spill this partition. 'more_aggregate_rows' = true means that more aggregate rows
-        /// may be appended to the the partition before appending unaggregated rows. On
+        /// may be appended to the partition before appending unaggregated rows. On
         /// success, one of the streams is left with a write iterator: the aggregated stream
         /// if 'more_aggregate_rows' is true or the unaggregated stream otherwise.
         Status Spill(bool more_aggregate_rows);
@@ -529,7 +527,7 @@ private:
     /// GetNext() using the agg fn evaluators' Serialize() or Finalize().
     /// For the Finalize() case if the output tuple is different from the intermediate
     /// tuple, then a new tuple is allocated from 'pool' to hold the final result.
-    /// Grouping values are copied into the output tuple and the the output tuple holding
+    /// Grouping values are copied into the output tuple and the output tuple holding
     /// the finalized/serialized aggregate values is returned.
     /// TODO: Coordinate the allocation of new tuples with the release of memory
     /// so as not to make memory consumption blow up.
@@ -551,7 +549,7 @@ private:
     /// This function is replaced by codegen. We pass in ht_ctx_.get() as an argument for
     /// performance.
     template <bool AGGREGATED_ROWS>
-    Status IR_ALWAYS_INLINE ProcessBatch(RowBatch* batch, PartitionedHashTableCtx* ht_ctx);
+    Status ProcessBatch(RowBatch* batch, PartitionedHashTableCtx* ht_ctx);
 
     /// Evaluates the rows in 'batch' starting at 'start_row_idx' and stores the results in
     /// the expression values cache in 'ht_ctx'. The number of rows evaluated depends on
@@ -566,7 +564,7 @@ private:
     /// ProcessBatch for codegen to substitute function calls with codegen'd versions.
     /// May spill partitions if not enough memory is available.
     template <bool AGGREGATED_ROWS>
-    Status IR_ALWAYS_INLINE ProcessRow(TupleRow* row, PartitionedHashTableCtx* ht_ctx);
+    Status ProcessRow(TupleRow* row, PartitionedHashTableCtx* ht_ctx);
 
     /// Create a new intermediate tuple in partition, initialized with row. ht_ctx is
     /// the context for the partition's hash table and hash is the precomputed hash of
@@ -576,14 +574,14 @@ private:
     /// to substitute function calls with codegen'd versions.  insert_it is an iterator
     /// for insertion returned from PartitionedHashTable::FindBuildRowBucket().
     template <bool AGGREGATED_ROWS>
-    Status IR_ALWAYS_INLINE AddIntermediateTuple(Partition* partition, TupleRow* row, uint32_t hash,
-                                                 PartitionedHashTable::Iterator insert_it);
+    Status AddIntermediateTuple(Partition* partition, TupleRow* row, uint32_t hash,
+                                PartitionedHashTable::Iterator insert_it);
 
     /// Append a row to a spilled partition. May spill partitions if needed to switch to
     /// I/O buffers. Selects the correct stream according to the argument. Inlined into
     /// ProcessBatch().
     template <bool AGGREGATED_ROWS>
-    Status IR_ALWAYS_INLINE AppendSpilledRow(Partition* partition, TupleRow* row);
+    Status AppendSpilledRow(Partition* partition, TupleRow* row);
 
     /// Reads all the rows from input_stream and process them by calling ProcessBatch().
     template <bool AGGREGATED_ROWS>
@@ -630,9 +628,9 @@ private:
     /// keeps track of how many more entries can be added to the hash table so we can avoid
     /// retrying inserts. It is decremented if an insert succeeds and set to zero if an
     /// insert fails. If an error occurs, returns false and sets 'status'.
-    bool IR_ALWAYS_INLINE TryAddToHashTable(PartitionedHashTableCtx* ht_ctx, Partition* partition,
-                                            PartitionedHashTable* hash_tbl, TupleRow* in_row,
-                                            uint32_t hash, int* remaining_capacity, Status* status);
+    bool TryAddToHashTable(PartitionedHashTableCtx* ht_ctx, Partition* partition,
+                           PartitionedHashTable* hash_tbl, TupleRow* in_row, uint32_t hash,
+                           int* remaining_capacity, Status* status);
 
     /// Initializes hash_partitions_. 'level' is the level for the partitions to create.
     /// If 'single_partition_idx' is provided, it must be a number in range
@@ -720,5 +718,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

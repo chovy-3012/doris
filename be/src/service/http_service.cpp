@@ -18,6 +18,7 @@
 #include "service/http_service.h"
 
 #include "http/action/check_rpc_channel_action.h"
+#include "http/action/check_tablet_segment_action.h"
 #include "http/action/checksum_action.h"
 #include "http/action/compaction_action.h"
 #include "http/action/config_action.h"
@@ -25,14 +26,13 @@
 #include "http/action/health_action.h"
 #include "http/action/meta_action.h"
 #include "http/action/metrics_action.h"
-#include "http/action/mini_load.h"
-#include "http/action/monitor_action.h"
 #include "http/action/pprof_actions.h"
 #include "http/action/reload_tablet_action.h"
 #include "http/action/reset_rpc_channel_action.h"
 #include "http/action/restore_tablet_action.h"
 #include "http/action/snapshot_action.h"
 #include "http/action/stream_load.h"
+#include "http/action/stream_load_2pc.h"
 #include "http/action/tablet_migration_action.h"
 #include "http/action/tablets_distribution_action.h"
 #include "http/action/tablets_info_action.h"
@@ -54,14 +54,17 @@ HttpService::HttpService(ExecEnv* env, int port, int num_threads)
 HttpService::~HttpService() {}
 
 Status HttpService::start() {
-    add_default_path_handlers(_web_page_handler.get(), _env->process_mem_tracker());
+    add_default_path_handlers(_web_page_handler.get());
 
     // register load
-    MiniLoadAction* miniload_action = _pool.add(new MiniLoadAction(_env));
-    _ev_http_server->register_handler(HttpMethod::PUT, "/api/{db}/{table}/_load", miniload_action);
     StreamLoadAction* streamload_action = _pool.add(new StreamLoadAction(_env));
+    _ev_http_server->register_handler(HttpMethod::PUT, "/api/{db}/{table}/_load",
+                                      streamload_action);
     _ev_http_server->register_handler(HttpMethod::PUT, "/api/{db}/{table}/_stream_load",
                                       streamload_action);
+    StreamLoad2PCAction* streamload_2pc_action = _pool.add(new StreamLoad2PCAction(_env));
+    _ev_http_server->register_handler(HttpMethod::PUT, "/api/{db}/_stream_load_2pc",
+                                      streamload_2pc_action);
 
     // register download action
     std::vector<std::string> allow_paths;
@@ -86,7 +89,7 @@ Status HttpService::start() {
                                       error_log_download_action);
 
     // Register BE health action
-    HealthAction* health_action = _pool.add(new HealthAction(_env));
+    HealthAction* health_action = _pool.add(new HealthAction());
     _ev_http_server->register_handler(HttpMethod::GET, "/api/health", health_action);
 
     // Register Tablets Info action
@@ -114,12 +117,11 @@ Status HttpService::start() {
     }
 
     MetaAction* meta_action = _pool.add(new MetaAction(HEADER));
-    _ev_http_server->register_handler(HttpMethod::GET, "/api/meta/header/{tablet_id}/{schema_hash}",
-                                      meta_action);
+    _ev_http_server->register_handler(HttpMethod::GET, "/api/meta/header/{tablet_id}", meta_action);
 
 #ifndef BE_TEST
     // Register BE checksum action
-    ChecksumAction* checksum_action = _pool.add(new ChecksumAction(_env));
+    ChecksumAction* checksum_action = _pool.add(new ChecksumAction());
     _ev_http_server->register_handler(HttpMethod::GET, "/api/checksum", checksum_action);
 
     // Register BE reload tablet action
@@ -131,7 +133,7 @@ Status HttpService::start() {
                                       restore_tablet_action);
 
     // Register BE snapshot action
-    SnapshotAction* snapshot_action = _pool.add(new SnapshotAction(_env));
+    SnapshotAction* snapshot_action = _pool.add(new SnapshotAction());
     _ev_http_server->register_handler(HttpMethod::GET, "/api/snapshot", snapshot_action);
 #endif
 
@@ -165,6 +167,12 @@ Status HttpService::start() {
     ResetRPCChannelAction* reset_rpc_channel_action = _pool.add(new ResetRPCChannelAction(_env));
     _ev_http_server->register_handler(HttpMethod::GET, "/api/reset_rpc_channel/{endpoints}",
                                       reset_rpc_channel_action);
+
+    CheckTabletSegmentAction* check_tablet_segment_action =
+            _pool.add(new CheckTabletSegmentAction());
+    _ev_http_server->register_handler(HttpMethod::POST, "/api/check_tablet_segment_lost",
+                                      check_tablet_segment_action);
+
     _ev_http_server->start();
     return Status::OK();
 }

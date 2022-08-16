@@ -17,7 +17,6 @@
 
 package org.apache.doris.qe;
 
-import mockit.Expectations;
 import org.apache.doris.analysis.AccessTestUtil;
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.IntLiteral;
@@ -33,13 +32,12 @@ import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 
 import com.google.common.collect.Lists;
-
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.List;
-
-import mockit.Mocked;
 
 public class SetExecutorTest {
     private Analyzer analyzer;
@@ -52,7 +50,7 @@ public class SetExecutorTest {
     public void setUp() throws DdlException {
         analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
         ctx = new ConnectContext(null);
-        ctx.setCatalog(AccessTestUtil.fetchAdminCatalog());
+        ctx.setEnv(AccessTestUtil.fetchAdminCatalog());
         ctx.setQualifiedUser("root");
         ctx.setRemoteIP("192.168.1.1");
         UserIdentity currentUser = new UserIdentity("root", "192.168.1.1");

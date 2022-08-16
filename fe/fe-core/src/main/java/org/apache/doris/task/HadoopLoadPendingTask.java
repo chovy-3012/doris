@@ -19,9 +19,9 @@ package org.apache.doris.task;
 
 import org.apache.doris.analysis.LiteralExpr;
 import org.apache.doris.catalog.AggregateType;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.DistributionInfo;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.HashDistributionInfo;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MaterializedIndexMeta;
@@ -50,7 +50,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -79,23 +78,25 @@ public class HadoopLoadPendingTask extends LoadPendingTask {
         Map<String, EtlPartitionConf> etlPartitions = createEtlPartitions();
         Preconditions.checkNotNull(etlPartitions);
         taskConf.setEtlPartitions(etlPartitions);
-    
+
         LoadErrorHub.Param info = load.getLoadErrorHubInfo();
         // hadoop load only support mysql load error hub
         if (info != null && info.getType() == HubType.MYSQL_TYPE) {
             taskConf.setHubInfo(new EtlErrorHubInfo(this.job.getId(), info));
         }
-    
+
         etlTaskConf = taskConf.toDppTaskConf();
         Preconditions.checkNotNull(etlTaskConf);
 
         // add table indexes to transaction state
-        TransactionState txnState = Catalog.getCurrentGlobalTransactionMgr().getTransactionState(job.getDbId(), job.getTransactionId());
+        TransactionState txnState = Env.getCurrentGlobalTransactionMgr()
+                .getTransactionState(job.getDbId(), job.getTransactionId());
         if (txnState == null) {
             throw new LoadException("txn does not exist: " + job.getTransactionId());
         }
         for (long tableId : job.getIdToTableLoadInfo().keySet()) {
-            OlapTable table = (OlapTable) db.getTableOrException(tableId, s -> new LoadException("table does not exist. id: " + s));
+            OlapTable table = (OlapTable) db.getTableOrException(
+                    tableId, s -> new LoadException("table does not exist. id: " + s));
             table.readLock();
             try {
                 txnState.addTableIndexes(table);
@@ -129,7 +130,8 @@ public class HadoopLoadPendingTask extends LoadPendingTask {
             long tableId = tableEntry.getKey();
             TableLoadInfo tableLoadInfo = tableEntry.getValue();
 
-            OlapTable table = (OlapTable) db.getTableOrException(tableId, s -> new LoadException("table does not exist. id: " + s));
+            OlapTable table = (OlapTable) db.getTableOrException(
+                    tableId, s -> new LoadException("table does not exist. id: " + s));
             table.readLock();
             try {
                 // columns
@@ -211,7 +213,7 @@ public class HadoopLoadPendingTask extends LoadPendingTask {
                 } else {
                     dppColumn.put("is_key", false);
                     String aggregation = "none";
-                    if ("AGG_KEYS" == table.getKeysType().name()) {
+                    if ("AGG_KEYS".equals(table.getKeysType().name())) {
                         AggregateType aggregateType = column.getAggregationType();
                         if (AggregateType.SUM == aggregateType) {
                             aggregation = "ADD";
@@ -256,7 +258,7 @@ public class HadoopLoadPendingTask extends LoadPendingTask {
                             dppColumn.put("name", column.getName());
                             dppColumn.put("is_key", true);
                             dppColumn.put("is_implicit", true);
-                            columnRefs.add(keySize, dppColumn); 
+                            columnRefs.add(keySize, dppColumn);
                             ++keySize;
                         }
                     }
@@ -527,9 +529,11 @@ public class HadoopLoadPendingTask extends LoadPendingTask {
                     columnType = "DOUBLE";
                     break;
                 case DATE:
+                case DATEV2:
                     columnType = "DATE";
                     break;
                 case DATETIME:
+                case DATETIMEV2:
                     columnType = "DATETIME";
                     break;
                 case CHAR:
@@ -544,7 +548,14 @@ public class HadoopLoadPendingTask extends LoadPendingTask {
                 case BITMAP:
                     columnType = "BITMAP";
                     break;
+                // TODO(weixiang): not support in broker load.
+                case QUANTILE_STATE:
+                    columnType = "QUANTILE_STATE";
+                    break;
                 case DECIMALV2:
+                case DECIMAL32:
+                case DECIMAL64:
+                case DECIMAL128:
                     columnType = "DECIMAL";
                     break;
                 default:
@@ -573,7 +584,7 @@ public class HadoopLoadPendingTask extends LoadPendingTask {
             }
 
             // decimal precision scale
-            if (type == PrimitiveType.DECIMALV2) {
+            if (type.isDecimalV2Type() || type.isDecimalV3Type()) {
                 dppColumn.put("precision", column.getPrecision());
                 dppColumn.put("scale", column.getScale());
             }

@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/scalar-fn-call.cc
+// and modified by Doris
 
 #include "exprs/scalar_fn_call.h"
 
@@ -24,7 +27,6 @@
 #include "runtime/runtime_state.h"
 #include "runtime/user_function_cache.h"
 #include "udf/udf_internal.h"
-#include "util/debug_util.h"
 #include "util/symbols_util.h"
 
 namespace doris {
@@ -49,9 +51,7 @@ Status ScalarFnCall::prepare(RuntimeState* state, const RowDescriptor& desc, Exp
         // Having the failure in the BE (rather than during analysis) allows for
         // better FE testing.
         DCHECK_EQ(_fn.binary_type, TFunctionBinaryType::BUILTIN);
-        std::stringstream ss;
-        ss << "Function " << _fn.name.function_name << " is not implemented.";
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Function {} is not implemented.", _fn.name.function_name);
     }
 
     FunctionContext::TypeDesc return_type = AnyValUtil::column_type_to_type_desc(_type);
@@ -72,7 +72,6 @@ Status ScalarFnCall::prepare(RuntimeState* state, const RowDescriptor& desc, Exp
     }
 
     _fn_context_index = context->register_func(state, return_type, arg_types, varargs_buffer_size);
-    // _scalar_fn = OpcodeRegistry::instance()->get_function_ptr(_opcode);
     Status status = Status::OK();
     if (_scalar_fn == nullptr) {
         if (SymbolsUtil::is_mangled(_fn.scalar_fn.symbol)) {
@@ -88,61 +87,11 @@ Status ScalarFnCall::prepare(RuntimeState* state, const RowDescriptor& desc, Exp
             // ret_type = ColumnType(thrift_to_type(_fn.ret_type));
             std::string symbol = SymbolsUtil::mangle_user_function(_fn.scalar_fn.symbol, arg_types,
                                                                    _fn.has_var_args, nullptr);
+
             status = UserFunctionCache::instance()->get_function_ptr(
                     _fn.id, symbol, _fn.hdfs_location, _fn.checksum, &_scalar_fn, &_cache_entry);
         }
     }
-#if 0
-    // If the codegen object hasn't been created yet and we're calling a builtin or native
-    // UDF with <= 8 non-variadic arguments, we can use the interpreted path and call the
-    // builtin without codegen. This saves us the overhead of creating the codegen object
-    // when it's not necessary (i.e., in plan fragments with no codegen-enabled operators).
-    // In addition, we can never codegen char arguments.
-    // TODO: codegen for char arguments
-    if (char_arg || (!state->codegen_created() && num_fixed_args() <= 8 &&
-                     (_fn.binary_type == TFunctionBinaryType::BUILTIN ||
-                      _fn.binary_type == TFunctionBinaryType::NATIVE))) {
-        // Builtins with char arguments must still have <= 8 arguments.
-        // TODO: delete when we have codegen for char arguments
-        if (char_arg) {
-            DCHECK(num_fixed_args() <= 8 && _fn.binary_type == TFunctionBinaryType::BUILTIN);
-        }
-        Status status = UserFunctionCache::instance()->GetSoFunctionPtr(
-            _fn.hdfs_location, _fn.scalar_fn.symbol, &_scalar_fn, &cache_entry_);
-        if (!status.ok()) {
-            if (_fn.binary_type == TFunctionBinaryType::BUILTIN) {
-                // Builtins symbols should exist unless there is a version mismatch.
-                status.SetErrorMsg(ErrorMsg(TErrorCode::MISSING_BUILTIN,
-                                            _fn.name.function_name, _fn.scalar_fn.symbol));
-                return status;
-            } else {
-                DCHECK_EQ(_fn.binary_type, TFunctionBinaryType::NATIVE);
-                return Status::InternalError(strings::Substitute("Problem loading UDF '$0':\n$1",
-                                         _fn.name.function_name, status.GetDetail()));
-                return status;
-            }
-        }
-    } else {
-        // If we got here, either codegen is enabled or we need codegen to run this function.
-        LlvmCodeGen* codegen;
-        RETURN_IF_ERROR(state->GetCodegen(&codegen));
-
-        if (_fn.binary_type == TFunctionBinaryType::IR) {
-            std::string local_path;
-            RETURN_IF_ERROR(UserFunctionCache::instance()->GetLocalLibPath(
-                    _fn.hdfs_location, UserFunctionCache::TYPE_IR, &local_path));
-            // Link the UDF module into this query's main module (essentially copy the UDF
-            // module into the main module) so the UDF's functions are available in the main
-            // module.
-            RETURN_IF_ERROR(codegen->LinkModule(local_path));
-        }
-
-        Function* ir_udf_wrapper;
-        RETURN_IF_ERROR(GetCodegendComputeFn(state, &ir_udf_wrapper));
-        // TODO: don't do this for child exprs
-        codegen->AddFunctionToJit(ir_udf_wrapper, &_scalar_fn_wrapper);
-    }
-#endif
     if (_fn.scalar_fn.__isset.prepare_fn_symbol) {
         RETURN_IF_ERROR(get_function(state, _fn.scalar_fn.prepare_fn_symbol,
                                      reinterpret_cast<void**>(&_prepare_fn)));
@@ -238,21 +187,6 @@ Status ScalarFnCall::get_function(RuntimeState* state, const std::string& symbol
         _fn.binary_type == TFunctionBinaryType::HIVE) {
         return UserFunctionCache::instance()->get_function_ptr(_fn.id, symbol, _fn.hdfs_location,
                                                                _fn.checksum, fn, &_cache_entry);
-    } else {
-#if 0
-        DCHECK_EQ(_fn.binary_type, TFunctionBinaryType::IR);
-        LlvmCodeGen* codegen;
-        RETURN_IF_ERROR(state->GetCodegen(&codegen));
-        Function* ir_fn = codegen->module()->getFunction(symbol);
-        if (ir_fn == nullptr) {
-            std::stringstream ss;
-            ss << "Unable to locate function " << symbol
-                << " from LLVM module " << _fn.hdfs_location;
-            return Status::InternalError(ss.str());
-        }
-        codegen->AddFunctionToJit(ir_fn, fn);
-        return Status::OK()();
-#endif
     }
     return Status::OK();
 }
@@ -421,7 +355,12 @@ typedef FloatVal (*FloatWrapper)(ExprContext*, TupleRow*);
 typedef DoubleVal (*DoubleWrapper)(ExprContext*, TupleRow*);
 typedef StringVal (*StringWrapper)(ExprContext*, TupleRow*);
 typedef DateTimeVal (*DatetimeWrapper)(ExprContext*, TupleRow*);
+typedef DateV2Val (*DateV2Wrapper)(ExprContext*, TupleRow*);
+typedef DateTimeV2Val (*DateTimeV2Wrapper)(ExprContext*, TupleRow*);
 typedef DecimalV2Val (*DecimalV2Wrapper)(ExprContext*, TupleRow*);
+typedef Decimal32Val (*Decimal32Wrapper)(ExprContext*, TupleRow*);
+typedef Decimal64Val (*Decimal64Wrapper)(ExprContext*, TupleRow*);
+typedef Decimal128Val (*Decimal128Wrapper)(ExprContext*, TupleRow*);
 typedef CollectionVal (*ArrayWrapper)(ExprContext*, TupleRow*);
 
 // TODO: macroify this?
@@ -496,7 +435,7 @@ FloatVal ScalarFnCall::get_float_val(ExprContext* context, TupleRow* row) {
 }
 
 DoubleVal ScalarFnCall::get_double_val(ExprContext* context, TupleRow* row) {
-    DCHECK(_type.type == TYPE_DOUBLE || _type.type == TYPE_TIME);
+    DCHECK(_type.type == TYPE_DOUBLE || _type.type == TYPE_TIME || _type.type == TYPE_TIMEV2);
     DCHECK(context != nullptr);
     if (_scalar_fn_wrapper == nullptr) {
         return interpret_eval<DoubleVal>(context, row);
@@ -526,6 +465,26 @@ DateTimeVal ScalarFnCall::get_datetime_val(ExprContext* context, TupleRow* row) 
     return fn(context, row);
 }
 
+DateV2Val ScalarFnCall::get_datev2_val(ExprContext* context, TupleRow* row) {
+    DCHECK(_type.is_date_v2_type());
+    DCHECK(context != nullptr);
+    if (_scalar_fn_wrapper == nullptr) {
+        return interpret_eval<DateV2Val>(context, row);
+    }
+    DateV2Wrapper fn = reinterpret_cast<DateV2Wrapper>(_scalar_fn_wrapper);
+    return fn(context, row);
+}
+
+DateTimeV2Val ScalarFnCall::get_datetimev2_val(ExprContext* context, TupleRow* row) {
+    DCHECK(_type.is_datetime_v2_type());
+    DCHECK(context != nullptr);
+    if (_scalar_fn_wrapper == nullptr) {
+        return interpret_eval<DateTimeV2Val>(context, row);
+    }
+    DateTimeV2Wrapper fn = reinterpret_cast<DateTimeV2Wrapper>(_scalar_fn_wrapper);
+    return fn(context, row);
+}
+
 DecimalV2Val ScalarFnCall::get_decimalv2_val(ExprContext* context, TupleRow* row) {
     DCHECK_EQ(_type.type, TYPE_DECIMALV2);
     DCHECK(context != nullptr);
@@ -533,6 +492,36 @@ DecimalV2Val ScalarFnCall::get_decimalv2_val(ExprContext* context, TupleRow* row
         return interpret_eval<DecimalV2Val>(context, row);
     }
     DecimalV2Wrapper fn = reinterpret_cast<DecimalV2Wrapper>(_scalar_fn_wrapper);
+    return fn(context, row);
+}
+
+Decimal32Val ScalarFnCall::get_decimal32_val(ExprContext* context, TupleRow* row) {
+    DCHECK_EQ(_type.type, TYPE_DECIMAL32);
+    DCHECK(context != nullptr);
+    if (_scalar_fn_wrapper == nullptr) {
+        return interpret_eval<Decimal32Val>(context, row);
+    }
+    Decimal32Wrapper fn = reinterpret_cast<Decimal32Wrapper>(_scalar_fn_wrapper);
+    return fn(context, row);
+}
+
+Decimal64Val ScalarFnCall::get_decimal64_val(ExprContext* context, TupleRow* row) {
+    DCHECK_EQ(_type.type, TYPE_DECIMAL64);
+    DCHECK(context != nullptr);
+    if (_scalar_fn_wrapper == nullptr) {
+        return interpret_eval<Decimal64Val>(context, row);
+    }
+    Decimal64Wrapper fn = reinterpret_cast<Decimal64Wrapper>(_scalar_fn_wrapper);
+    return fn(context, row);
+}
+
+Decimal128Val ScalarFnCall::get_decimal128_val(ExprContext* context, TupleRow* row) {
+    DCHECK_EQ(_type.type, TYPE_DECIMAL128);
+    DCHECK(context != nullptr);
+    if (_scalar_fn_wrapper == nullptr) {
+        return interpret_eval<Decimal128Val>(context, row);
+    }
+    Decimal128Wrapper fn = reinterpret_cast<Decimal128Wrapper>(_scalar_fn_wrapper);
     return fn(context, row);
 }
 

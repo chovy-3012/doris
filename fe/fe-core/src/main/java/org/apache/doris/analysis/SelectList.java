@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/SelectList.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
@@ -30,8 +33,11 @@ import java.util.Map;
  * Select list items plus distinct clause.
  */
 public class SelectList {
+    private static final String SET_VAR_KEY = "set_var";
+
     private boolean isDistinct;
     private Map<String, String> optHints;
+    private List<OrderByElement> orderByElements;
 
     // ///////////////////////////////////////
     // BEGIN: Members that need to be reset()
@@ -40,7 +46,7 @@ public class SelectList {
 
     // END: Members that need to be reset()
     // ///////////////////////////////////////
-    
+
     public SelectList(SelectList other) {
         items = Lists.newArrayList();
         for (SelectListItem item : other.items) {
@@ -53,7 +59,7 @@ public class SelectList {
         items = Lists.newArrayList();
         this.isDistinct = false;
     }
-    
+
     public SelectList(List<SelectListItem> items, boolean isDistinct) {
         this.isDistinct = isDistinct;
         this.items = items;
@@ -79,8 +85,16 @@ public class SelectList {
         return optHints;
     }
 
-    public void setOptHints(Map<String, String> optHints) {
-        this.optHints = optHints;
+    public void setOptHints(Map<String, Map<String, String>> optHints) {
+        if (optHints != null) {
+            this.optHints = optHints.get(SET_VAR_KEY);
+        }
+    }
+
+    public void setOrderByElements(List<OrderByElement> orderByElements) {
+        if (orderByElements != null) {
+            this.orderByElements = orderByElements;
+        }
     }
 
     public void reset() {
@@ -108,7 +122,7 @@ public class SelectList {
             item.setExpr(rewriter.rewrite(item.getExpr(), analyzer));
         }
     }
-    
+
     @Override
     public SelectList clone() {
         return new SelectList(this);

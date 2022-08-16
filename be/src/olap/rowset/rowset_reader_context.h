@@ -26,19 +26,22 @@ namespace doris {
 
 class RowCursor;
 class Conditions;
+class DeleteBitmap;
 class DeleteHandler;
 class TabletSchema;
 
 struct RowsetReaderContext {
     ReaderType reader_type = READER_QUERY;
-    const TabletSchema* tablet_schema = nullptr;
+    Version version {-1, -1};
+    TabletSchemaSPtr tablet_schema = nullptr;
     // whether rowset should return ordered rows.
     bool need_ordered_result = true;
+    // used for special optimization for query : ORDER BY key DESC LIMIT n
+    bool read_orderby_key_reverse = false;
+    // columns for orderby keys
+    std::vector<uint32_t>* read_orderby_key_columns = nullptr;
     // projection columns: the set of columns rowset reader should return
     const std::vector<uint32_t>* return_columns = nullptr;
-    // set of columns used to prune rows that doesn't satisfy key ranges and `conditions`.
-    // currently it contains all columns from `return_columns`, `conditions`, `lower_bound_keys`, and `upper_bound_keys`
-    const std::vector<uint32_t>* seek_columns = nullptr;
     // columns to load bloom filter index
     // including columns in "=" or "in" conditions
     const std::set<uint32_t>* load_bf_columns = nullptr;
@@ -52,15 +55,24 @@ struct RowsetReaderContext {
     const std::vector<ColumnPredicate*>* predicates = nullptr;
     // value column predicate in UNIQUE table
     const std::vector<ColumnPredicate*>* value_predicates = nullptr;
-    const std::vector<RowCursor*>* lower_bound_keys = nullptr;
+    const std::vector<RowCursor>* lower_bound_keys = nullptr;
     const std::vector<bool>* is_lower_keys_included = nullptr;
-    const std::vector<RowCursor*>* upper_bound_keys = nullptr;
+    const std::vector<RowCursor>* upper_bound_keys = nullptr;
     const std::vector<bool>* is_upper_keys_included = nullptr;
     const DeleteHandler* delete_handler = nullptr;
     OlapReaderStatistics* stats = nullptr;
     RuntimeState* runtime_state = nullptr;
     bool use_page_cache = false;
     int sequence_id_idx = -1;
+    int batch_size = 1024;
+    bool is_vec = false;
+    bool is_unique = false;
+    //record row num merged in generic iterator
+    uint64_t* merged_rows = nullptr;
+    // for unique key merge on write
+    bool enable_unique_key_merge_on_write = false;
+    const DeleteBitmap* delete_bitmap = nullptr;
+    bool record_rowids = false;
 };
 
 } // namespace doris

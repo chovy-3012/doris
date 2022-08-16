@@ -17,9 +17,6 @@
 
 #include "schema_dummy_scanner.h"
 
-#include "runtime/primitive_type.h"
-#include "runtime/string_value.h"
-
 namespace doris {
 
 SchemaScanner::ColumnDesc SchemaDummyScanner::_s_dummy_columns[] = {};
@@ -30,7 +27,7 @@ SchemaDummyScanner::SchemaDummyScanner()
 
 SchemaDummyScanner::~SchemaDummyScanner() {}
 
-Status SchemaDummyScanner::start() {
+Status SchemaDummyScanner::start(RuntimeState* state) {
     return Status::OK();
 }
 

@@ -29,12 +29,16 @@
 
 namespace doris {
 
+static uint8_t NEXT_TWO_BYTE = 252;
+static uint8_t NEXT_THREE_BYTE = 253;
+static uint8_t NEXT_EIGHT_BYTE = 254;
+
 // the first byte:
 // <= 250: length
 // = 251: nullptr
 // = 252: the next two byte is length
 // = 253: the next three byte is length
-// = 254: the next eighth byte is length
+// = 254: the next eight byte is length
 static char* pack_vlen(char* packet, uint64_t length) {
     if (length < 251ULL) {
         int1store(packet, length);
@@ -43,18 +47,18 @@ static char* pack_vlen(char* packet, uint64_t length) {
 
     /* 251 is reserved for nullptr */
     if (length < 65536ULL) {
-        *packet++ = 252;
+        *packet++ = NEXT_TWO_BYTE;
         int2store(packet, length);
         return packet + 2;
     }
 
     if (length < 16777216ULL) {
-        *packet++ = 253;
+        *packet++ = NEXT_THREE_BYTE;
         int3store(packet, length);
         return packet + 3;
     }
 
-    *packet++ = 254;
+    *packet++ = NEXT_EIGHT_BYTE;
     int8store(packet, length);
     return packet + 8;
 }
@@ -63,7 +67,7 @@ MysqlRowBuffer::MysqlRowBuffer()
           _buf(_default_buf),
           _buf_size(sizeof(_default_buf)),
           _dynamic_mode(0),
-          _len_pos(nullptr) {}
+          _len_pos(0) {}
 
 MysqlRowBuffer::~MysqlRowBuffer() {
     if (_buf != _default_buf) {
@@ -73,9 +77,9 @@ MysqlRowBuffer::~MysqlRowBuffer() {
 
 void MysqlRowBuffer::open_dynamic_mode() {
     if (!_dynamic_mode) {
-        *_pos++ = 254;
+        *_pos++ = NEXT_EIGHT_BYTE;
         // write length when dynamic mode close
-        _len_pos = _pos;
+        _len_pos = (_pos - _buf);
         _pos = _pos + 8;
     }
     _dynamic_mode++;
@@ -84,9 +88,10 @@ void MysqlRowBuffer::open_dynamic_mode() {
 void MysqlRowBuffer::close_dynamic_mode() {
     _dynamic_mode--;
 
+    // _buf + _len_pos is the position to write length
     if (!_dynamic_mode) {
-        int8store(_len_pos, _pos - _len_pos - 8);
-        _len_pos = nullptr;
+        int8store((_buf + _len_pos), _pos - (_buf + _len_pos) - 8);
+        _len_pos = 0;
     }
 }
 
@@ -109,14 +114,14 @@ int MysqlRowBuffer::reserve(int64_t size) {
         LOG(ERROR) << "alloc memory failed. size = " << alloc_size;
         return -1;
     }
-
-    memcpy(new_buf, _buf, _pos - _buf);
+    size_t offset = _pos - _buf;
+    memcpy(new_buf, _buf, offset);
 
     if (_buf != _default_buf) {
         delete[] _buf;
     }
 
-    _pos = new_buf + (_pos - _buf);
+    _pos = new_buf + offset;
     _buf = new_buf;
     _buf_size = alloc_size;
 

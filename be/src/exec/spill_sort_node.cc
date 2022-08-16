@@ -20,8 +20,6 @@
 #include "exec/sort_exec_exprs.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
-#include "runtime/sorted_run_merger.h"
-#include "util/debug_util.h"
 
 namespace doris {
 
@@ -44,8 +42,8 @@ Status SpillSortNode::init(const TPlanNode& tnode, RuntimeState* state) {
 Status SpillSortNode::prepare(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::prepare(state));
-    RETURN_IF_ERROR(_sort_exec_exprs.prepare(state, child(0)->row_desc(), _row_descriptor,
-                                             expr_mem_tracker()));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
+    RETURN_IF_ERROR(_sort_exec_exprs.prepare(state, child(0)->row_desc(), _row_descriptor));
     // AddExprCtxsToFree(_sort_exec_exprs);
     return Status::OK();
 }
@@ -53,6 +51,7 @@ Status SpillSortNode::prepare(RuntimeState* state) {
 Status SpillSortNode::open(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::open(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_ERROR(_sort_exec_exprs.open(state));
     RETURN_IF_CANCELLED(state);
     RETURN_IF_ERROR(state->check_query_state("Spill sort, while open."));
@@ -64,7 +63,7 @@ Status SpillSortNode::open(RuntimeState* state) {
         TupleRowComparator less_than(_sort_exec_exprs, _is_asc_order, _nulls_first);
         // Create and initialize the external sort impl object
         _sorter.reset(new SpillSorter(less_than, _sort_exec_exprs.sort_tuple_slot_expr_ctxs(),
-                                      &_row_descriptor, mem_tracker(), runtime_profile(), state));
+                                      &_row_descriptor, runtime_profile(), state));
         RETURN_IF_ERROR(_sorter->init());
     }
 
@@ -82,8 +81,7 @@ Status SpillSortNode::open(RuntimeState* state) {
 
 Status SpillSortNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
-    // RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::GETNEXT, state));
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::GETNEXT));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_CANCELLED(state);
     RETURN_IF_ERROR(state->check_query_state("Spill sort, while getting next."));
 
@@ -153,7 +151,7 @@ void SpillSortNode::debug_string(int indentation_level, stringstream* out) const
 }
 
 Status SpillSortNode::sort_input(RuntimeState* state) {
-    RowBatch batch(child(0)->row_desc(), state->batch_size(), mem_tracker().get());
+    RowBatch batch(child(0)->row_desc(), state->batch_size());
     bool eos = false;
     do {
         batch.reset();

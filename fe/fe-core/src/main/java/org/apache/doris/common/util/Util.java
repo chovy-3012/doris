@@ -20,14 +20,16 @@ package org.apache.doris.common.util;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
+import org.apache.doris.common.FeNameFormat;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.qe.ConnectContext;
-
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.BufferedReader;
 import java.io.DataInput;
@@ -52,9 +54,11 @@ public class Util {
 
     private static final long DEFAULT_EXEC_CMD_TIMEOUT_MS = 600000L;
 
-    private static final String[] ORDINAL_SUFFIX = new String[] { "th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th" };
+    private static final String[] ORDINAL_SUFFIX
+            = new String[] { "th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th" };
 
-    private static final List<String> REGEX_ESCAPES = Lists.newArrayList("\\", "$", "(", ")", "*", "+", ".", "[", "]", "?", "^", "{", "}", "|");
+    private static final List<String> REGEX_ESCAPES
+            = Lists.newArrayList("\\", "$", "(", ")", "*", "+", ".", "[", "]", "?", "^", "{", "}", "|");
 
     static {
         TYPE_STRING_MAP.put(PrimitiveType.TINYINT, "tinyint(4)");
@@ -66,17 +70,23 @@ public class Util {
         TYPE_STRING_MAP.put(PrimitiveType.DOUBLE, "double");
         TYPE_STRING_MAP.put(PrimitiveType.DATE, "date");
         TYPE_STRING_MAP.put(PrimitiveType.DATETIME, "datetime");
+        TYPE_STRING_MAP.put(PrimitiveType.DATEV2, "datev2");
+        TYPE_STRING_MAP.put(PrimitiveType.DATETIMEV2, "datetimev2");
         TYPE_STRING_MAP.put(PrimitiveType.CHAR, "char(%d)");
         TYPE_STRING_MAP.put(PrimitiveType.VARCHAR, "varchar(%d)");
         TYPE_STRING_MAP.put(PrimitiveType.STRING, "string");
         TYPE_STRING_MAP.put(PrimitiveType.DECIMALV2, "decimal(%d,%d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL32, "decimal(%d,%d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL64, "decimal(%d,%d)");
+        TYPE_STRING_MAP.put(PrimitiveType.DECIMAL128, "decimal(%d,%d)");
         TYPE_STRING_MAP.put(PrimitiveType.HLL, "varchar(%d)");
         TYPE_STRING_MAP.put(PrimitiveType.BOOLEAN, "bool");
         TYPE_STRING_MAP.put(PrimitiveType.BITMAP, "bitmap");
+        TYPE_STRING_MAP.put(PrimitiveType.QUANTILE_STATE, "quantile_state");
         TYPE_STRING_MAP.put(PrimitiveType.ARRAY, "Array<%s>");
         TYPE_STRING_MAP.put(PrimitiveType.NULL_TYPE, "null");
     }
-    
+
     private static class CmdWorker extends Thread {
         private final Process process;
         private Integer exitValue;
@@ -158,7 +168,7 @@ public class Util {
                 exitValue = cmdWorker.getExitValue();
                 if (exitValue == null) {
                     // if we get this far then we never got an exit value from the worker thread
-                    // as a result of a timeout 
+                    // as a result of a timeout
                     LOG.warn("exec command [{}] timed out.", cmd);
                     exitValue = -1;
                 }
@@ -181,14 +191,14 @@ public class Util {
 
         return result;
     }
-    
+
     public static List<String> shellSplit(CharSequence string) {
         List<String> tokens = new ArrayList<String>();
         boolean escaping = false;
         char quoteChar = ' ';
         boolean quoting = false;
-        StringBuilder current = new StringBuilder() ;
-        for (int i = 0; i<string.length(); i++) {
+        StringBuilder current = new StringBuilder();
+        for (int i = 0; i < string.length(); i++) {
             char c = string.charAt(i);
             if (escaping) {
                 current.append(c);
@@ -224,15 +234,11 @@ public class Util {
         }
         return sb.toString();
     }
-    
-    public static long generateVersionHash() {
-        return Math.abs(new Random().nextLong());
-    }
-    
+
     public static int generateSchemaHash() {
         return Math.abs(new Random().nextInt());
     }
-    
+
     /**
      * Chooses k unique random elements from a population sequence
      */
@@ -244,7 +250,7 @@ public class Util {
         Collections.shuffle(population);
         return population.subList(0, kNum);
     }
-    
+
     /**
      * Delete directory and all contents in this directory
      */
@@ -329,7 +335,7 @@ public class Util {
         if (Strings.isNullOrEmpty(valStr)) {
             return defaultVal;
         }
-        
+
         long result = defaultVal;
         try {
             result = Long.valueOf(valStr);
@@ -392,10 +398,10 @@ public class Util {
     // not support encode negative value now
     public static void encodeVarint64(long source, DataOutput out) throws IOException {
         assert source >= 0;
-        short B = 128;
+        short B = 128; // CHECKSTYLE IGNORE THIS LINE
 
         while (source > B) {
-            out.write((int)(source & (B - 1) | B));
+            out.write((int) (source & (B - 1) | B));
             source = source >> 7;
         }
         out.write((int) (source & (B - 1)));
@@ -405,12 +411,12 @@ public class Util {
     public static long decodeVarint64(DataInput in) throws IOException {
         long result = 0;
         int shift = 0;
-        short B = 128;
+        short B = 128; // CHECKSTYLE IGNORE THIS LINE
 
         while (true) {
             int oneByte = in.readUnsignedByte();
             boolean isEnd = (oneByte & B) == 0;
-            result = result | ((long)(oneByte & B - 1) << (shift * 7));
+            result = result | ((long) (oneByte & B - 1) << (shift * 7));
             if (isEnd) {
                 break;
             }
@@ -419,7 +425,7 @@ public class Util {
 
         return result;
     }
-    
+
     // return the ordinal string of an Integer
     public static String ordinal(int i) {
         switch (i % 100) {
@@ -459,5 +465,44 @@ public class Util {
         }
         return s;
     }
-}
 
+    /**
+     * Multi-catalog feature is in experiment, and should be enabled by user manually.
+     */
+    public static void checkCatalogEnabled() throws AnalysisException {
+        if (!Config.enable_multi_catalog) {
+            throw new AnalysisException("The multi-catalog feature is still in experiment, and you can enable it "
+                    + "manually by set fe configuration named `enable_multi_catalog` to be ture.");
+        }
+    }
+
+    /**
+     * Check all rules of catalog.
+     */
+    public static void checkCatalogAllRules(String catalog) throws AnalysisException {
+        checkCatalogEnabled();
+
+        if (Strings.isNullOrEmpty(catalog)) {
+            throw new AnalysisException("Catalog name is empty.");
+        }
+
+        if (!catalog.equals(InternalCatalog.INTERNAL_CATALOG_NAME)) {
+            FeNameFormat.checkCommonName("catalog", catalog);
+        }
+    }
+
+    public static void prohibitExternalCatalog(String catalog, String msg) throws AnalysisException {
+        if (!Strings.isNullOrEmpty(catalog) && !catalog.equals(InternalCatalog.INTERNAL_CATALOG_NAME)) {
+            throw new AnalysisException(String.format("External catalog '%s' is not allowed in '%s'", catalog, msg));
+        }
+    }
+
+    public static boolean isS3CompatibleStorageSchema(String schema) {
+        for (String objectStorage : Config.s3_compatible_object_storages.split(",")) {
+            if (objectStorage.equalsIgnoreCase(schema)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

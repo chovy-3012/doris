@@ -34,8 +34,11 @@ import org.apache.doris.catalog.FunctionSet;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.UserException;
 import org.apache.doris.load.loadv2.LoadTask;
+import org.apache.doris.rewrite.ExprRewriter;
+import org.apache.doris.statistics.StatisticalType;
 import org.apache.doris.thrift.TBrokerScanNode;
 import org.apache.doris.thrift.TBrokerScanRangeParams;
 import org.apache.doris.thrift.TPlanNode;
@@ -53,17 +56,23 @@ public abstract class LoadScanNode extends ScanNode {
     protected LoadTask.MergeType mergeType = LoadTask.MergeType.APPEND;
 
     public LoadScanNode(PlanNodeId id, TupleDescriptor desc, String planNodeName) {
-        super(id, desc, planNodeName);
+        super(id, desc, planNodeName, StatisticalType.LOAD_SCAN_NODE);
     }
 
-    protected void initAndSetWhereExpr(Expr whereExpr, TupleDescriptor tupleDesc, Analyzer analyzer) throws UserException {
+    public LoadScanNode(PlanNodeId id, TupleDescriptor desc, String planNodeName, StatisticalType statisticalType) {
+        super(id, desc, planNodeName, statisticalType);
+    }
+
+    protected void initAndSetWhereExpr(Expr whereExpr, TupleDescriptor tupleDesc,
+            Analyzer analyzer) throws UserException {
         Expr newWhereExpr = initWhereExpr(whereExpr, tupleDesc, analyzer);
         if (newWhereExpr != null) {
             addConjuncts(newWhereExpr.getConjuncts());
         }
     }
 
-    protected void initAndSetPrecedingFilter(Expr whereExpr, TupleDescriptor tupleDesc, Analyzer analyzer) throws UserException {
+    protected void initAndSetPrecedingFilter(Expr whereExpr,
+            TupleDescriptor tupleDesc, Analyzer analyzer) throws UserException {
         Expr newWhereExpr = initWhereExpr(whereExpr, tupleDesc, analyzer);
         if (newWhereExpr != null) {
             addPreFilterConjuncts(newWhereExpr.getConjuncts());
@@ -82,7 +91,8 @@ public abstract class LoadScanNode extends ScanNode {
 
         // substitute SlotRef in filter expression
         // where expr must be equal first to transfer some predicates(eg: BetweenPredicate to BinaryPredicate)
-        Expr newWhereExpr = analyzer.getExprRewriter().rewrite(whereExpr, analyzer);
+        Expr newWhereExpr = analyzer.getExprRewriter()
+                .rewrite(whereExpr, analyzer, ExprRewriter.ClauseType.WHERE_CLAUSE);
         List<SlotRef> slots = Lists.newArrayList();
         newWhereExpr.collect(SlotRef.class, slots);
 
@@ -104,12 +114,24 @@ public abstract class LoadScanNode extends ScanNode {
         return newWhereExpr;
     }
 
-    protected void checkBitmapCompatibility(Analyzer analyzer, SlotDescriptor slotDesc, Expr expr) throws AnalysisException {
+    protected void checkBitmapCompatibility(Analyzer analyzer,
+            SlotDescriptor slotDesc, Expr expr) throws AnalysisException {
         if (slotDesc.getColumn().getAggregationType() == AggregateType.BITMAP_UNION) {
             expr.analyze(analyzer);
             if (!expr.getType().isBitmapType()) {
                 String errorMsg = String.format("bitmap column %s require the function return type is BITMAP",
                         slotDesc.getColumn().getName());
+                throw new AnalysisException(errorMsg);
+            }
+        }
+    }
+
+    protected void checkQuantileStateCompatibility(Analyzer analyzer,
+            SlotDescriptor slotDesc, Expr expr) throws AnalysisException {
+        if (slotDesc.getColumn().getAggregationType() == AggregateType.QUANTILE_UNION) {
+            expr.analyze(analyzer);
+            if (!expr.getType().isQuantileStateType()) {
+                String errorMsg = "quantile_state column %s require the function return type is QUANTILE_STATE";
                 throw new AnalysisException(errorMsg);
             }
         }
@@ -143,7 +165,11 @@ public abstract class LoadScanNode extends ScanNode {
                 } else {
                     Column column = destSlotDesc.getColumn();
                     if (column.getDefaultValue() != null) {
-                        expr = new StringLiteral(destSlotDesc.getColumn().getDefaultValue());
+                        if (column.getDefaultValueExprDef() != null) {
+                            expr = column.getDefaultValueExpr();
+                        } else {
+                            expr = new StringLiteral(destSlotDesc.getColumn().getDefaultValue());
+                        }
                     } else {
                         if (column.isAllowNull()) {
                             expr = NullLiteral.create(column.getType());
@@ -172,6 +198,10 @@ public abstract class LoadScanNode extends ScanNode {
 
             checkBitmapCompatibility(analyzer, destSlotDesc, expr);
 
+            checkQuantileStateCompatibility(analyzer, destSlotDesc, expr);
+
+            // check quantile_state
+
             if (negative && destSlotDesc.getColumn().getAggregationType() == AggregateType.SUM) {
                 expr = new ArithmeticExpr(ArithmeticExpr.Operator.MULTIPLY, expr, new IntLiteral(-1));
                 expr.analyze(analyzer);
@@ -194,11 +224,14 @@ public abstract class LoadScanNode extends ScanNode {
         planNode.setNodeType(TPlanNodeType.BROKER_SCAN_NODE);
         TBrokerScanNode brokerScanNode = new TBrokerScanNode(desc.getId().asInt());
         if (!preFilterConjuncts.isEmpty()) {
-            for (Expr e : preFilterConjuncts) {
-                brokerScanNode.addToPreFilterExprs(e.treeToThrift());
+            if (Config.enable_vectorized_load && vpreFilterConjunct != null) {
+                brokerScanNode.addToPreFilterExprs(vpreFilterConjunct.treeToThrift());
+            } else {
+                for (Expr e : preFilterConjuncts) {
+                    brokerScanNode.addToPreFilterExprs(e.treeToThrift());
+                }
             }
         }
         planNode.setBrokerScanNode(brokerScanNode);
     }
 }
-

@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-#set -e
+set -e
 ################################################################
 # This script will download all thirdparties and java libraries
 # which are defined in *vars.sh*, unpack patch them if necessary.
@@ -72,6 +72,8 @@ md5sum_func() {
     return 0
 }
 
+# return 0 if download succeed.
+# return 1 if not.
 download_func() {
     local FILENAME=$1
     local DOWNLOAD_URL=$2
@@ -92,22 +94,22 @@ download_func() {
     fi
 
 
-    SUCCESS=0
+    local STATUS=1
     for attemp in 1 2; do
         if [ -r "$DESC_DIR/$FILENAME" ]; then
             if md5sum_func $FILENAME $DESC_DIR $MD5SUM; then
                 echo "Archive $FILENAME already exist."
-                SUCCESS=1
+                STATUS=0
                 break;
             fi
             echo "Archive $FILENAME will be removed and download again."
             rm -f "$DESC_DIR/$FILENAME"
         else
             echo "Downloading $FILENAME from $DOWNLOAD_URL to $DESC_DIR"
-            wget --no-check-certificate $DOWNLOAD_URL -O $DESC_DIR/$FILENAME
+            wget --no-check-certificate -q $DOWNLOAD_URL -O $DESC_DIR/$FILENAME
             if [ "$?"x == "0"x ]; then
                 if md5sum_func $FILENAME $DESC_DIR $MD5SUM; then
-                    SUCCESS=1
+                    STATUS=0
                     echo "Success to download $FILENAME"
                     break;
                 fi
@@ -119,10 +121,10 @@ download_func() {
         fi
     done
 
-    if [ $SUCCESS -ne 1 ]; then
+    if [ $STATUS -ne 0 ]; then
         echo "Failed to download $FILENAME"
     fi
-    return $SUCCESS
+    return $STATUS
 }
 
 # download thirdparty archives
@@ -134,18 +136,18 @@ do
     if test "x$REPOSITORY_URL" = x; then
         URL=$TP_ARCH"_DOWNLOAD"
         download_func ${!NAME} ${!URL} $TP_SOURCE_DIR ${!MD5SUM}
-        if [ "$?"x == "0"x ]; then
+        if [ "$?"x != "0"x ]; then
             echo "Failed to download ${!NAME}"
             exit 1
         fi
     else
         URL="${REPOSITORY_URL}/${!NAME}"
         download_func ${!NAME} ${URL} $TP_SOURCE_DIR ${!MD5SUM}
-        if [ "$?x" == "0x" ]; then
-            #try to download from home 
+        if [ "$?x" != "0x" ]; then
+            #try to download from home
             URL=$TP_ARCH"_DOWNLOAD"
             download_func ${!NAME} ${!URL} $TP_SOURCE_DIR ${!MD5SUM}
-            if [ "$?x" == "0x" ]; then
+            if [ "$?"x != "0"x ]; then
                 echo "Failed to download ${!NAME}"
                 exit 1 # download failed again exit.
             fi
@@ -154,7 +156,7 @@ do
 done
 echo "===== Downloading thirdparty archives...done"
 
-# check if all tp archievs exists
+# check if all tp archives exists
 echo "===== Checking all thirdpart archives..."
 for TP_ARCH in ${TP_ARCHIVES[*]}
 do
@@ -199,7 +201,7 @@ do
                 exit 1
             fi
         elif [[ "${!NAME}" =~ $SUFFIX_ZIP ]]; then
-            if ! $UNZIP_CMD -qq "$TP_SOURCE_DIR/${!NAME}" -d "$TP_SOURCE_DIR/"; then
+            if ! $UNZIP_CMD -o -qq "$TP_SOURCE_DIR/${!NAME}" -d "$TP_SOURCE_DIR/"; then
                 echo "Failed to unzip ${!NAME}"
                 exit 1
             fi
@@ -224,14 +226,23 @@ echo "===== Patching thirdparty archives..."
 ###################################################################################
 PATCHED_MARK="patched_mark"
 
- # glog patch
- cd $TP_SOURCE_DIR/$GLOG_SOURCE
- if [ ! -f $PATCHED_MARK ]; then
-     patch -p1 < $TP_PATCH_DIR/glog-0.4.0.patch
-     touch $PATCHED_MARK
- fi
- cd -
- echo "Finished patching $GLOG_SOURCE"
+# glog patch
+cd $TP_SOURCE_DIR/$GLOG_SOURCE
+if [ ! -f $PATCHED_MARK ]; then
+    patch -p1 < $TP_PATCH_DIR/glog-0.4.0.patch
+    touch $PATCHED_MARK
+fi
+cd -
+echo "Finished patching $GLOG_SOURCE"
+
+# gtest patch
+cd $TP_SOURCE_DIR/$GTEST_SOURCE
+if [ ! -f $PATCHED_MARK ]; then
+    patch -p1 < $TP_PATCH_DIR/googletest-release-1.11.0.patch
+    touch $PATCHED_MARK
+fi
+cd -
+echo "Finished patching $GTEST_SOURCE"
 
 # mysql patch
 cd $TP_SOURCE_DIR/$MYSQL_SOURCE
@@ -260,24 +271,107 @@ fi
 cd -
 echo "Finished patching $S2_SOURCE"
 
-# hdfs3 patch to fix compile error
-cd $TP_SOURCE_DIR/$HDFS3_SOURCE
+# gsasl2 patch to fix link error such as mutilple func defination
+# when link target with kerberos
+cd $TP_SOURCE_DIR/$GSASL_SOURCE
 if [ ! -f $PATCHED_MARK ]; then
-    patch -p1 < $TP_PATCH_DIR/libhdfs3-master.patch
+    patch -p1 < $TP_PATCH_DIR/libgsasl-1.8.0.patch
     touch $PATCHED_MARK
 fi
 cd -
-echo "Finished patching $HDFS3_SOURCE"
+echo "Finished patching $GSASL_SOURCE"
 
-# aws-c-cal patch to fix compile error
-# This bug has been fixed in new version of aws-c-cal
-if [ $AWS_C_CAL_SOURCE == "aws-c-cal-0.4.5" ]; then
-    cd $TP_SOURCE_DIR/$AWS_C_CAL_SOURCE
+# rocksdb patch to fix compile error
+if [ $ROCKSDB_SOURCE == "rocksdb-5.14.2" ]; then
+    cd $TP_SOURCE_DIR/$ROCKSDB_SOURCE
     if [ ! -f $PATCHED_MARK ]; then
-        patch -p1 < $TP_PATCH_DIR/aws-c-cal-0.4.5.patch
+        patch -p1 < $TP_PATCH_DIR/rocksdb-5.14.2.patch
         touch $PATCHED_MARK
     fi
     cd -
 fi
-echo "Finished patching $AWS_C_CAL_SOURCE"
+echo "Finished patching $ROCKSDB_SOURCE"
+
+# opentelemetry patch is used to solve the problem that threadlocal depends on GLIBC_2.18
+# see: https://github.com/apache/doris/pull/7911
+if [ $OPENTELEMETRY_SOURCE == "opentelemetry-cpp-1.4.0" ]; then
+    rm -rf $TP_SOURCE_DIR/$OPENTELEMETRY_SOURCE/third_party/opentelemetry-proto/*
+    cp -r $TP_SOURCE_DIR/$OPENTELEMETRY_PROTO_SOURCE/* $TP_SOURCE_DIR/$OPENTELEMETRY_SOURCE/third_party/opentelemetry-proto
+    mkdir -p $TP_SOURCE_DIR/$OPENTELEMETRY_SOURCE/third_party/opentelemetry-proto/.git
+
+    cd $TP_SOURCE_DIR/$OPENTELEMETRY_SOURCE
+    if [ ! -f $PATCHED_MARK ]; then
+        patch -p1 < $TP_PATCH_DIR/opentelemetry-cpp-1.4.0.patch
+        touch $PATCHED_MARK
+    fi
+    cd -
+fi
+echo "Finished patching $OPENTELEMETRY_SOURCE"
+
+# arrow patch is used to get the raw orc reader for filter prune.
+if [ $ARROW_SOURCE == "apache-arrow-7.0.0" ]; then
+    cd $TP_SOURCE_DIR/$ARROW_SOURCE
+    if [ ! -f $PATCHED_MARK ]; then
+        patch -p1 < $TP_PATCH_DIR/apache-arrow-7.0.0.patch
+        touch $PATCHED_MARK
+    fi
+    cd -
+fi
+echo "Finished patching $ARROW_SOURCE"
+
+# patch librdkafka to avoid crash
+if [ $LIBRDKAFKA_SOURCE == "librdkafka-1.8.2" ]; then
+    cd $TP_SOURCE_DIR/$LIBRDKAFKA_SOURCE
+    if [ ! -f $PATCHED_MARK ]; then
+        patch -p0 < $TP_PATCH_DIR/librdkafka-1.8.2.patch
+        touch $PATCHED_MARK
+    fi
+    cd -
+fi
+echo "Finished patching $LIBRDKAFKA_SOURCE"
+
+# patch hyperscan
+# https://github.com/intel/hyperscan/issues/292
+if [ $HYPERSCAN_SOURCE == "hyperscan-5.4.0" ]; then
+    cd $TP_SOURCE_DIR/$HYPERSCAN_SOURCE
+    if [ ! -f $PATCHED_MARK ]; then
+        patch -p0 < $TP_PATCH_DIR/hyperscan-5.4.0.patch
+        touch $PATCHED_MARK
+    fi
+    cd -
+elif [ $HYPERSCAN_SOURCE == "vectorscan-vectorscan-5.4.7" ]; then
+    cd $TP_SOURCE_DIR/$HYPERSCAN_SOURCE
+    if [ ! -f $PATCHED_MARK ]; then
+        patch -p0 < $TP_PATCH_DIR/vectorscan-5.4.7.patch
+        touch $PATCHED_MARK
+    fi
+    cd -
+fi
+echo "Finished patching $HYPERSCAN_SOURCE"
+
+cd $TP_SOURCE_DIR/$AWS_SDK_SOURCE
+if [ ! -f $PATCHED_MARK ]; then
+    if [ $AWS_SDK_SOURCE == "aws-sdk-cpp-1.9.211" ]; then
+        wget --no-check-certificate -q https://doris-thirdparty-repo.bj.bcebos.com/thirdparty/aws-crt-cpp-1.9.211.tar.gz -O aws-crt-cpp-1.9.211.tar.gz
+        ret="$?"
+        if [ $ret -eq 0 ] ; then
+            tar xzf aws-crt-cpp-1.9.211.tar.gz
+        else
+            bash ./prefetch_crt_dependency.sh
+        fi
+    else
+        bash ./prefetch_crt_dependency.sh
+    fi
+    touch $PATCHED_MARK
+fi
+cd -
+echo "Finished patching $AWS_SDK_SOURCE"
+
+cd "${TP_SOURCE_DIR}/${BRPC_SOURCE}"
+if [[ ! -f $PATCHED_MARK ]]; then
+    patch -p1 <"${TP_PATCH_DIR}/brpc-1.2.0.patch"
+    touch ${PATCHED_MARK}
+fi
+cd -
+echo "Finished patching ${BRPC_SOURCE}"
 

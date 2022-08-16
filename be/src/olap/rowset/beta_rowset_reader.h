@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_ROWSET_BETA_ROWSET_READER_H
-#define DORIS_BE_SRC_OLAP_ROWSET_BETA_ROWSET_READER_H
+#pragma once
 
 #include "olap/iterators.h"
 #include "olap/row_block.h"
@@ -30,40 +29,49 @@ namespace doris {
 
 class BetaRowsetReader : public RowsetReader {
 public:
-    BetaRowsetReader(BetaRowsetSharedPtr rowset,
-                     std::shared_ptr<MemTracker> parent_tracker = nullptr);
+    BetaRowsetReader(BetaRowsetSharedPtr rowset);
 
     ~BetaRowsetReader() override { _rowset->release(); }
 
-    OLAPStatus init(RowsetReaderContext* read_context) override;
+    Status init(RowsetReaderContext* read_context) override;
 
-    // If parent_tracker is not null, the block we get from next_block() will have the parent_tracker.
     // It's ok, because we only get ref here, the block's owner is this reader.
-    OLAPStatus next_block(RowBlock** block) override;
+    Status next_block(RowBlock** block) override;
+    Status next_block(vectorized::Block* block) override;
 
     bool delete_flag() override { return _rowset->delete_flag(); }
 
     Version version() override { return _rowset->version(); }
 
-    VersionHash version_hash() override { return _rowset->version_hash(); }
+    int64_t oldest_write_timestamp() override { return _rowset->oldest_write_timestamp(); }
+    int64_t newest_write_timestamp() override { return _rowset->newest_write_timestamp(); }
 
     RowsetSharedPtr rowset() override { return std::dynamic_pointer_cast<Rowset>(_rowset); }
 
     // Return the total number of filtered rows, will be used for validation of schema change
     int64_t filtered_rows() override {
-        return _stats->rows_del_filtered + _stats->rows_conditions_filtered;
+        return _stats->rows_del_filtered + _stats->rows_del_by_bitmap +
+               _stats->rows_conditions_filtered + _stats->rows_vec_del_cond_filtered +
+               _stats->rows_vec_cond_filtered;
     }
 
-    RowsetReaderType type() const override { return RowsetReaderType::BETA; }
+    RowsetTypePB type() const override { return RowsetTypePB::BETA_ROWSET; }
+
+    Status current_block_row_locations(std::vector<RowLocation>* locations) override {
+        return _iterator->current_block_row_locations(locations);
+    }
+
+    Status get_segment_num_rows(std::vector<uint32_t>* segment_num_rows) override;
 
 private:
+    bool _should_push_down_value_predicates() const;
+
+    std::unique_ptr<Schema> _input_schema;
     RowsetReaderContext* _context;
     BetaRowsetSharedPtr _rowset;
 
     OlapReaderStatistics _owned_stats;
     OlapReaderStatistics* _stats;
-
-    std::shared_ptr<MemTracker> _parent_tracker;
 
     std::unique_ptr<RowwiseIterator> _iterator;
 
@@ -77,5 +85,3 @@ private:
 };
 
 } // namespace doris
-
-#endif //DORIS_BE_SRC_OLAP_ROWSET_BETA_ROWSET_READER_H

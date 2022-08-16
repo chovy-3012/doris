@@ -1,6 +1,80 @@
 # Changelog
 
-This file contains version of the third-party dependency libraries in the build-env image. The docker build-env image is apache/incubator-doris, and the tag is `build-env-${version}`
+This file contains version of the third-party dependency libraries in the build-env image. The docker build-env image is apache/doris, and the tag is `build-env-${version}`
+
+## v20220811
+- Modified: brpc 1.1.0 -> 1.2.0 fix _dl_sym undefined reference on Ubuntu22.04
+
+## v20220802
+
+- Modified: libhdfs3 2.3.1 -> 2.3.2
+
+## v20220718
+
+- Modified: brpc 1.0.0 -> 1.1.0
+- Modified: leveldb 1.20 -> 1.23
+
+## v20220606
+- Added: vectorscan 5.4.7, and a patch for compilation
+
+## v20220613
+- Modified: update libhdfs3 from 2.3.0 to 2.3.1 fix client uuid set error
+
+## v20220608
+- Remove: remove libhdfs3 without kerberos support
+- Modified: make libhdfs3 with kerberos support as default
+- Modified: change libhdfs3 to https://github.com/yangzhg/libhdfs3/releases/tag/v2.3.0 . This version support arm CPUs
+
+## v20220607
+- Added: opentelemetry-cpp 1.4.0, it was introduced for tracing.
+- Added: opentelemetry-proto 0.18.0, it is depended on by opentelemetry-cpp.
+- Added: nlohmann/json 3.10.1, it is depended on by opentelemetry-cpp.
+
+## v20220606
+- Added: hyperscan 5.4.0, and a patch for compilation
+- Added: ragel 6.1.0, it is used by hyperscan to generate files before compilation
+
+## v20220522
+
+- Added: libgsasl 1.8.0, this version of gsasl is only used for libhdfs3 with kerberos
+- Added: krb5 1.19
+
+Now there will be 2 set of libhdfs, one is without kerberos, the other is with kerberos, saved in `thirdparty/installed/libhdfs_with_kerberos/`
+
+## v20220321
+- Added: libbacktrace, it is used by boost stacktrace to print exception stack.
+
+## v20220316
+- Modified: CRoaring 0.3.4 -> 0.4.0
+
+## v20220310
+- Modified: arrow 5.0.0 -> 7.0.0
+- Modified: aws-sdk-cpp 1.8.108 -> 1.9.211
+- Modified: orc 1.6.6 -> 1.7.2
+
+- Removed: aws-c-common: 0.4.63,aws-c-event-stream: 0.2.6, aws-checksums: 0.1.10, aws-c-io-0.7.0 aws-s2n: 0.10.0, aws-c-cal: 0.4.5; those libs are managed by aws-sdk-cpp now
+
+## v20220211
+
+- Added: simdjson 1.0.2
+
+## v20211229
+
+- Modified: OpenSSL with --with-rand-seed=devrandom
+- Modified: brpc 1.0.0-rc02 -> 1.0.0
+
+## v20211220
+
+- Modified: OpenSSL 1.0.2k -> 1.1.1m
+- Modified: cmake 3.19.8 -> 3.22.1
+- Added: ccache
+
+## v20211215
+
+### Changes
+
+- Added: cyrus-sasl
+- Modified: librdkafka
 
 ## build-env-1.4.2
 

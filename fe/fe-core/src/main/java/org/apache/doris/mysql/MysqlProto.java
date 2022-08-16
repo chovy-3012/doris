@@ -18,7 +18,7 @@
 package org.apache.doris.mysql;
 
 import org.apache.doris.analysis.UserIdentity;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
@@ -34,7 +34,6 @@ import org.apache.doris.system.SystemInfoService;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -49,14 +48,15 @@ public class MysqlProto {
     // scramble: data receive from server.
     // randomString: data send by server in plug-in data field
     // user_name#HIGH@cluster_name
-    private static boolean authenticate(ConnectContext context, byte[] scramble, byte[] randomString, String qualifiedUser) {
+    private static boolean authenticate(ConnectContext context, byte[] scramble,
+            byte[] randomString, String qualifiedUser) {
         String usePasswd = scramble.length == 0 ? "NO" : "YES";
         String remoteIp = context.getMysqlChannel().getRemoteIp();
 
         List<UserIdentity> currentUserIdentity = Lists.newArrayList();
-        if (!Catalog.getCurrentCatalog().getAuth().checkPassword(qualifiedUser, remoteIp,
+        if (!Env.getCurrentEnv().getAuth().checkPassword(qualifiedUser, remoteIp,
                 scramble, randomString, currentUserIdentity)) {
-            ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, qualifiedUser, usePasswd);
+            ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, qualifiedUser, context.getRemoteIP(), usePasswd);
             return false;
         }
 
@@ -70,7 +70,7 @@ public class MysqlProto {
 
         String tmpUser = user;
         if (tmpUser == null || tmpUser.isEmpty()) {
-            ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, "", usePasswd);
+            ErrorReport.report(ErrorCode.ERR_ACCESS_DENIED_ERROR, "anonym@" + context.getRemoteIP(), usePasswd);
             return null;
         }
 
@@ -84,8 +84,8 @@ public class MysqlProto {
             clusterName = strList[1];
             try {
                 // if cluster does not exist and it is not a valid cluster id, authenticate failed
-                if (Catalog.getCurrentCatalog().getCluster(clusterName) == null
-                        && Integer.valueOf(strList[1]) != context.getCatalog().getClusterId()) {
+                if (Env.getCurrentEnv().getCluster(clusterName) == null
+                        && Integer.valueOf(strList[1]) != context.getEnv().getClusterId()) {
                     ErrorReport.report(ErrorCode.ERR_UNKNOWN_CLUSTER_ID, strList[1]);
                     return null;
                 }
@@ -243,10 +243,10 @@ public class MysqlProto {
             // with password.
             // So Doris support the Protocol::AuthSwitchRequest to tell client to keep the default password plugin
             // which Doris is using now.
-            // Note: Check the authPacket whether support plugin auth firstly, before we check AuthPlugin between doris and client
-            // to compatible with older version: like mysql 5.1
-            if (authPacket.getCapability().isPluginAuth() &&
-                    !handshakePacket.checkAuthPluginSameAsDoris(authPacket.getPluginName())) {
+            // Note: Check the authPacket whether support plugin auth firstly,
+            // before we check AuthPlugin between doris and client to compatible with older version: like mysql 5.1
+            if (authPacket.getCapability().isPluginAuth()
+                    && !handshakePacket.checkAuthPluginSameAsDoris(authPacket.getPluginName())) {
                 // 1. clear the serializer
                 serializer.reset();
                 // 2. build the auth switch request and send to the client
@@ -280,15 +280,16 @@ public class MysqlProto {
         if (!Strings.isNullOrEmpty(db)) {
             try {
                 String dbFullName = ClusterNamespace.getFullName(context.getClusterName(), db);
-                Catalog.getCurrentCatalog().changeDb(context, dbFullName);
+                Env.getCurrentEnv().changeDb(context, dbFullName);
             } catch (DdlException e) {
+                context.getState().setError(e.getMysqlErrorCode(), e.getMessage());
                 sendResponsePacket(context);
                 return false;
             }
         }
 
         // set resource tag if has
-        context.setResourceTags(Catalog.getCurrentCatalog().getAuth().getResourceTags(qualifiedUser));
+        context.setResourceTags(Env.getCurrentEnv().getAuth().getResourceTags(qualifiedUser));
         return true;
     }
 

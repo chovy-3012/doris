@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/sort-exec-exprs.cc
+// and modified by Doris
 
 #include "exec/sort_exec_exprs.h"
 
@@ -47,14 +50,11 @@ Status SortExecExprs::init(const std::vector<ExprContext*>& lhs_ordering_expr_ct
 }
 
 Status SortExecExprs::prepare(RuntimeState* state, const RowDescriptor& child_row_desc,
-                              const RowDescriptor& output_row_desc,
-                              const std::shared_ptr<MemTracker>& expr_mem_tracker) {
+                              const RowDescriptor& output_row_desc) {
     if (_materialize_tuple) {
-        RETURN_IF_ERROR(
-                Expr::prepare(_sort_tuple_slot_expr_ctxs, state, child_row_desc, expr_mem_tracker));
+        RETURN_IF_ERROR(Expr::prepare(_sort_tuple_slot_expr_ctxs, state, child_row_desc));
     }
-    RETURN_IF_ERROR(
-            Expr::prepare(_lhs_ordering_expr_ctxs, state, output_row_desc, expr_mem_tracker));
+    RETURN_IF_ERROR(Expr::prepare(_lhs_ordering_expr_ctxs, state, output_row_desc));
     return Status::OK();
 }
 

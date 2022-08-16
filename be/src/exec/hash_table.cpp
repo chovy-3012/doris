@@ -14,23 +14,23 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/hash-table.cc
+// and modified by Doris
 
-#include "exec/hash_table.hpp"
+#include "exec/hash_table.h"
 
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
-#include "runtime/mem_tracker.h"
+#include "runtime/memory/mem_tracker.h"
 #include "runtime/raw_value.h"
-#include "runtime/runtime_state.h"
-#include "runtime/string_value.hpp"
-#include "util/doris_metrics.h"
 
 namespace doris {
 
 HashTable::HashTable(const std::vector<ExprContext*>& build_expr_ctxs,
                      const std::vector<ExprContext*>& probe_expr_ctxs, int num_build_tuples,
                      bool stores_nulls, const std::vector<bool>& finds_nulls, int32_t initial_seed,
-                     const std::shared_ptr<MemTracker>& mem_tracker, int64_t num_buckets)
+                     int64_t num_buckets)
         : _build_expr_ctxs(build_expr_ctxs),
           _probe_expr_ctxs(probe_expr_ctxs),
           _num_build_tuples(num_build_tuples),
@@ -43,18 +43,15 @@ HashTable::HashTable(const std::vector<ExprContext*>& build_expr_ctxs,
           _num_nodes(0),
           _current_capacity(num_buckets),
           _current_used(0),
-          _total_capacity(num_buckets),
-          _exceeded_limit(false),
-          _mem_tracker(mem_tracker),
-          _mem_limit_exceeded(false) {
-    DCHECK(_mem_tracker);
+          _total_capacity(num_buckets) {
     DCHECK_EQ(_build_expr_ctxs.size(), _probe_expr_ctxs.size());
 
     DCHECK_EQ((num_buckets & (num_buckets - 1)), 0) << "num_buckets must be a power of 2";
+    _mem_tracker = std::make_unique<MemTracker>("HashTable");
     _buckets.resize(num_buckets);
     _num_buckets = num_buckets;
     _num_buckets_till_resize = MAX_BUCKET_OCCUPANCY_FRACTION * _num_buckets;
-    _mem_tracker->Consume(_buckets.capacity() * sizeof(Bucket));
+    _mem_tracker->consume(_buckets.capacity() * sizeof(Bucket));
 
     // Compute the layout and buffer size to store the evaluated expr results
     _results_buffer_size = Expr::compute_results_layout(
@@ -71,10 +68,7 @@ HashTable::HashTable(const std::vector<ExprContext*>& build_expr_ctxs,
     _alloc_list.push_back(_current_nodes);
     _end_list.push_back(_current_nodes + _current_capacity * _node_byte_size);
 
-    _mem_tracker->Consume(_current_capacity * _node_byte_size);
-    if (_mem_tracker->limit_exceeded()) {
-        mem_limit_exceeded(_current_capacity * _node_byte_size);
-    }
+    _mem_tracker->consume(_current_capacity * _node_byte_size);
 }
 
 HashTable::~HashTable() {}
@@ -86,8 +80,8 @@ void HashTable::close() {
     for (auto ptr : _alloc_list) {
         free(ptr);
     }
-    _mem_tracker->Release(_total_capacity * _node_byte_size);
-    _mem_tracker->Release(_buckets.size() * sizeof(Bucket));
+    _mem_tracker->release(_total_capacity * _node_byte_size);
+    _mem_tracker->release(_buckets.size() * sizeof(Bucket));
 }
 
 bool HashTable::eval_row(TupleRow* row, const std::vector<ExprContext*>& ctxs) {
@@ -176,17 +170,18 @@ bool HashTable::equals(TupleRow* build_row) {
     return true;
 }
 
-void HashTable::resize_buckets(int64_t num_buckets) {
+Status HashTable::resize_buckets(int64_t num_buckets) {
     DCHECK_EQ((num_buckets & (num_buckets - 1)), 0) << "num_buckets must be a power of 2";
 
     int64_t old_num_buckets = _num_buckets;
     int64_t delta_bytes = (num_buckets - old_num_buckets) * sizeof(Bucket);
-    Status st = _mem_tracker->TryConsume(delta_bytes);
-    WARN_IF_ERROR(st, "resize bucket failed");
+    Status st = thread_context()->_thread_mem_tracker_mgr->limiter_mem_tracker()->check_limit(
+            delta_bytes);
     if (!st) {
-        mem_limit_exceeded(delta_bytes);
-        return;
+        LOG_EVERY_N(WARNING, 100) << "resize bucket failed: " << st.to_string();
+        return st;
     }
+    _mem_tracker->consume(delta_bytes);
 
     _buckets.resize(num_buckets);
 
@@ -230,6 +225,7 @@ void HashTable::resize_buckets(int64_t num_buckets) {
 
     _num_buckets = num_buckets;
     _num_buckets_till_resize = MAX_BUCKET_OCCUPANCY_FRACTION * _num_buckets;
+    return Status::OK();
 }
 
 void HashTable::grow_node_array() {
@@ -244,18 +240,7 @@ void HashTable::grow_node_array() {
     _alloc_list.push_back(_current_nodes);
     _end_list.push_back(_current_nodes + alloc_size);
 
-    _mem_tracker->Consume(alloc_size);
-    if (_mem_tracker->limit_exceeded()) {
-        mem_limit_exceeded(alloc_size);
-    }
-}
-
-void HashTable::mem_limit_exceeded(int64_t allocation_size) {
-    _mem_limit_exceeded = true;
-    _exceeded_limit = true;
-    // if (_state != nullptr) {
-    //     _state->set_mem_limit_exceeded(_mem_tracker, allocation_size);
-    // }
+    _mem_tracker->consume(alloc_size);
 }
 
 std::string HashTable::debug_string(bool skip_empty, const RowDescriptor* desc) {
@@ -291,6 +276,177 @@ std::string HashTable::debug_string(bool skip_empty, const RowDescriptor* desc) 
     }
 
     return ss.str();
+}
+
+bool HashTable::emplace_key(TupleRow* row, TupleRow** dest_addr) {
+    if (_num_filled_buckets > _num_buckets_till_resize) {
+        if (!resize_buckets(_num_buckets * 2).ok()) {
+            return false;
+        }
+    }
+    if (_current_used == _current_capacity) {
+        grow_node_array();
+    }
+
+    bool has_nulls = eval_build_row(row);
+
+    if (!_stores_nulls && has_nulls) {
+        return false;
+    }
+
+    uint32_t hash = hash_current_row();
+    int64_t bucket_idx = hash & (_num_buckets - 1);
+
+    Bucket* bucket = &_buckets[bucket_idx];
+    Node* node = bucket->_node;
+
+    bool will_insert = true;
+
+    if (node == nullptr) {
+        will_insert = true;
+    } else {
+        Node* last_node = node;
+        while (node != nullptr) {
+            if (node->_hash == hash && equals(node->data())) {
+                will_insert = false;
+                break;
+            }
+            last_node = node;
+            node = node->_next;
+        }
+        node = last_node;
+    }
+    if (will_insert) {
+        Node* alloc_node =
+                reinterpret_cast<Node*>(_current_nodes + _node_byte_size * _current_used++);
+        ++_num_nodes;
+        TupleRow* data = alloc_node->data();
+        *dest_addr = data;
+        alloc_node->_hash = hash;
+        if (node == nullptr) {
+            add_to_bucket(&_buckets[bucket_idx], alloc_node);
+        } else {
+            node->_next = alloc_node;
+        }
+    }
+    return will_insert;
+}
+
+HashTable::Iterator HashTable::find(TupleRow* probe_row, bool probe) {
+    bool has_nulls = probe ? eval_probe_row(probe_row) : eval_build_row(probe_row);
+
+    if (!_stores_nulls && has_nulls) {
+        return end();
+    }
+
+    uint32_t hash = hash_current_row();
+    int64_t bucket_idx = hash & (_num_buckets - 1);
+
+    Bucket* bucket = &_buckets[bucket_idx];
+    Node* node = bucket->_node;
+
+    while (node != nullptr) {
+        if (node->_hash == hash && equals(node->data())) {
+            return Iterator(this, bucket_idx, node, hash);
+        }
+
+        node = node->_next;
+    }
+
+    return end();
+}
+
+HashTable::Iterator HashTable::begin() {
+    int64_t bucket_idx = -1;
+    Bucket* bucket = next_bucket(&bucket_idx);
+
+    if (bucket != nullptr) {
+        return Iterator(this, bucket_idx, bucket->_node, 0);
+    }
+
+    return end();
+}
+
+HashTable::Bucket* HashTable::next_bucket(int64_t* bucket_idx) {
+    ++*bucket_idx;
+
+    for (; *bucket_idx < _num_buckets; ++*bucket_idx) {
+        if (_buckets[*bucket_idx]._node != nullptr) {
+            return &_buckets[*bucket_idx];
+        }
+    }
+
+    *bucket_idx = -1;
+    return nullptr;
+}
+
+void HashTable::insert_impl(TupleRow* row) {
+    bool has_null = eval_build_row(row);
+
+    if (!_stores_nulls && has_null) {
+        return;
+    }
+
+    uint32_t hash = hash_current_row();
+    int64_t bucket_idx = hash & (_num_buckets - 1);
+
+    if (_current_used == _current_capacity) {
+        grow_node_array();
+    }
+    // get a node from memory pool
+    Node* node = reinterpret_cast<Node*>(_current_nodes + _node_byte_size * _current_used++);
+
+    TupleRow* data = node->data();
+    node->_hash = hash;
+    memcpy(data, row, sizeof(Tuple*) * _num_build_tuples);
+    add_to_bucket(&_buckets[bucket_idx], node);
+    ++_num_nodes;
+}
+
+void HashTable::add_to_bucket(Bucket* bucket, Node* node) {
+    if (bucket->_node == nullptr) {
+        ++_num_filled_buckets;
+    }
+
+    node->_next = bucket->_node;
+    bucket->_node = node;
+    bucket->_size++;
+}
+
+void HashTable::move_node(Bucket* from_bucket, Bucket* to_bucket, Node* node, Node* previous_node) {
+    Node* next_node = node->_next;
+    from_bucket->_size--;
+
+    if (previous_node != nullptr) {
+        previous_node->_next = next_node;
+    } else {
+        // Update bucket directly
+        from_bucket->_node = next_node;
+
+        if (next_node == nullptr) {
+            --_num_filled_buckets;
+        }
+    }
+
+    add_to_bucket(to_bucket, node);
+}
+
+std::pair<int64_t, int64_t> HashTable::minmax_node() {
+    bool has_value = false;
+    int64_t min_size = std::numeric_limits<int64_t>::max();
+    int64_t max_size = std::numeric_limits<int64_t>::min();
+    for (const auto bucket : _buckets) {
+        int64_t counter = bucket._size;
+        if (counter > 0) {
+            has_value = true;
+            min_size = std::min(counter, min_size);
+            max_size = std::max(counter, max_size);
+        }
+    }
+    if (!has_value) {
+        return std::make_pair(0, 0);
+    }
+    return std::make_pair(min_size, max_size);
 }
 
 } // namespace doris

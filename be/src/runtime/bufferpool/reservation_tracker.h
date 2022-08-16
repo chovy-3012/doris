@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_RESERVATION_TRACKER_H
-#define DORIS_BE_RUNTIME_RESERVATION_TRACKER_H
+#pragma once
 
 #include <stdint.h>
 
@@ -102,7 +101,7 @@ public:
     /// 'reservation_limit' is the maximum reservation for this tracker in bytes.
     /// if 'profile' is not nullptr, the counters in 'counters_' are added to 'profile'.
     void InitChildTracker(RuntimeProfile* profile, ReservationTracker* parent,
-                          MemTracker* mem_tracker, int64_t reservation_limit);
+                          int64_t reservation_limit);
 
     /// If the tracker is initialized, deregister the ReservationTracker from its parent,
     /// relinquishing all this tracker's reservation. All of the reservation must be unused
@@ -173,7 +172,7 @@ public:
 
 private:
     /// Returns the amount of 'reservation_' that is unused.
-    inline int64_t unused_reservation() const {
+    int64_t unused_reservation() const {
         return reservation_ - used_reservation_ - child_reservations_;
     }
 
@@ -289,5 +288,3 @@ private:
     int64_t used_reservation_;
 };
 } // namespace doris
-
-#endif

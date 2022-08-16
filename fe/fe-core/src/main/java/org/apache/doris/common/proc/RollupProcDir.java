@@ -17,7 +17,6 @@
 
 package org.apache.doris.common.proc;
 
-import com.google.common.collect.Lists;
 import org.apache.doris.alter.AlterJobV2;
 import org.apache.doris.alter.MaterializedViewHandler;
 import org.apache.doris.alter.RollupJobV2;
@@ -29,12 +28,13 @@ import org.apache.doris.analysis.StringLiteral;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.util.ListComparator;
+import org.apache.doris.common.util.OrderByPair;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
-import org.apache.doris.common.util.ListComparator;
-import org.apache.doris.common.util.OrderByPair;
+import com.google.common.collect.Lists;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -88,7 +88,7 @@ public class RollupProcDir implements ProcDirInterface {
         List<List<Comparable>> jobInfos = Lists.newArrayList();
 
         //where
-        if (filter == null || filter.size() == 0){
+        if (filter == null || filter.size() == 0) {
             jobInfos = rollupJobInfos;
         } else {
             jobInfos = Lists.newArrayList();
@@ -126,7 +126,7 @@ public class RollupProcDir implements ProcDirInterface {
             if (endIndex > jobInfos.size()) {
                 endIndex = jobInfos.size();
             }
-            jobInfos = jobInfos.subList(beginIndex,endIndex);
+            jobInfos = jobInfos.subList(beginIndex, endIndex);
         }
 
         BaseProcResult result = new BaseProcResult();
@@ -154,7 +154,22 @@ public class RollupProcDir implements ProcDirInterface {
             return ((StringLiteral) subExpr.getChild(1)).getValue().equals(element);
         }
         if (subExpr.getChild(1) instanceof DateLiteral) {
-            Long leftVal = (new DateLiteral((String) element, Type.DATETIME)).getLongValue();
+            Type type;
+            switch (subExpr.getChild(1).getType().getPrimitiveType()) {
+                case DATE:
+                case DATETIME:
+                    type = Type.DATETIME;
+                    break;
+                case DATEV2:
+                    type = Type.DATETIMEV2;
+                    break;
+                case DATETIMEV2:
+                    type = subExpr.getChild(1).getType();
+                    break;
+                default:
+                    throw new AnalysisException("Invalid date type: " + subExpr.getChild(1).getType());
+            }
+            Long leftVal = (new DateLiteral((String) element, type)).getLongValue();
             Long rightVal = ((DateLiteral) subExpr.getChild(1)).getLongValue();
             switch (binaryPredicate.getOp()) {
                 case EQ:

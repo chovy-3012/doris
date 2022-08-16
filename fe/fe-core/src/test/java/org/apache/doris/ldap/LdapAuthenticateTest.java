@@ -17,17 +17,18 @@
 
 package org.apache.doris.ldap;
 
-import com.google.common.collect.Lists;
-import mockit.Delegate;
-import mockit.Expectations;
-import mockit.Mocked;
 import org.apache.doris.analysis.UserIdentity;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.mysql.privilege.PaloRole;
 import org.apache.doris.qe.ConnectContext;
+
+import com.google.common.collect.Lists;
+import mockit.Delegate;
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -48,7 +49,7 @@ public class LdapAuthenticateTest {
     @Mocked
     private LdapPrivsChecker ldapPrivsChecker;
     @Mocked
-    private Catalog catalog;
+    private Env env;
     @Mocked
     private PaloAuth auth;
 
@@ -68,13 +69,13 @@ public class LdapAuthenticateTest {
                     }
                 };
 
-                catalog.getAuth();
+                env.getAuth();
                 minTimes = 0;
                 result = auth;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
             }
         };
     }
@@ -149,7 +150,7 @@ public class LdapAuthenticateTest {
 
     private ConnectContext getContext() {
         ConnectContext context = new ConnectContext(null);
-        context.setCatalog(catalog);
+        context.setEnv(env);
         context.setThreadLocalInfo();
         return context;
     }

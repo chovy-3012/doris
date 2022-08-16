@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/exec-node.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXEC_EXEC_NODE_H
-#define DORIS_BE_SRC_QUERY_EXEC_EXEC_NODE_H
+#pragma once
 
 #include <mutex>
 #include <sstream>
@@ -26,12 +28,12 @@
 #include "gen_cpp/PlanNodes_types.h"
 #include "runtime/bufferpool/buffer_pool.h"
 #include "runtime/descriptors.h"
-#include "runtime/mem_pool.h"
 #include "runtime/query_statistics.h"
 #include "service/backend_options.h"
 #include "util/blocking_queue.hpp"
 #include "util/runtime_profile.h"
-#include "util/uid_util.h" // for print_id
+#include "util/telemetry/telemetry.h"
+#include "vec/exprs/vexpr_context.h"
 
 namespace doris {
 class Expr;
@@ -100,7 +102,7 @@ public:
     // row_batch's tuple_data_pool.
     // Caller must not be holding any io buffers. This will cause deadlock.
     // TODO: AggregationNode and HashJoinNode cannot be "re-opened" yet.
-    virtual Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) = 0;
+    virtual Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos);
     virtual Status get_next(RuntimeState* state, vectorized::Block* block, bool* eos);
 
     // Resets the stream of row batches to be retrieved by subsequent GetNext() calls.
@@ -141,10 +143,6 @@ public:
     static Status create_tree(RuntimeState* state, ObjectPool* pool, const TPlan& plan,
                               const DescriptorTbl& descs, ExecNode** root);
 
-    // Set debug action for node with given id in 'tree'
-    static void set_debug_options(int node_id, TExecNodePhase::type phase,
-                                  TDebugAction::type action, ExecNode* tree);
-
     // Collect all nodes of given 'node_type' that are part of this subtree, and return in
     // 'nodes'.
     void collect_nodes(TPlanNodeType::type node_type, std::vector<ExecNode*>* nodes);
@@ -181,20 +179,18 @@ public:
 
     int id() const { return _id; }
     TPlanNodeType::type type() const { return _type; }
-    const RowDescriptor& row_desc() const { return _row_descriptor; }
+    virtual const RowDescriptor& row_desc() const { return _row_descriptor; }
     int64_t rows_returned() const { return _num_rows_returned; }
     int64_t limit() const { return _limit; }
-    bool reached_limit() { return _limit != -1 && _num_rows_returned >= _limit; }
+    bool reached_limit() const { return _limit != -1 && _num_rows_returned >= _limit; }
     const std::vector<TupleId>& get_tuple_ids() const { return _tuple_ids; }
 
-    RuntimeProfile* runtime_profile() { return _runtime_profile.get(); }
+    RuntimeProfile* runtime_profile() const { return _runtime_profile.get(); }
     RuntimeProfile::Counter* memory_used_counter() const { return _memory_used_counter; }
 
-    std::shared_ptr<MemTracker> mem_tracker() const { return _mem_tracker; }
+    MemTracker* mem_tracker() const { return _mem_tracker.get(); }
 
-    std::shared_ptr<MemTracker> expr_mem_tracker() const { return _expr_mem_tracker; }
-
-    MemPool* expr_mem_pool() { return _expr_mem_pool.get(); }
+    OpentelemetrySpan get_next_span() { return _get_next_span; }
 
     // Extract node id from p->name().
     static int get_node_id_from_profile(RuntimeProfile* p);
@@ -219,10 +215,14 @@ protected:
     /// fails.
     Status release_unused_reservation();
 
-    /// Enable the increase reservation denial probability on 'buffer_pool_client_' based on
-    /// the 'debug_action_' set on this node. Returns an error if 'debug_action_param_' is
-    /// invalid.
-    //Status enable_deny_reservation_debug_action();
+    /// Release all memory of block which got from child. The block
+    // 1. clear mem of valid column get from child, make sure child can reuse the mem
+    // 2. delete and release the column which create by function all and other reason
+    void release_block_memory(vectorized::Block& block, uint16_t child_idx = 0);
+
+    /// Only use in vectorized exec engine to check whether reach limit and cut num row for block
+    // and add block rows for profile
+    void reached_limit(vectorized::Block* block, bool* eos);
 
     /// Extends blocking queue for row batches. Row batches have a property that
     /// they must be processed in the order they were produced, even in cancellation
@@ -275,16 +275,13 @@ protected:
     std::vector<ExprContext*> _conjunct_ctxs;
     std::vector<TupleId> _tuple_ids;
 
+    std::unique_ptr<doris::vectorized::VExprContext*> _vconjunct_ctx_ptr;
+
     std::vector<ExecNode*> _children;
     RowDescriptor _row_descriptor;
 
     /// Resource information sent from the frontend.
     const TBackendResourceProfile _resource_profile;
-
-    // debug-only: if _debug_action is not INVALID, node will perform action in
-    // _debug_phase
-    TExecNodePhase::type _debug_phase;
-    TDebugAction::type _debug_action;
 
     int64_t _limit; // -1: no limit
     int64_t _num_rows_returned;
@@ -292,19 +289,20 @@ protected:
     std::unique_ptr<RuntimeProfile> _runtime_profile;
 
     /// Account for peak memory used by this node
-    std::shared_ptr<MemTracker> _mem_tracker;
-
-    /// MemTracker used by 'expr_mem_pool_'.
-    std::shared_ptr<MemTracker> _expr_mem_tracker;
-
-    /// MemPool for allocating data structures used by expression evaluators in this node.
-    /// Created in Prepare().
-    std::unique_ptr<MemPool> _expr_mem_pool;
+    std::unique_ptr<MemTracker> _mem_tracker;
 
     RuntimeProfile::Counter* _rows_returned_counter;
     RuntimeProfile::Counter* _rows_returned_rate;
     // Account for peak memory used by this node
     RuntimeProfile::Counter* _memory_used_counter;
+
+    /// Since get_next is a frequent operation, it is not necessary to generate a span for each call
+    /// to the get_next method. Therefore, the call of the get_next method in the ExecNode is
+    /// merged into this _get_next_span. The _get_next_span is initialized by
+    /// INIT_AND_SCOPE_GET_NEXT_SPAN when the get_next method is called for the first time
+    /// (recording the start timestamp), and is ended by RETURN_IF_ERROR_AND_CHECK_SPAN after the
+    /// last call to the get_next method (the record is terminated timestamp).
+    OpentelemetrySpan _get_next_span;
 
     // Execution options that are determined at runtime.  This is added to the
     // runtime profile at close().  Examples for options logged here would be
@@ -344,10 +342,6 @@ protected:
 
     void init_runtime_profile(const std::string& name);
 
-    // Executes _debug_action if phase matches _debug_phase.
-    // 'phase' must not be INVALID.
-    Status exec_debug_action(TExecNodePhase::type phase);
-
     // Appends option to '_runtime_exec_options'
     void add_runtime_exec_option(const std::string& option);
 
@@ -364,25 +358,4 @@ private:
     bool _is_closed;
 };
 
-#define LIMIT_EXCEEDED(tracker, state, msg)                                                   \
-    do {                                                                                      \
-        stringstream str;                                                                     \
-        str << "Memory exceed limit. " << msg << " ";                                         \
-        str << "Backend: " << BackendOptions::get_localhost() << ", ";                        \
-        str << "fragment: " << print_id(state->fragment_instance_id()) << " ";                \
-        str << "Used: " << tracker->consumption() << ", Limit: " << tracker->limit() << ". "; \
-        str << "You can change the limit by session variable exec_mem_limit.";                \
-        return Status::MemoryLimitExceeded(str.str());                                        \
-    } while (false)
-
-#define RETURN_IF_LIMIT_EXCEEDED(state, msg)                                                \
-    do {                                                                                    \
-        /* if (UNLIKELY(MemTracker::limit_exceeded(*(state)->mem_trackers()))) { */         \
-        MemTracker* tracker = state->instance_mem_tracker()->find_limit_exceeded_tracker(); \
-        if (tracker != nullptr) {                                                           \
-            LIMIT_EXCEEDED(tracker, state, msg);                                            \
-        }                                                                                   \
-    } while (false)
 } // namespace doris
-
-#endif

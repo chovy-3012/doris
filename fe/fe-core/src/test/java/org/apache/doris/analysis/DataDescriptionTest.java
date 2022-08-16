@@ -18,11 +18,12 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.analysis.BinaryPredicate.Operator;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.jmockit.Deencapsulation;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.load.loadv2.LoadTask;
 import org.apache.doris.mysql.privilege.MockedAuth;
 import org.apache.doris.mysql.privilege.PaloAuth;
@@ -31,17 +32,15 @@ import org.apache.doris.system.SystemInfoService;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import mockit.Expectations;
+import mockit.Injectable;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.List;
 import java.util.Map;
-
-import mockit.Expectations;
-import mockit.Injectable;
-import mockit.Mocked;
 
 public class DataDescriptionTest {
 
@@ -56,7 +55,9 @@ public class DataDescriptionTest {
     @Mocked
     private Analyzer analyzer;
     @Mocked
-    private Catalog catalog;
+    private Env env;
+    @Mocked
+    private InternalCatalog catalog;
 
     @Before
     public void setUp() throws AnalysisException {
@@ -72,11 +73,15 @@ public class DataDescriptionTest {
                 minTimes = 0;
                 result = "testCluster:testDb";
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
+                minTimes = 0;
+                result = env;
+
+                env.getInternalCatalog();
                 minTimes = 0;
                 result = catalog;
 
@@ -151,12 +156,12 @@ public class DataDescriptionTest {
                                                   null, null, null, false, null);
         desc.analyze("testDb");
         Assert.assertEquals("APPEND DATA INFILE ('abc.txt') INTO TABLE testTable PARTITIONS (p1, p2)", desc.toString());
-        
+
         // alignment_timestamp func
         List<Expr> params = Lists.newArrayList();
         params.add(new StringLiteral("day"));
         params.add(new SlotRef(null, "k2"));
-        BinaryPredicate predicate = new BinaryPredicate(Operator.EQ, new SlotRef(null, "k1"), 
+        BinaryPredicate predicate = new BinaryPredicate(Operator.EQ, new SlotRef(null, "k1"),
                 new FunctionCallExpr("alignment_timestamp", params));
         desc = new DataDescription("testTable", new PartitionNames(false, Lists.newArrayList("p1", "p2")),
                                                   Lists.newArrayList("abc.txt"),
@@ -216,7 +221,7 @@ public class DataDescriptionTest {
         properties.put("jsonpaths",  "[\"$.h1.h2.k1\",\"$.h1.h2.v1\",\"$.h1.h2.v2\"]");
         properties.put("json_root", "$.RECORDS");
         properties.put("read_json_by_line", "true");
-        properties.put("num_as_string","true");
+        properties.put("num_as_string", "true");
         desc = new DataDescription("testTable", null, Lists.newArrayList("abc.txt"),
                 Lists.newArrayList("col1", "col2"), new Separator(","), "json", null, false, null,
                 null, null, LoadTask.MergeType.APPEND, null, null, properties);
@@ -343,7 +348,7 @@ public class DataDescriptionTest {
 
                 tbl.hasSequenceCol();
                 minTimes = 0;
-                result =true;
+                result = true;
             }
         };
         desc.analyze("testDb");
@@ -362,7 +367,7 @@ public class DataDescriptionTest {
 
                 tbl.hasSequenceCol();
                 minTimes = 0;
-                result =true;
+                result = true;
             }
         };
         desc.analyze("testDb");

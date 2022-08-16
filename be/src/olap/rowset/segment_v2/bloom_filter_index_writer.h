@@ -28,17 +28,17 @@ namespace doris {
 
 class TypeInfo;
 
-namespace fs {
-class WritableBlock;
+namespace io {
+class FileWriter;
 }
 
 namespace segment_v2 {
 
-class BloomFilterOptions;
+struct BloomFilterOptions;
 
 class BloomFilterIndexWriter {
 public:
-    static Status create(const BloomFilterOptions& bf_options, const TypeInfo* typeinfo,
+    static Status create(const BloomFilterOptions& bf_options, const TypeInfo* type_info,
                          std::unique_ptr<BloomFilterIndexWriter>* res);
 
     BloomFilterIndexWriter() = default;
@@ -50,7 +50,7 @@ public:
 
     virtual Status flush() = 0;
 
-    virtual Status finish(fs::WritableBlock* wblock, ColumnIndexMetaPB* index_meta) = 0;
+    virtual Status finish(io::FileWriter* file_writer, ColumnIndexMetaPB* index_meta) = 0;
 
     virtual uint64_t size() = 0;
 

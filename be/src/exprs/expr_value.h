@@ -14,15 +14,16 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/expr-value.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_EXPR_VALUE_H
-#define DORIS_BE_SRC_QUERY_EXPRS_EXPR_VALUE_H
+#pragma once
 
 #include "runtime/collection_value.h"
 #include "runtime/datetime_value.h"
 #include "runtime/decimalv2_value.h"
 #include "runtime/string_value.h"
-#include "runtime/string_value.hpp"
 #include "runtime/types.h"
 
 namespace doris {
@@ -44,6 +45,8 @@ struct ExprValue {
     std::string string_data;
     StringValue string_val;
     DateTimeValue datetime_val;
+    doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType> datev2_val;
+    doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType> datetimev2_val;
     DecimalV2Value decimalv2_val;
     CollectionValue array_val;
 
@@ -57,7 +60,7 @@ struct ExprValue {
               float_val(0.0),
               double_val(0.0),
               string_data(),
-              string_val(nullptr, 0),
+              string_val(),
               datetime_val(),
               decimalv2_val(0),
               array_val() {}
@@ -242,5 +245,3 @@ struct ExprValue {
 };
 
 } // namespace doris
-
-#endif

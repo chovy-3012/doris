@@ -27,11 +27,11 @@
 
 #include "common/object_pool.h"
 #include "exec/broker_scan_node.h"
-#include "exec/local_file_reader.h"
 #include "exprs/cast_functions.h"
 #include "exprs/decimalv2_operators.h"
 #include "gen_cpp/Descriptors_types.h"
 #include "gen_cpp/PlanNodes_types.h"
+#include "io/local_file_reader.h"
 #include "runtime/descriptors.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
@@ -44,7 +44,7 @@ class OrcScannerTest : public testing::Test {
 public:
     OrcScannerTest() : _runtime_state(TQueryGlobals()) {
         _profile = _runtime_state.runtime_profile();
-        _runtime_state._instance_mem_tracker.reset(new MemTracker());
+        _runtime_state.init_instance_mem_tracker();
     }
 
     static void SetUpTestCase() {
@@ -67,6 +67,7 @@ private:
     std::vector<TNetworkAddress> _addresses;
     ScannerCounter _counter;
     std::vector<TExpr> _pre_filter;
+    bool _fill_tuple;
 };
 
 TEST_F(OrcScannerTest, normal) {
@@ -408,26 +409,25 @@ TEST_F(OrcScannerTest, normal) {
 
     ORCScanner scanner(&_runtime_state, _profile, params, ranges, _addresses, _pre_filter,
                        &_counter);
-    ASSERT_TRUE(scanner.open().ok());
+    EXPECT_TRUE(scanner.open().ok());
 
-    auto tracker = std::make_shared<MemTracker>();
-    MemPool tuple_pool(tracker.get());
+    MemPool tuple_pool;
 
     Tuple* tuple = (Tuple*)tuple_pool.allocate(_desc_tbl->get_tuple_descriptor(1)->byte_size());
     bool eof = false;
 
-    ASSERT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof).ok());
-    ASSERT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)),
+    EXPECT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof, &_fill_tuple).ok());
+    EXPECT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)),
               "(0 null doris      1.567 1.567000031471252 12345 1 doris)");
-    ASSERT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof).ok());
-    ASSERT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)),
+    EXPECT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof, &_fill_tuple).ok());
+    EXPECT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)),
               "(1 true doris      1.567 1.567000031471252 12345 1 doris)");
-    ASSERT_FALSE(eof);
+    EXPECT_FALSE(eof);
     for (int i = 2; i < 10; i++) {
-        ASSERT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof).ok());
+        EXPECT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof, &_fill_tuple).ok());
     }
-    ASSERT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof).ok());
-    ASSERT_TRUE(eof);
+    EXPECT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof, &_fill_tuple).ok());
+    EXPECT_TRUE(eof);
     scanner.close();
 }
 
@@ -532,17 +532,16 @@ TEST_F(OrcScannerTest, normal2) {
 
     ORCScanner scanner(&_runtime_state, _profile, params, ranges, _addresses, _pre_filter,
                        &_counter);
-    ASSERT_TRUE(scanner.open().ok());
+    EXPECT_TRUE(scanner.open().ok());
 
-    auto tracker = std::make_shared<MemTracker>();
-    MemPool tuple_pool(tracker.get());
+    MemPool tuple_pool;
 
     Tuple* tuple = (Tuple*)tuple_pool.allocate(_desc_tbl->get_tuple_descriptor(1)->byte_size());
     bool eof = false;
-    ASSERT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof).ok());
-    ASSERT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)), "(null)");
-    ASSERT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof).ok());
-    ASSERT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)), "(true)");
+    EXPECT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof, &_fill_tuple).ok());
+    EXPECT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)), "(null)");
+    EXPECT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof, &_fill_tuple).ok());
+    EXPECT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)), "(true)");
     scanner.close();
 }
 
@@ -882,23 +881,17 @@ TEST_F(OrcScannerTest, normal3) {
 
     ORCScanner scanner(&_runtime_state, _profile, params, ranges, _addresses, _pre_filter,
                        &_counter);
-    ASSERT_TRUE(scanner.open().ok());
+    EXPECT_TRUE(scanner.open().ok());
 
-    auto tracker = std::make_shared<MemTracker>();
-    MemPool tuple_pool(tracker.get());
+    MemPool tuple_pool;
 
     Tuple* tuple = (Tuple*)tuple_pool.allocate(_desc_tbl->get_tuple_descriptor(1)->byte_size());
     bool eof = false;
-    ASSERT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof).ok());
-    ASSERT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)),
+    EXPECT_TRUE(scanner.get_next(tuple, &tuple_pool, &eof, &_fill_tuple).ok());
+    EXPECT_EQ(Tuple::to_string(tuple, *_desc_tbl->get_tuple_descriptor(1)),
               "(0.123456789 1.12 -1.12345 0.12345 0 1 2020-01-14 14:12:19 2020-02-10 "
               "-0.0014)");
     scanner.close();
 }
 
 } // end namespace doris
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    doris::CpuInfo::init();
-    return RUN_ALL_TESTS();
-}

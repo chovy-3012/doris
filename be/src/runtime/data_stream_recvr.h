@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/data-stream-recvr.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H
-#define DORIS_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H
+#pragma once
 
 #include <mutex>
 
@@ -88,8 +90,7 @@ public:
     // queues. The exprs used in less_than must have already been prepared and opened.
     Status create_merger(const TupleRowComparator& less_than);
 
-    Status create_parallel_merger(const TupleRowComparator& less_than, uint32_t batch_size,
-                                  MemTracker* mem_tracker);
+    Status create_parallel_merger(const TupleRowComparator& less_than, uint32_t batch_size);
     // Fill output_batch with the next batch of rows obtained by merging the per-sender
     // input streams. Must only be called if _is_merging is true.
     Status get_next(RowBatch* output_batch, bool* eos);
@@ -101,7 +102,6 @@ public:
     const TUniqueId& fragment_instance_id() const { return _fragment_instance_id; }
     PlanNodeId dest_node_id() const { return _dest_node_id; }
     const RowDescriptor& row_desc() const { return _row_desc; }
-    std::shared_ptr<MemTracker> mem_tracker() const { return _mem_tracker; }
 
     void add_sub_plan_statistics(const PQueryStatistics& statistics, int sender_id) {
         _sub_plan_query_statistics_recvr->insert(statistics, sender_id);
@@ -115,10 +115,9 @@ private:
     friend class DataStreamMgr;
     class SenderQueue;
 
-    DataStreamRecvr(DataStreamMgr* stream_mgr, const std::shared_ptr<MemTracker>& parent_tracker,
-                    const RowDescriptor& row_desc, const TUniqueId& fragment_instance_id,
-                    PlanNodeId dest_node_id, int num_senders, bool is_merging,
-                    int total_buffer_limit, RuntimeProfile* profile,
+    DataStreamRecvr(DataStreamMgr* stream_mgr, const RowDescriptor& row_desc,
+                    const TUniqueId& fragment_instance_id, PlanNodeId dest_node_id, int num_senders,
+                    bool is_merging, int total_buffer_limit, RuntimeProfile* profile,
                     std::shared_ptr<QueryStatisticsRecvr> sub_plan_query_statistics_recvr);
 
     // If receive queue is full, done is enqueue pending, and return with *done is nullptr
@@ -154,10 +153,10 @@ private:
     bool _is_merging;
 
     // total number of bytes held across all sender queues.
-    AtomicInt<int> _num_buffered_bytes;
+    std::atomic<int> _num_buffered_bytes;
 
     // Memtracker for batches in the sender queue(s).
-    std::shared_ptr<MemTracker> _mem_tracker;
+    std::unique_ptr<MemTracker> _mem_tracker;
 
     // One or more queues of row batches received from senders. If _is_merging is true,
     // there is one SenderQueue for each sender. Otherwise, row batches from all senders
@@ -201,5 +200,3 @@ private:
 };
 
 } // end namespace doris
-
-#endif // end DORIS_BE_SRC_RUNTIME_DATA_STREAM_RECVR_H

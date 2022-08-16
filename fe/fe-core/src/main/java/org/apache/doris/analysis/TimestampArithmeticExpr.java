@@ -23,6 +23,7 @@ import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
 import org.apache.doris.thrift.TExprNode;
@@ -30,6 +31,7 @@ import org.apache.doris.thrift.TExprNodeType;
 import org.apache.doris.thrift.TExprOpcode;
 
 import com.google.common.base.Preconditions;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -111,6 +113,16 @@ public class TimestampArithmeticExpr extends Expr {
         if (t1 == PrimitiveType.DATE) {
             return Type.DATE;
         }
+        if (t1 == PrimitiveType.DATETIMEV2) {
+            return Type.DATETIMEV2;
+        }
+        if (t1 == PrimitiveType.DATEV2) {
+            return Type.DATEV2;
+        }
+        if (Config.enable_date_conversion
+                && PrimitiveType.isImplicitCast(t1, PrimitiveType.DATETIMEV2)) {
+            return Type.DATETIMEV2;
+        }
         if (PrimitiveType.isImplicitCast(t1, PrimitiveType.DATETIME)) {
             return Type.DATETIME;
         }
@@ -129,7 +141,7 @@ public class TimestampArithmeticExpr extends Expr {
             }
             Type dateType = fixType();
             if (dateType.isDate() && timeUnit.isDateTime()) {
-                dateType = Type.DATETIME;
+                dateType = ScalarType.getDefaultDateType(Type.DATETIME);
             }
             // The first child must return a timestamp or null.
             if (!getChild(0).getType().isDateType() && !getChild(0).getType().isNull()) {
@@ -183,6 +195,9 @@ public class TimestampArithmeticExpr extends Expr {
             if (dateType.isDate() && timeUnit.isDateTime()) {
                 dateType = Type.DATETIME;
             }
+            if (dateType.isDateV2() && timeUnit.isDateTime()) {
+                dateType = Type.DATETIMEV2;
+            }
             // The first child must return a timestamp or null.
             if (!getChild(0).getType().isDateType() && !getChild(0).getType().isNull()) {
                 if (!dateType.isValid()) {
@@ -213,15 +228,15 @@ public class TimestampArithmeticExpr extends Expr {
                     (op == ArithmeticExpr.Operator.ADD) ? "ADD" : "SUB");
         }
 
-        fn = getBuiltinFunction(analyzer, funcOpName.toLowerCase(),
-                collectChildReturnTypes(), Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
+        fn = getBuiltinFunction(funcOpName.toLowerCase(), collectChildReturnTypes(),
+                Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
         LOG.debug("fn is {} name is {}", fn, funcOpName);
     }
 
     @Override
     protected void toThrift(TExprNode msg) {
         msg.node_type = TExprNodeType.COMPUTE_FUNCTION_CALL;
-        msg.setOpcode(opcode);                    
+        msg.setOpcode(opcode);
     }
 
     public ArithmeticExpr.Operator getOp() {
@@ -325,6 +340,44 @@ public class TimestampArithmeticExpr extends Expr {
         return strBuilder.toString();
     }
 
+    @Override
+    public String toDigestImpl() {
+        StringBuilder strBuilder = new StringBuilder();
+        if (funcName != null) {
+            if (funcName.equalsIgnoreCase("TIMESTAMPDIFF") || funcName.equalsIgnoreCase("TIMESTAMPADD")) {
+                strBuilder.append(funcName).append("(");
+                strBuilder.append(timeUnitIdent).append(", ");
+                strBuilder.append(getChild(1).toDigest()).append(", ");
+                strBuilder.append(getChild(0).toDigest()).append(")");
+                return strBuilder.toString();
+            }
+            // Function-call like version.
+            strBuilder.append(funcName).append("(");
+            strBuilder.append(getChild(0).toDigest()).append(", ");
+            strBuilder.append("INTERVAL ");
+            strBuilder.append(getChild(1).toDigest());
+            strBuilder.append(" ").append(timeUnitIdent);
+            strBuilder.append(")");
+            return strBuilder.toString();
+        }
+        if (intervalFirst) {
+            // Non-function-call like version with interval as first operand.
+            strBuilder.append("INTERVAL ");
+            strBuilder.append(getChild(1).toDigest() + " ");
+            strBuilder.append(timeUnitIdent);
+            strBuilder.append(" ").append(op.toString()).append(" ");
+            strBuilder.append(getChild(0).toDigest());
+        } else {
+            // Non-function-call like version with interval as second operand.
+            strBuilder.append(getChild(0).toDigest());
+            strBuilder.append(" " + op.toString() + " ");
+            strBuilder.append("INTERVAL ");
+            strBuilder.append(getChild(1).toDigest() + " ");
+            strBuilder.append(timeUnitIdent);
+        }
+        return strBuilder.toString();
+    }
+
     // Time units supported in timestamp arithmetic.
     public enum TimeUnit {
         YEAR("YEAR"),                               // YEARS
@@ -364,5 +417,16 @@ public class TimestampArithmeticExpr extends Expr {
         public String toString() {
             return description;
         }
+    }
+
+    @Override
+    public void finalizeImplForNereids() throws AnalysisException {
+        if (StringUtils.isEmpty(funcName)) {
+            throw new AnalysisException("function name is null");
+        }
+        type = getChild(0).getType();
+        opcode = getOpCode();
+        fn = getBuiltinFunction(funcName.toLowerCase(), collectChildReturnTypes(),
+                Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF);
     }
 }

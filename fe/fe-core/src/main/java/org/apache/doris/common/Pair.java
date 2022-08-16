@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/Pair.java
+// and modified by Doris
 
 package org.apache.doris.common;
 
@@ -39,8 +42,16 @@ public class Pair<F, S> {
         this.second = second;
     }
 
-    static public <F, S> Pair<F, S> create(F first, S second) {
+    public static <F, S> Pair<F, S> create(F first, S second) {
         return new Pair<F, S>(first, second);
+    }
+
+    public F getFirst() {
+        return first;
+    }
+
+    public S getSecond() {
+        return second;
     }
 
     @Override

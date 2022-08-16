@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_RUNTIME_RESULT_CACHE_H
-#define DORIS_BE_SRC_RUNTIME_RESULT_CACHE_H
+#pragma once
 
 #include <cassert>
 #include <cstdio>
@@ -33,7 +32,6 @@
 #include "runtime/cache/cache_utils.h"
 #include "runtime/cache/result_node.h"
 #include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
 #include "runtime/row_batch.h"
 #include "runtime/tuple_row.h"
 
@@ -118,4 +116,3 @@ private:
 };
 
 } // namespace doris
-#endif

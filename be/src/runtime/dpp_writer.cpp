@@ -21,7 +21,6 @@
 
 #include <vector>
 
-#include "exprs/expr.h"
 #include "exprs/expr_context.h"
 #include "olap/utils.h"
 #include "runtime/primitive_type.h"
@@ -187,9 +186,7 @@ Status DppWriter::append_one_row(TupleRow* row) {
             // write len first
             uint16_t len = str_val->len;
             if (len != str_val->len) {
-                std::stringstream ss;
-                ss << "length of string is overflow.len=" << str_val->len;
-                return Status::InternalError(ss.str());
+                return Status::InternalError("length of string is overflow.len={}", str_val->len);
             }
             append_to_buf(&len, 2);
             // passing a nullptr pointer to memcpy may be core/
@@ -243,8 +240,8 @@ Status DppWriter::add_batch(RowBatch* batch) {
             return status;
         }
         int len = _pos - _buf;
-        OLAPStatus olap_status = _fp->write(_buf, len);
-        if (olap_status != OLAP_SUCCESS) {
+        Status olap_status = _fp->write(_buf, len);
+        if (!olap_status.ok()) {
             return Status::InternalError("write to file failed.");
         }
         _content_adler32 = olap_adler32(_content_adler32, _buf, len);

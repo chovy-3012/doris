@@ -26,11 +26,10 @@
 #include "common/object_pool.h"
 #include "common/status.h"
 #include "exprs/runtime_filter.h"
-#include "util/time.h"
-#include "util/uid_util.h"
-// defination for TRuntimeFilterDesc
 #include "gen_cpp/PaloInternalService_types.h"
 #include "gen_cpp/PlanNodes_types.h"
+#include "util/time.h"
+#include "util/uid_util.h"
 
 namespace doris {
 class TUniqueId;
@@ -45,13 +44,13 @@ class PMergeFilterRequest;
 /// get_filter(filter_id, &filter);
 /// filter->merge(origin_filter)
 
-/// comsumer:
+/// consumer:
 /// get_filter(filter_id, &filter)
 /// filter->wait
 /// if filter->ready().ok(), use filter
 
 // owned by RuntimeState
-// RuntimeFilterMgr will be destoryed when RuntimeState is destoryed
+// RuntimeFilterMgr will be destroyed when RuntimeState is destroyed
 class RuntimeFilterMgr {
 public:
     RuntimeFilterMgr(const UniqueId& query_id, RuntimeState* state);
@@ -66,7 +65,7 @@ public:
     Status get_producer_filter(const int filter_id, IRuntimeFilter** producer_filter);
     // regist filter
     Status regist_filter(const RuntimeFilterRole role, const TRuntimeFilterDesc& desc,
-                         int node_id = -1);
+                         const TQueryOptions& options, int node_id = -1);
 
     // update filter by remote
     Status update_filter(const PPublishFilterRequest* request, const char* data);
@@ -91,7 +90,7 @@ private:
     std::map<int32_t, RuntimeFilterMgrVal> _producer_map;
 
     RuntimeState* _state;
-    MemTracker* _tracker;
+    std::unique_ptr<MemTracker> _tracker;
     ObjectPool _pool;
 
     TNetworkAddress _merge_addr;
@@ -105,10 +104,12 @@ private:
 // the class is destroyed with the last fragment_exec.
 class RuntimeFilterMergeControllerEntity {
 public:
-    RuntimeFilterMergeControllerEntity() : _query_id(0, 0) {}
+    RuntimeFilterMergeControllerEntity() : _query_id(0, 0), _fragment_instance_id(0, 0) {}
     ~RuntimeFilterMergeControllerEntity() = default;
 
-    Status init(UniqueId query_id, const TRuntimeFilterParams& runtime_filter_params);
+    Status init(UniqueId query_id, UniqueId fragment_instance_id,
+                const TRuntimeFilterParams& runtime_filter_params,
+                const TQueryOptions& query_options);
 
     // handle merge rpc
     Status merge(const PMergeFilterRequest* request, const char* data);
@@ -117,6 +118,7 @@ public:
 
 private:
     Status _init_with_desc(const TRuntimeFilterDesc* runtime_filter_desc,
+                           const TQueryOptions* query_options,
                            const std::vector<doris::TRuntimeFilterTargetParams>* target_info,
                            const int producer_size);
 
@@ -127,12 +129,13 @@ private:
         std::vector<doris::TRuntimeFilterTargetParams> target_info;
         IRuntimeFilter* filter;
         std::unordered_set<std::string> arrive_id; // fragment_instance_id ?
-        std::shared_ptr<MemTracker> tracker;
         std::shared_ptr<ObjectPool> pool;
     };
     UniqueId _query_id;
+    UniqueId _fragment_instance_id;
     // protect _filter_map
     std::mutex _filter_map_mutex;
+    std::unique_ptr<MemTracker> _mem_tracker;
     // TODO: convert filter id to i32
     // filter-id -> val
     std::map<std::string, std::shared_ptr<RuntimeFilterCntlVal>> _filter_map;

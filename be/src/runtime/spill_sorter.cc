@@ -121,7 +121,7 @@ private:
     // into output_batch.
     // If this run was unpinned, one block (2 if there are var-len slots) is pinned while
     // rows are filled into output_batch. The block is unpinned before the next block is
-    // pinned. Atmost 1 (2) block(s) will be pinned at any time.
+    // pinned. At most 1 (2) block(s) will be pinned at any time.
     // If the run was pinned, the blocks are not unpinned (SpillSorter holds on to the memory).
     // In either case, all rows in output_batch will have their fixed and var-len data from
     // the same block.
@@ -164,9 +164,7 @@ private:
                                           const vector<StringValue*>& var_values);
 
     // Returns true if we have var-len slots and there are var-len blocks.
-    inline bool has_var_len_blocks() const {
-        return _has_var_len_slots && !_var_len_blocks.empty();
-    }
+    bool has_var_len_blocks() const { return _has_var_len_slots && !_var_len_blocks.empty(); }
 
     // Parent sorter object.
     const SpillSorter* _sorter;
@@ -638,10 +636,7 @@ Status SpillSorter::Run::prepare_read() {
     _pin_next_fixed_len_block = _pin_next_var_len_block = false;
     _num_tuples_returned = 0;
 
-    // _buffered_batch.reset(new RowBatch(*_sorter->_output_row_desc,
-    //         _sorter->_state->batch_size(), _sorter->_mem_tracker));
-    _buffered_batch.reset(new RowBatch(*_sorter->_output_row_desc, _sorter->_state->batch_size(),
-                                       _sorter->_mem_tracker.get()));
+    _buffered_batch.reset(new RowBatch(*_sorter->_output_row_desc, _sorter->_state->batch_size()));
 
     // If the run is pinned, merge is not invoked, so _buffered_batch is not needed
     // and the individual blocks do not need to be pinned.
@@ -1029,8 +1024,7 @@ inline void SpillSorter::TupleSorter::swap(uint8_t* left, uint8_t* right) {
 // SpillSorter methods
 SpillSorter::SpillSorter(const TupleRowComparator& compare_less_than,
                          const vector<ExprContext*>& slot_materialize_expr_ctxs,
-                         RowDescriptor* output_row_desc,
-                         const std::shared_ptr<MemTracker>& mem_tracker, RuntimeProfile* profile,
+                         RowDescriptor* output_row_desc, RuntimeProfile* profile,
                          RuntimeState* state)
         : _state(state),
           _compare_less_than(compare_less_than),
@@ -1039,7 +1033,6 @@ SpillSorter::SpillSorter(const TupleRowComparator& compare_less_than,
           _block_mgr_client(nullptr),
           _has_var_len_slots(false),
           _sort_tuple_slot_expr_ctxs(slot_materialize_expr_ctxs),
-          _mem_tracker(mem_tracker),
           _output_row_desc(output_row_desc),
           _unsorted_run(nullptr),
           _profile(profile),
@@ -1082,8 +1075,7 @@ Status SpillSorter::init() {
     if (_output_row_desc->tuple_descriptors()[0]->has_varlen_slots()) {
         min_blocks_required *= 2;
     }
-    RETURN_IF_ERROR(_block_mgr->register_client(min_blocks_required, _mem_tracker, _state,
-                                                &_block_mgr_client));
+    RETURN_IF_ERROR(_block_mgr->register_client(min_blocks_required, _state, &_block_mgr_client));
 
     DCHECK(_unsorted_run != nullptr);
     RETURN_IF_ERROR(_unsorted_run->init());
@@ -1253,8 +1245,7 @@ Status SpillSorter::merge_intermediate_runs() {
                 std::min<int>(max_runs_per_intermediate_merge,
                               _sorted_runs.size() - max_runs_per_intermediate_merge);
         RETURN_IF_ERROR(create_merger(num_runs_to_merge));
-        RowBatch intermediate_merge_batch(*_output_row_desc, _state->batch_size(),
-                                          _mem_tracker.get());
+        RowBatch intermediate_merge_batch(*_output_row_desc, _state->batch_size());
         // merged_run is the new sorted run that is produced by the intermediate merge.
         Run* merged_run =
                 _obj_pool.add(new Run(this, _output_row_desc->tuple_descriptors()[0], false));

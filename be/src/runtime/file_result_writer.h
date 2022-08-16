@@ -32,7 +32,7 @@ class RuntimeProfile;
 class TupleRow;
 
 struct ResultFileOptions {
-    // deprecated
+    // [[deprecated]]
     bool is_local_file;
     std::string file_path;
     TFileFormatType::type file_format;
@@ -78,16 +78,11 @@ class BufferControlBlock;
 class FileResultWriter final : public ResultWriter {
 public:
     FileResultWriter(const ResultFileOptions* file_option,
-                     const std::vector<ExprContext*>& output_expr_ctxs,
-                     RuntimeProfile* parent_profile,
-                     BufferControlBlock* sinker);
-    FileResultWriter(const ResultFileOptions* file_option,
                      const TStorageBackendType::type storage_type,
                      const TUniqueId fragment_instance_id,
                      const std::vector<ExprContext*>& output_expr_ctxs,
-                     RuntimeProfile* parent_profile,
-                     BufferControlBlock* sinker,
-                     RowBatch* output_batch);
+                     RuntimeProfile* parent_profile, BufferControlBlock* sinker,
+                     RowBatch* output_batch, bool output_object_data);
     virtual ~FileResultWriter();
 
     virtual Status init(RuntimeState* state) override;
@@ -95,7 +90,10 @@ public:
     virtual Status close() override;
 
     // file result writer always return statistic result in one row
-    virtual int64_t get_written_rows() const { return 1; }
+    virtual int64_t get_written_rows() const override { return 1; }
+
+    std::string gen_types();
+    Status write_csv_header();
 
 private:
     Status _write_csv_file(const RowBatch& batch);
@@ -134,7 +132,7 @@ private:
 
     // If the result file format is plain text, like CSV, this _file_writer is owned by this FileResultWriter.
     // If the result file format is Parquet, this _file_writer is owned by _parquet_writer.
-    FileWriter* _file_writer = nullptr;
+    std::unique_ptr<FileWriter> _file_writer;
     // parquet file writer
     ParquetWriterWrapper* _parquet_writer = nullptr;
     // Used to buffer the export data of plain text
@@ -170,6 +168,7 @@ private:
     RowBatch* _output_batch = nullptr;
     // set to true if the final statistic result is sent
     bool _is_result_sent = false;
+    bool _header_sent = false;
 };
 
 } // namespace doris

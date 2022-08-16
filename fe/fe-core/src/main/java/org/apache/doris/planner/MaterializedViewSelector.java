@@ -40,7 +40,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -120,8 +119,8 @@ public class MaterializedViewSelector {
             return null;
         }
         long bestIndexId = priorities(olapScanNode, candidateIndexIdToSchema);
-        LOG.debug("The best materialized view is {} for scan node {} in query {}, " +
-                        "isPreAggregation: {}, reasonOfDisable: {}, cost {}",
+        LOG.debug("The best materialized view is {} for scan node {} in query {}, "
+                        + "isPreAggregation: {}, reasonOfDisable: {}, cost {}",
                 bestIndexId, scanNode.getId(), selectStmt.toSql(), isPreAggregation, reasonOfDisable,
                 (System.currentTimeMillis() - start));
         return new BestIndexInfo(bestIndexId, isPreAggregation, reasonOfDisable);
@@ -141,13 +140,14 @@ public class MaterializedViewSelector {
         // Step2: check all columns in compensating predicates are available in the view output
         checkCompensatingPredicates(columnNamesInPredicates.get(tableId), candidateIndexIdToMeta);
         // Step3: group by list in query is the subset of group by list in view or view contains no aggregation
-        checkGrouping(columnNamesInGrouping.get(tableId), candidateIndexIdToMeta);
+        checkGrouping(table, columnNamesInGrouping.get(tableId), candidateIndexIdToMeta);
         // Step4: aggregation functions are available in the view output
-        checkAggregationFunction(aggColumnsInQuery.get(tableId), candidateIndexIdToMeta);
+        checkAggregationFunction(table, aggColumnsInQuery.get(tableId), candidateIndexIdToMeta);
         // Step5: columns required to compute output expr are available in the view output
         checkOutputColumns(columnNamesInQueryOutput.get(tableId), candidateIndexIdToMeta);
         // Step6: if table type is aggregate and the candidateIndexIdToSchema is empty,
-        if ((table.getKeysType() == KeysType.AGG_KEYS || table.getKeysType() == KeysType.UNIQUE_KEYS)
+        if ((table.getKeysType() == KeysType.AGG_KEYS || (table.getKeysType() == KeysType.UNIQUE_KEYS
+                && !table.getTableProperty().getEnableUniqueKeyMergeOnWrite()))
                 && candidateIndexIdToMeta.size() == 0) {
             // the base index will be added in the candidateIndexIdToSchema.
             /**
@@ -300,7 +300,7 @@ public class MaterializedViewSelector {
      * @param candidateIndexIdToMeta
      */
 
-    private void checkGrouping(Set<String> columnsInGrouping, Map<Long, MaterializedIndexMeta>
+    private void checkGrouping(OlapTable table, Set<String> columnsInGrouping, Map<Long, MaterializedIndexMeta>
             candidateIndexIdToMeta) {
         Iterator<Map.Entry<Long, MaterializedIndexMeta>> iterator = candidateIndexIdToMeta.entrySet().iterator();
         while (iterator.hasNext()) {
@@ -326,8 +326,10 @@ public class MaterializedViewSelector {
 
             ISSUE-3016, MaterializedViewFunctionTest: testDeduplicateQueryInAgg
              */
-            if (indexNonAggregatedColumnNames.size() == candidateIndexSchema.size()
-                    && candidateIndexMeta.getKeysType() == KeysType.DUP_KEYS) {
+            boolean noNeedAggregation = candidateIndexMeta.getKeysType() == KeysType.DUP_KEYS
+                    || (candidateIndexMeta.getKeysType() == KeysType.UNIQUE_KEYS
+                    && table.getTableProperty().getEnableUniqueKeyMergeOnWrite());
+            if (indexNonAggregatedColumnNames.size() == candidateIndexSchema.size() && noNeedAggregation) {
                 continue;
             }
             // When the query is SPJ type but the candidate index is SPJG type, it will not pass directly.
@@ -349,7 +351,7 @@ public class MaterializedViewSelector {
                           + Joiner.on(",").join(candidateIndexIdToMeta.keySet()));
     }
 
-    private void checkAggregationFunction(Set<FunctionCallExpr> aggregatedColumnsInQueryOutput,
+    private void checkAggregationFunction(OlapTable table, Set<FunctionCallExpr> aggregatedColumnsInQueryOutput,
             Map<Long, MaterializedIndexMeta> candidateIndexIdToMeta) throws AnalysisException {
         Iterator<Map.Entry<Long, MaterializedIndexMeta>> iterator = candidateIndexIdToMeta.entrySet().iterator();
         while (iterator.hasNext()) {
@@ -357,7 +359,10 @@ public class MaterializedViewSelector {
             MaterializedIndexMeta candidateIndexMeta = entry.getValue();
             List<FunctionCallExpr> indexAggColumnExpsList = mvAggColumnsToExprList(candidateIndexMeta);
             // When the candidate index is SPJ type, it passes the verification directly
-            if (indexAggColumnExpsList.size() == 0 && candidateIndexMeta.getKeysType() == KeysType.DUP_KEYS) {
+            boolean noNeedAggregation = candidateIndexMeta.getKeysType() == KeysType.DUP_KEYS
+                    || (candidateIndexMeta.getKeysType() == KeysType.UNIQUE_KEYS
+                    && table.getTableProperty().getEnableUniqueKeyMergeOnWrite());
+            if (indexAggColumnExpsList.size() == 0 && noNeedAggregation) {
                 continue;
             }
             // When the query is SPJ type but the candidate index is SPJG type, it will not pass directly.
@@ -535,5 +540,3 @@ public class MaterializedViewSelector {
         }
     }
 }
-
-

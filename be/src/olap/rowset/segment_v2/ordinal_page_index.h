@@ -22,7 +22,9 @@
 #include <string>
 
 #include "common/status.h"
+#include "env/env.h"
 #include "gutil/macros.h"
+#include "io/fs/file_reader.h"
 #include "olap/rowset/segment_v2/common.h"
 #include "olap/rowset/segment_v2/index_page.h"
 #include "olap/rowset/segment_v2/page_pointer.h"
@@ -31,8 +33,8 @@
 
 namespace doris {
 
-namespace fs {
-class WritableBlock;
+namespace io {
+class FileWriter;
 }
 
 namespace segment_v2 {
@@ -49,7 +51,7 @@ public:
 
     uint64_t size() { return _page_builder->size(); }
 
-    Status finish(fs::WritableBlock* wblock, ColumnIndexMetaPB* meta);
+    Status finish(io::FileWriter* file_writer, ColumnIndexMetaPB* meta);
 
 private:
     DISALLOW_COPY_AND_ASSIGN(OrdinalIndexWriter);
@@ -61,13 +63,18 @@ class OrdinalPageIndexIterator;
 
 class OrdinalIndexReader {
 public:
-    explicit OrdinalIndexReader(const std::string& filename, const OrdinalIndexPB* index_meta,
+    explicit OrdinalIndexReader(io::FileReaderSPtr file_reader, const OrdinalIndexPB* index_meta,
                                 ordinal_t num_values)
-            : _filename(filename), _index_meta(index_meta), _num_values(num_values) {}
+            : _file_reader(std::move(file_reader)),
+              _index_meta(index_meta),
+              _num_values(num_values) {}
 
     // load and parse the index page into memory
     Status load(bool use_page_cache, bool kept_in_memory);
 
+    // the returned iter points to the largest element which is less than `ordinal`,
+    // or points to the first element if all elements are greater than `ordinal`,
+    // or points to "end" if all elements are smaller than `ordinal`.
     OrdinalPageIndexIterator seek_at_or_before(ordinal_t ordinal);
     inline OrdinalPageIndexIterator begin();
     inline OrdinalPageIndexIterator end();
@@ -83,7 +90,7 @@ public:
 private:
     friend OrdinalPageIndexIterator;
 
-    std::string _filename;
+    io::FileReaderSPtr _file_reader;
     const OrdinalIndexPB* _index_meta;
     // total number of values (including NULLs) in the indexed column,
     // equals to 1 + 'last ordinal of last data pages'

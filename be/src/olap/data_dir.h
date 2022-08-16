@@ -21,15 +21,17 @@
 #include <cstdint>
 #include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <string>
 
 #include "common/status.h"
+#include "env/env.h"
 #include "gen_cpp/Types_types.h"
 #include "gen_cpp/olap_file.pb.h"
+#include "io/fs/file_system.h"
 #include "olap/olap_common.h"
 #include "olap/rowset/rowset_id_generator.h"
 #include "util/metrics.h"
-#include "util/mutex.h"
 
 namespace doris {
 
@@ -52,9 +54,13 @@ public:
 
     const std::string& path() const { return _path; }
     size_t path_hash() const { return _path_hash; }
+
+    const io::FileSystemPtr& fs() const { return _fs; }
+
     bool is_used() const { return _is_used; }
     void set_is_used(bool is_used) { _is_used = is_used; }
     int32_t cluster_id() const { return _cluster_id; }
+    bool cluster_id_incomplete() const { return _cluster_id_incomplete; }
 
     DataDirInfo get_dir_info() {
         DataDirInfo info;
@@ -73,11 +79,13 @@ public:
     Status set_cluster_id(int32_t cluster_id);
     void health_check();
 
-    OLAPStatus get_shard(uint64_t* shard);
+    Status get_shard(uint64_t* shard);
 
     OlapMeta* get_meta() { return _meta; }
 
     bool is_ssd_disk() const { return _storage_medium == TStorageMedium::SSD; }
+
+    bool is_remote() const { return FilePathDesc::is_remote(_storage_medium); }
 
     TStorageMedium::type storage_medium() const { return _storage_medium; }
 
@@ -94,7 +102,7 @@ public:
             const std::string& schema_hash_dir_in_trash);
 
     // load data from meta and data files
-    OLAPStatus load();
+    Status load();
 
     void add_pending_ids(const std::string& id);
 
@@ -108,9 +116,9 @@ public:
 
     void perform_path_gc_by_tablet();
 
-    bool convert_old_data_success();
+    void perform_remote_rowset_gc();
 
-    OLAPStatus set_convert_finished();
+    void perform_remote_tablet_gc();
 
     // check if the capacity reach the limit after adding the incoming data
     // return true if limit reached, otherwise, return false.
@@ -122,7 +130,9 @@ public:
 
     Status update_capacity();
 
-    void update_user_data_size(int64_t size);
+    void update_local_data_size(int64_t size);
+
+    void update_remote_data_size(int64_t size);
 
     size_t tablet_size() const;
 
@@ -130,22 +140,22 @@ public:
 
     void disks_compaction_num_increment(int64_t delta);
 
+    // Move tablet to trash.
+    Status move_to_trash(const std::string& tablet_path);
+
 private:
-    std::string _cluster_id_path() const { return _path + CLUSTER_ID_PREFIX; }
     Status _init_cluster_id();
     Status _init_capacity();
-    Status _init_file_system();
     Status _init_meta();
 
     Status _check_disk();
-    OLAPStatus _read_and_write_test_file();
-    Status _read_cluster_id(const std::string& cluster_id_path, int32_t* cluster_id);
+    Status _read_and_write_test_file();
+    Status read_cluster_id(Env* env, const std::string& cluster_id_path, int32_t* cluster_id);
     Status _write_cluster_id_to_path(const std::string& path, int32_t cluster_id);
-    OLAPStatus _clean_unfinished_converting_data();
     // Check whether has old format (hdr_ start) in olap. When doris updating to current version,
     // it may lead to data missing. When conf::storage_strict_check_incompatible_old_format is true,
     // process will log fatal.
-    OLAPStatus _check_incompatible_old_format_tablet();
+    Status _check_incompatible_old_format_tablet();
 
     void _process_garbage_path(const std::string& path);
 
@@ -158,6 +168,8 @@ private:
 
     std::string _path;
     size_t _path_hash;
+
+    io::FileSystemPtr _fs;
     // user specified capacity
     int64_t _capacity_bytes;
     // the actual available capacity of the disk of this data dir
@@ -169,10 +181,10 @@ private:
     TStorageMedium::type _storage_medium;
     bool _is_used;
 
-    std::string _file_system;
     TabletManager* _tablet_manager;
     TxnManager* _txn_manager;
     int32_t _cluster_id;
+    bool _cluster_id_incomplete = false;
     // This flag will be set true if this store was not in root path when reloading
     bool _to_be_deleted;
 
@@ -191,16 +203,14 @@ private:
     std::set<std::string> _all_check_paths;
     std::set<std::string> _all_tablet_schemahash_paths;
 
-    RWMutex _pending_path_mutex;
+    mutable std::shared_mutex _pending_path_mutex;
     std::set<std::string> _pending_path_ids;
-
-    // used in convert process
-    bool _convert_old_data_success;
 
     std::shared_ptr<MetricEntity> _data_dir_metric_entity;
     IntGauge* disks_total_capacity;
     IntGauge* disks_avail_capacity;
-    IntGauge* disks_data_used_capacity;
+    IntGauge* disks_local_used_capacity;
+    IntGauge* disks_remote_used_capacity;
     IntGauge* disks_state;
     IntGauge* disks_compaction_score;
     IntGauge* disks_compaction_num;

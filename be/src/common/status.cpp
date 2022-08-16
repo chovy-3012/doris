@@ -4,89 +4,111 @@
 
 #include "common/status.h"
 
-#include "gutil/strings/fastmem.h" // for memcpy_inlined
+#include <rapidjson/prettywriter.h>
+#include <rapidjson/stringbuffer.h>
+
+#include <boost/stacktrace.hpp>
+
+#include "gen_cpp/types.pb.h" // for PStatus
 
 namespace doris {
 
-inline const char* assemble_state(TStatusCode::type code, const Slice& msg, int16_t precise_code,
-                                  const Slice& msg2) {
-    DCHECK(code != TStatusCode::OK);
-
-    const uint32_t len1 = msg.size;
-    const uint32_t len2 = msg2.size;
-    const uint32_t size = len1 + ((len2 > 0) ? (2 + len2) : 0);
-    auto result = new char[size + 7];
-    memcpy(result, &size, sizeof(size));
-    result[4] = static_cast<char>(code);
-    memcpy(result + 5, &precise_code, sizeof(precise_code));
-    memcpy(result + 7, msg.data, len1);
-    if (len2 > 0) {
-        result[7 + len1] = ':';
-        result[8 + len1] = ' ';
-        memcpy(result + 9 + len1, msg2.data, len2);
+constexpr int MAX_ERROR_NUM = 65536;
+struct ErrorCodeState {
+    int16_t error_code = 0;
+    bool stacktrace = true;
+    std::string description;
+    size_t count = 0; // Used for count the number of error happens
+    std::mutex mutex; // lock guard for count state
+};
+ErrorCodeState error_states[MAX_ERROR_NUM];
+class Initializer {
+public:
+    Initializer() {
+#define M(NAME, ERRORCODE, DESC, STACKTRACEENABLED) \
+    error_states[abs(ERRORCODE)].stacktrace = STACKTRACEENABLED;
+        APPLY_FOR_ERROR_CODES(M)
+#undef M
+// Currently, most of description is empty, so that we use NAME as description
+#define M(NAME, ERRORCODE, DESC, STACKTRACEENABLED) \
+    error_states[abs(ERRORCODE)].description = #NAME;
+        APPLY_FOR_ERROR_CODES(M)
+#undef M
     }
-    return result;
-}
+};
+Initializer init; // Used to init the error_states array
 
-const char* Status::copy_state(const char* state) {
-    uint32_t size;
-    strings::memcpy_inlined(&size, state, sizeof(size));
-    auto result = new char[size + 7];
-    strings::memcpy_inlined(result, state, size + 7);
-    return result;
-}
-
-Status::Status(const TStatus& s) : _state(nullptr) {
-    if (s.status_code != TStatusCode::OK) {
-        if (s.error_msgs.empty()) {
-            _state = assemble_state(s.status_code, Slice(), 1, Slice());
-        } else {
-            _state = assemble_state(s.status_code, s.error_msgs[0], 1, Slice());
+Status::Status(const TStatus& s) {
+    _code = s.status_code;
+    if (_code != TStatusCode::OK) {
+        // It is ok to set precise code == 1 here, because we do not know the precise code
+        // just from thrift's TStatus
+        _precise_code = 1;
+        if (!s.error_msgs.empty()) {
+            _err_msg = s.error_msgs[0];
         }
     }
 }
 
-Status::Status(const PStatus& s) : _state(nullptr) {
-    TStatusCode::type code = (TStatusCode::type)s.status_code();
-    if (code != TStatusCode::OK) {
-        if (s.error_msgs_size() == 0) {
-            _state = assemble_state(code, Slice(), 1, Slice());
-        } else {
-            _state = assemble_state(code, s.error_msgs(0), 1, Slice());
+// TODO yiguolei, maybe should init PStatus's precise code because OLAPInternal Error may
+// tranfer precise code during BRPC
+Status::Status(const PStatus& s) {
+    _code = (TStatusCode::type)s.status_code();
+    if (_code != TStatusCode::OK) {
+        // It is ok to set precise code == 1 here, because we do not know the precise code
+        // just from thrift's TStatus
+        _precise_code = 1;
+        if (s.error_msgs_size() > 0) {
+            _err_msg = s.error_msgs(0);
         }
     }
 }
 
-Status::Status(TStatusCode::type code, const Slice& msg, int16_t precise_code, const Slice& msg2)
-        : _state(assemble_state(code, msg, precise_code, msg2)) {}
+// Implement it here to remove the boost header file from status.h to reduce precompile time
+Status Status::ConstructErrorStatus(int16_t precise_code) {
+// This will print all error status's stack, it maybe too many, but it is just used for debug
+#ifdef PRINT_ALL_ERR_STATUS_STACKTRACE
+    LOG(WARNING) << "Error occurred, error code = " << precise_code << ", with message: " << msg
+                 << "\n caused by:" << boost::stacktrace::stacktrace();
+#endif
+    if (error_states[abs(precise_code)].stacktrace) {
+        // Add stacktrace as part of message, could use LOG(WARN) << "" << status will print both
+        // the error message and the stacktrace
+        return Status(TStatusCode::INTERNAL_ERROR,
+                      boost::stacktrace::to_string(boost::stacktrace::stacktrace()), precise_code);
+    } else {
+        return Status(TStatusCode::INTERNAL_ERROR, std::string_view(), precise_code);
+    }
+}
 
 void Status::to_thrift(TStatus* s) const {
     s->error_msgs.clear();
-    if (_state == nullptr) {
+    if (ok()) {
         s->status_code = TStatusCode::OK;
     } else {
         s->status_code = code();
-        auto msg = message();
-        s->error_msgs.emplace_back(msg.data, msg.size);
+        s->error_msgs.push_back(_err_msg);
         s->__isset.error_msgs = true;
     }
 }
 
+TStatus Status::to_thrift() const {
+    TStatus s;
+    to_thrift(&s);
+    return s;
+}
+
 void Status::to_protobuf(PStatus* s) const {
     s->clear_error_msgs();
-    if (_state == nullptr) {
+    if (ok()) {
         s->set_status_code((int)TStatusCode::OK);
     } else {
         s->set_status_code(code());
-        auto msg = message();
-        s->add_error_msgs(msg.data, msg.size);
+        s->add_error_msgs(_err_msg);
     }
 }
 
-std::string Status::code_as_string() const {
-    if (_state == nullptr) {
-        return "OK";
-    }
+const char* Status::code_as_string() const {
     switch (code()) {
     case TStatusCode::OK:
         return "OK";
@@ -101,7 +123,7 @@ std::string Status::code_as_string() const {
     case TStatusCode::INTERNAL_ERROR:
         return "Internal error";
     case TStatusCode::THRIFT_RPC_ERROR:
-        return "Thrift rpc error";
+        return "RPC error";
     case TStatusCode::TIMEOUT:
         return "Timeout";
     case TStatusCode::MEM_ALLOC_FAILED:
@@ -145,54 +167,63 @@ std::string Status::code_as_string() const {
     case TStatusCode::DATA_QUALITY_ERROR:
         return "Data quality error";
     default: {
-        char tmp[30];
-        snprintf(tmp, sizeof(tmp), "Unknown code(%d): ", static_cast<int>(code()));
-        return tmp;
+        return "Unknown code";
     }
     }
-    return std::string();
+    return "Unknown code";
 }
 
 std::string Status::to_string() const {
     std::string result(code_as_string());
-    if (_state == nullptr) {
+    if (ok()) {
         return result;
     }
-
-    result.append(": ");
-    Slice msg = message();
-    result.append(reinterpret_cast<const char*>(msg.data), msg.size);
-    int16_t posix = precise_code();
-    if (posix != 1) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), " (error %d)", posix);
-        result.append(buf);
+    if (precise_code() != 1) {
+        result.append(fmt::format("(error {})", precise_code()));
     }
+    result.append(": ");
+    result.append(_err_msg);
     return result;
 }
 
-Slice Status::message() const {
-    if (_state == nullptr) {
-        return Slice();
+Status& Status::prepend(std::string_view msg) {
+    if (!ok()) {
+        _err_msg = std::string(msg) + _err_msg;
     }
-
-    uint32_t length;
-    memcpy(&length, _state, sizeof(length));
-    return Slice(_state + 7, length);
+    return *this;
 }
 
-Status Status::clone_and_prepend(const Slice& msg) const {
-    if (ok()) {
-        return *this;
+Status& Status::append(std::string_view msg) {
+    if (!ok()) {
+        _err_msg.append(msg);
     }
-    return Status(code(), msg, precise_code(), message());
+    return *this;
 }
 
-Status Status::clone_and_append(const Slice& msg) const {
+std::string Status::to_json() const {
+    rapidjson::StringBuffer s;
+    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(s);
+
+    writer.StartObject();
+    // status
+    writer.Key("status");
+    writer.String(code_as_string());
+    // msg
+    writer.Key("msg");
     if (ok()) {
-        return *this;
+        writer.String("OK");
+    } else {
+        int16_t posix = precise_code();
+        if (posix != 1) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), " (error %d)", posix);
+            writer.String((_err_msg + buf).c_str());
+        } else {
+            writer.String(_err_msg.c_str());
+        }
     }
-    return Status(code(), message(), precise_code(), msg);
+    writer.EndObject();
+    return s.GetString();
 }
 
 } // namespace doris

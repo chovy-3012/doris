@@ -14,23 +14,17 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/compound-predicate.cc
+// and modified by Doris
 
 #include "exprs/compound_predicate.h"
 
 #include <sstream>
 
-#include "runtime/runtime_state.h"
-#include "util/debug_util.h"
-
 namespace doris {
 
 CompoundPredicate::CompoundPredicate(const TExprNode& node) : Predicate(node) {}
-#if 0
-Status CompoundPredicate::prepare(RuntimeState* state, const RowDescriptor& desc) {
-    DCHECK_LE(_children.size(), 2);
-    return Expr::prepare(state, desc);
-}
-#endif
 
 void CompoundPredicate::init() {}
 

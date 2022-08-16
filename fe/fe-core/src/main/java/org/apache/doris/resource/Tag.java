@@ -23,29 +23,31 @@ import org.apache.doris.common.io.Writable;
 import org.apache.doris.persist.gson.GsonUtils;
 
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
 import com.google.gson.annotations.SerializedName;
 
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.Map;
 import java.util.Objects;
 
 /*
  * A Tag consists of type and value.
  * Tag type and value are both case insensitive, and represented in lower case.
  * Tag is printed as { "type": "value" }
- * 
- * Type is mainly used to categorize a tag. For example, users can customize a certain type of tag. 
+ *
+ * Type is mainly used to categorize a tag. For example, users can customize a certain type of tag.
  * And these tags all use the same type. So user can quickly find this type of tags by the type.
  * Doris reserves several built-in types:
  *     ROLE: the role of resource, such as FRONTEND, BACKEND, BROKER
  *     FUNCTION: the function of a tag, such as STORAGE, COMPUTATION
  *     LOCATION: A type of tags representing location information.
- *     
+ *
  * Value is customized. And Doris also reserves several built-in values for built-in types:
  *     FRONTEND, BACKEND, BROKER of type ROLE.
  *     REMOTE_STORAGE, STORAGE, COMPUTATION for type FUNCTION.
- * 
+ *
  * A Tag is immutable once it being created.
  */
 public class Tag implements Writable {
@@ -96,8 +98,18 @@ public class Tag implements Writable {
         return new Tag(type, value);
     }
 
+    public static Tag createNotCheck(String type, String value) {
+        return new Tag(type, value);
+    }
+
     public String toKey() {
         return type + "_" + value;
+    }
+
+    public Map<String, String> toMap() {
+        Map<String, String> map = Maps.newHashMap();
+        map.put(type, value);
+        return map;
     }
 
     @Override
@@ -107,7 +119,9 @@ public class Tag implements Writable {
 
     @Override
     public boolean equals(Object other) {
-        if (other == this) return true;
+        if (other == this) {
+            return true;
+        }
         if (!(other instanceof Tag)) {
             return false;
         }

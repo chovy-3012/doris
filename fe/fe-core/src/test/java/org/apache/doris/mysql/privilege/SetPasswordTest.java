@@ -17,13 +17,12 @@
 
 package org.apache.doris.mysql.privilege;
 
-import mockit.Expectations;
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.CreateUserStmt;
 import org.apache.doris.analysis.SetPassVar;
 import org.apache.doris.analysis.UserDesc;
 import org.apache.doris.analysis.UserIdentity;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.mysql.MysqlPassword;
@@ -32,17 +31,17 @@ import org.apache.doris.persist.PrivInfo;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.system.SystemInfoService;
 
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-
-import mockit.Mocked;
 
 public class SetPasswordTest {
 
     private PaloAuth auth;
     @Mocked
-    public Catalog catalog;
+    public Env env;
     @Mocked
     private Analyzer analyzer;
     @Mocked
@@ -57,15 +56,15 @@ public class SetPasswordTest {
                 minTimes = 0;
                 result = SystemInfoService.DEFAULT_CLUSTER;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
-                catalog.getAuth();
+                env.getAuth();
                 minTimes = 0;
                 result = auth;
 
-                catalog.getEditLog();
+                env.getEditLog();
                 minTimes = 0;
                 result = editLog;
 
@@ -85,7 +84,7 @@ public class SetPasswordTest {
         userIdentity.setIsAnalyzed();
         CreateUserStmt stmt = new CreateUserStmt(new UserDesc(userIdentity));
         auth.createUser(stmt);
-        
+
         ConnectContext ctx = new ConnectContext(null);
         // set password for 'cmy'@'%'
         UserIdentity currentUser1 = new UserIdentity("default_cluster:cmy", "%");
@@ -131,7 +130,7 @@ public class SetPasswordTest {
             e.printStackTrace();
             Assert.fail();
         }
-        
+
         // set password for cmy2@'192.168.1.1'
         UserIdentity user2 = new UserIdentity("default_cluster:cmy2", "192.168.1.1");
         user2.setIsAnalyzed();

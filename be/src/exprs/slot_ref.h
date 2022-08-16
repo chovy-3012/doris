@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/slot-ref.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_SLOT_REF_H
-#define DORIS_BE_SRC_QUERY_EXPRS_SLOT_REF_H
+#pragma once
 
 #include "common/object_pool.h"
 #include "exprs/expr.h"
@@ -42,33 +44,38 @@ public:
 
     Status prepare(const SlotDescriptor* slot_desc, const RowDescriptor& row_desc);
 
-    virtual Status prepare(RuntimeState* state, const RowDescriptor& row_desc, ExprContext* ctx);
+    virtual Status prepare(RuntimeState* state, const RowDescriptor& row_desc,
+                           ExprContext* ctx) override;
     static void* get_value(Expr* expr, TupleRow* row);
     void* get_slot(TupleRow* row);
     Tuple* get_tuple(TupleRow* row);
     bool is_null_bit_set(TupleRow* row);
-    static bool vector_compute_fn(Expr* expr, VectorizedRowBatch* batch);
     static bool is_nullable(Expr* expr);
-    virtual std::string debug_string() const;
-    virtual bool is_constant() const { return false; }
-    virtual bool is_vectorized() const { return true; }
-    virtual bool is_bound(std::vector<TupleId>* tuple_ids) const;
-    virtual int get_slot_ids(std::vector<SlotId>* slot_ids) const;
+    virtual std::string debug_string() const override;
+    virtual bool is_constant() const override { return false; }
+    virtual bool is_vectorized() const override { return true; }
+    virtual bool is_bound(std::vector<TupleId>* tuple_ids) const override;
+    virtual int get_slot_ids(std::vector<SlotId>* slot_ids) const override;
     SlotId slot_id() const { return _slot_id; }
-    inline NullIndicatorOffset null_indicator_offset() const { return _null_indicator_offset; }
+    NullIndicatorOffset null_indicator_offset() const { return _null_indicator_offset; }
 
-    virtual doris_udf::BooleanVal get_boolean_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::TinyIntVal get_tiny_int_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::SmallIntVal get_small_int_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::IntVal get_int_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::BigIntVal get_big_int_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::LargeIntVal get_large_int_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::FloatVal get_float_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::DoubleVal get_double_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::StringVal get_string_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::DateTimeVal get_datetime_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::DecimalV2Val get_decimalv2_val(ExprContext* context, TupleRow*);
-    virtual doris_udf::CollectionVal get_array_val(ExprContext* context, TupleRow*);
+    virtual doris_udf::BooleanVal get_boolean_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::TinyIntVal get_tiny_int_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::SmallIntVal get_small_int_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::IntVal get_int_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::BigIntVal get_big_int_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::LargeIntVal get_large_int_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::FloatVal get_float_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::DoubleVal get_double_val(ExprContext* context, TupleRow* row) override;
+    virtual doris_udf::StringVal get_string_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::DateTimeVal get_datetime_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::DateV2Val get_datev2_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::DateTimeV2Val get_datetimev2_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::DecimalV2Val get_decimalv2_val(ExprContext* context, TupleRow*) override;
+    virtual doris_udf::CollectionVal get_array_val(ExprContext* context, TupleRow*) override;
+    virtual Decimal32Val get_decimal32_val(ExprContext* context, TupleRow*) override;
+    virtual Decimal64Val get_decimal64_val(ExprContext* context, TupleRow*) override;
+    virtual Decimal128Val get_decimal128_val(ExprContext* context, TupleRow*) override;
 
 private:
     int _tuple_idx;                             // within row
@@ -79,10 +86,6 @@ private:
     TupleId _tuple_id;       // used for desc this slot from
     bool _is_nullable;
 };
-
-inline bool SlotRef::vector_compute_fn(Expr* expr, VectorizedRowBatch* /* batch */) {
-    return true;
-}
 
 inline void* SlotRef::get_value(Expr* expr, TupleRow* row) {
     SlotRef* ref = (SlotRef*)expr;
@@ -116,5 +119,3 @@ inline bool SlotRef::is_nullable(Expr* expr) {
 }
 
 } // namespace doris
-
-#endif

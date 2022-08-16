@@ -18,13 +18,14 @@
 package org.apache.doris.catalog;
 
 import org.apache.doris.alter.SchemaChangeHandler;
+import org.apache.doris.analysis.DefaultValueExprDef;
 import org.apache.doris.analysis.Expr;
+import org.apache.doris.analysis.IndexDef;
 import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.StringLiteral;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.CaseSensibility;
 import org.apache.doris.common.DdlException;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 import org.apache.doris.common.util.SqlUtils;
@@ -35,7 +36,7 @@ import org.apache.doris.thrift.TColumnType;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.gson.annotations.SerializedName;
-
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -45,6 +46,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * This class represents the column-related metadata.
@@ -54,6 +57,7 @@ public class Column implements Writable {
     public static final String DELETE_SIGN = "__DORIS_DELETE_SIGN__";
     public static final String SEQUENCE_COL = "__DORIS_SEQUENCE_COL__";
     private static final String COLUMN_ARRAY_CHILDREN = "item";
+    public static final int COLUMN_UNIQUE_ID_INIT_VALUE = -1;
 
     @SerializedName(value = "name")
     private String name;
@@ -83,11 +87,17 @@ public class Column implements Writable {
     @SerializedName(value = "children")
     private List<Column> children;
     // Define expr may exist in two forms, one is analyzed, and the other is not analyzed.
-    // Currently, analyzed define expr is only used when creating materialized views, so the define expr in RollupJob must be analyzed.
+    // Currently, analyzed define expr is only used when creating materialized views,
+    // so the define expr in RollupJob must be analyzed.
     // In other cases, such as define expr in `MaterializedIndexMeta`, it may not be analyzed after being replayed.
     private Expr defineExpr; // use to define column in materialize view
     @SerializedName(value = "visible")
     private boolean visible;
+    @SerializedName(value = "defaultValueExprDef")
+    private DefaultValueExprDef defaultValueExprDef; // used for default value
+
+    @SerializedName(value = "uniqueId")
+    private int uniqueId;
 
     public Column() {
         this.name = "";
@@ -96,7 +106,9 @@ public class Column implements Writable {
         this.isKey = false;
         this.stats = new ColumnStats();
         this.visible = true;
+        this.defineExpr = null;
         this.children = new ArrayList<>(Type.MAX_NESTING_DEPTH);
+        this.uniqueId = -1;
     }
 
     public Column(String name, PrimitiveType dataType) {
@@ -112,16 +124,19 @@ public class Column implements Writable {
     }
 
     public Column(String name, Type type, boolean isKey, AggregateType aggregateType, String defaultValue,
-                  String comment) {
+            String comment) {
         this(name, type, isKey, aggregateType, false, defaultValue, comment);
     }
 
     public Column(String name, Type type, boolean isKey, AggregateType aggregateType, boolean isAllowNull,
-                  String defaultValue, String comment) {
-        this(name, type, isKey, aggregateType, isAllowNull, defaultValue, comment, true);
+            String defaultValue, String comment) {
+        this(name, type, isKey, aggregateType, isAllowNull, defaultValue, comment, true, null,
+                COLUMN_UNIQUE_ID_INIT_VALUE);
     }
+
     public Column(String name, Type type, boolean isKey, AggregateType aggregateType, boolean isAllowNull,
-                  String defaultValue, String comment, boolean visible) {
+            String defaultValue, String comment, boolean visible, DefaultValueExprDef defaultValueExprDef,
+            int colUniqueId) {
         this.name = name;
         if (this.name == null) {
             this.name = "";
@@ -137,11 +152,13 @@ public class Column implements Writable {
         this.isKey = isKey;
         this.isAllowNull = isAllowNull;
         this.defaultValue = defaultValue;
+        this.defaultValueExprDef = defaultValueExprDef;
         this.comment = comment;
         this.stats = new ColumnStats();
         this.visible = visible;
         this.children = new ArrayList<>(Type.MAX_NESTING_DEPTH);
         createChildrenColumn(this.type, this);
+        this.uniqueId = colUniqueId;
     }
 
     public Column(Column column) {
@@ -152,15 +169,18 @@ public class Column implements Writable {
         this.isKey = column.isKey();
         this.isAllowNull = column.isAllowNull();
         this.defaultValue = column.getDefaultValue();
+        this.defaultValueExprDef = column.defaultValueExprDef;
         this.comment = column.getComment();
         this.stats = column.getStats();
         this.visible = column.visible;
         this.children = column.getChildren();
+        this.uniqueId = column.getUniqueId();
     }
 
     public void createChildrenColumn(Type type, Column column) {
         if (type.isArrayType()) {
             Column c = new Column(COLUMN_ARRAY_CHILDREN, ((ArrayType) type).getItemType());
+            c.setIsAllowNull(((ArrayType) type).getContainsNull());
             column.addChildrenColumn(c);
         }
     }
@@ -228,24 +248,33 @@ public class Column implements Writable {
         return !visible && aggregationType == AggregateType.REPLACE && nameEquals(SEQUENCE_COL, true);
     }
 
-    public PrimitiveType getDataType() { return type.getPrimitiveType(); }
+    public PrimitiveType getDataType() {
+        return type.getPrimitiveType();
+    }
 
     public Type getType() {
-        if (type.isArrayType() || type.isMapType() || type.isStructType()) {
-            return type;
-        }
-	    return ScalarType.createType(type.getPrimitiveType());
+        return type;
     }
 
     public void setType(Type type) {
         this.type = type;
     }
 
-    public Type getOriginType() { return type; }
+    public Type getOriginType() {
+        return type;
+    }
 
-    public int getStrLen() { return type.getLength(); }
-    public int getPrecision() { return type instanceof ScalarType ? ((ScalarType) type).getScalarPrecision() : -1; }
-    public int getScale() { return type instanceof ScalarType ? ((ScalarType) type).getScalarScale() : -1; }
+    public int getStrLen() {
+        return type.getLength();
+    }
+
+    public int getPrecision() {
+        return type instanceof ScalarType ? ((ScalarType) type).getScalarPrecision() : -1;
+    }
+
+    public int getScale() {
+        return type instanceof ScalarType ? ((ScalarType) type).getScalarScale() : -1;
+    }
 
     public AggregateType getAggregationType() {
         return this.aggregationType;
@@ -285,10 +314,14 @@ public class Column implements Writable {
         if (getDataType() == PrimitiveType.VARCHAR) {
             return defaultValueLiteral;
         }
+        if (defaultValueExprDef != null) {
+            return defaultValueExprDef.getExpr();
+        }
         Expr result = defaultValueLiteral.castTo(getType());
         result.checkValueValid();
         return result;
     }
+
 
     public void setStats(ColumnStats stats) {
         this.stats = stats;
@@ -342,15 +375,16 @@ public class Column implements Writable {
         tColumn.setIsAllowNull(this.isAllowNull);
         tColumn.setDefaultValue(this.defaultValue);
         tColumn.setVisible(visible);
-        tColumn.setChildrenColumn(new ArrayList<>());
         toChildrenThrift(this, tColumn);
-        
+
+        tColumn.setColUniqueId(uniqueId);
         // ATTN:
         // Currently, this `toThrift()` method is only used from CreateReplicaTask.
         // And CreateReplicaTask does not need `defineExpr` field.
         // The `defineExpr` is only used when creating `TAlterMaterializedViewParam`, which is in `AlterReplicaTask`.
         // And when creating `TAlterMaterializedViewParam`, the `defineExpr` is certainly analyzed.
-        // If we need to use `defineExpr` and call defineExpr.treeToThrift(), make sure it is analyzed, or NPE will thrown.
+        // If we need to use `defineExpr` and call defineExpr.treeToThrift(),
+        // make sure it is analyzed, or NPE will thrown.
         return tColumn;
     }
 
@@ -370,7 +404,15 @@ public class Column implements Writable {
 
             childrenTColumnType.setIndexLen(children.getOlapColumnIndexSize());
             childrenTColumn.setColumnType(childrenTColumnType);
+            childrenTColumn.setIsAllowNull(children.isAllowNull());
+            // TODO: If we don't set the aggregate type for children, the type will be
+            //  considered as TAggregationType::SUM after deserializing in BE.
+            //  For now, we make children inherit the aggregate type from their parent.
+            if (tColumn.getAggregationType() != null) {
+                childrenTColumn.setAggregationType(tColumn.getAggregationType());
+            }
 
+            tColumn.setChildrenColumn(new ArrayList<>());
             tColumn.children_column.add(childrenTColumn);
 
             toChildrenThrift(children, childrenTColumn);
@@ -384,6 +426,15 @@ public class Column implements Writable {
 
         if (!ColumnType.isSchemaChangeAllowed(type, other.type)) {
             throw new DdlException("Can not change " + getDataType() + " to " + other.getDataType());
+        }
+
+        if (type.isNumericType() && other.type.isStringType()) {
+            Integer lSize = type.getColumnStringRepSize();
+            Integer rSize = other.type.getColumnStringRepSize();
+            if (rSize < lSize) {
+                throw new DdlException(
+                        "Can not change from wider type " + type.toSql() + " to narrower type " + other.type.toSql());
+            }
         }
 
         if (this.aggregationType != other.aggregationType) {
@@ -404,26 +455,18 @@ public class Column implements Writable {
             }
         }
 
-        if ((getDataType() == PrimitiveType.VARCHAR && other.getDataType() == PrimitiveType.VARCHAR)
-                || (getDataType() == PrimitiveType.CHAR && other.getDataType() == PrimitiveType.VARCHAR)
-                || (getDataType() == PrimitiveType.CHAR && other.getDataType() == PrimitiveType.CHAR)) {
+        if ((getDataType() == PrimitiveType.VARCHAR && other.getDataType() == PrimitiveType.VARCHAR) || (
+                getDataType() == PrimitiveType.CHAR && other.getDataType() == PrimitiveType.VARCHAR) || (
+                getDataType() == PrimitiveType.CHAR && other.getDataType() == PrimitiveType.CHAR)) {
             if (getStrLen() > other.getStrLen()) {
                 throw new DdlException("Cannot shorten string length");
             }
         }
 
         // now we support convert decimal to varchar type
-        if (getDataType() == PrimitiveType.DECIMALV2 && (other.getDataType() == PrimitiveType.VARCHAR
-                || other.getDataType() == PrimitiveType.STRING)) {
+        if ((getDataType() == PrimitiveType.DECIMALV2 || getDataType().isDecimalV3Type())
+                && (other.getDataType() == PrimitiveType.VARCHAR || other.getDataType() == PrimitiveType.STRING)) {
             return;
-        }
-
-        if (this.getPrecision() != other.getPrecision()) {
-            throw new DdlException("Cannot change precision");
-        }
-
-        if (this.getScale() != other.getScale()) {
-            throw new DdlException("Cannot change scale");
         }
     }
 
@@ -469,6 +512,10 @@ public class Column implements Writable {
         defineExpr = expr;
     }
 
+    public DefaultValueExprDef getDefaultValueExprDef() {
+        return defaultValueExprDef;
+    }
+
     public SlotRef getRefColumn() {
         List<Expr> slots = new ArrayList<>();
         if (defineExpr == null) {
@@ -488,27 +535,34 @@ public class Column implements Writable {
         StringBuilder sb = new StringBuilder();
         sb.append("`").append(name).append("` ");
         String typeStr = type.toSql();
-        sb.append(typeStr).append(" ");
-        if (aggregationType != null && aggregationType != AggregateType.NONE
-                && !isUniqueTable &&  !isAggregationTypeImplicit) {
-            sb.append(aggregationType.name()).append(" ");
+        sb.append(typeStr);
+        if (aggregationType != null && aggregationType != AggregateType.NONE && !isUniqueTable
+                && !isAggregationTypeImplicit) {
+            sb.append(" ").append(aggregationType.name());
         }
         if (isAllowNull) {
-            sb.append("NULL ");
+            sb.append(" NULL");
         } else {
-            sb.append("NOT NULL ");
+            sb.append(" NOT NULL");
         }
         if (defaultValue != null && getDataType() != PrimitiveType.HLL && getDataType() != PrimitiveType.BITMAP) {
-            sb.append("DEFAULT \"").append(defaultValue).append("\" ");
+            sb.append(" DEFAULT \"").append(defaultValue).append("\"");
         }
-        sb.append("COMMENT \"").append(getComment(true)).append("\"");
-
+        if (StringUtils.isNotBlank(comment)) {
+            sb.append(" COMMENT '").append(getComment(true)).append("'");
+        }
         return sb.toString();
     }
 
     @Override
     public String toString() {
         return toSql();
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, getDataType(), aggregationType, isAggregationTypeImplicit, isKey, isAllowNull,
+                getDefaultValue(), getStrLen(), getPrecision(), getScale(), comment, visible, children);
     }
 
     @Override
@@ -593,48 +647,22 @@ public class Column implements Writable {
         boolean notNull = in.readBoolean();
         if (notNull) {
             aggregationType = AggregateType.valueOf(Text.readString(in));
-
-            if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_30) {
-                isAggregationTypeImplicit = in.readBoolean();
-            } else {
-                isAggregationTypeImplicit = false;
-            }
+            isAggregationTypeImplicit = in.readBoolean();
         }
-
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_30) {
-            isKey = in.readBoolean();
-        } else {
-            isKey = (aggregationType == null);
-        }
-
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_22) {
-            isAllowNull = in.readBoolean();
-        } else {
-            isAllowNull = false;
-        }
-
+        isKey = in.readBoolean();
+        isAllowNull = in.readBoolean();
         notNull = in.readBoolean();
         if (notNull) {
             defaultValue = Text.readString(in);
         }
         stats = ColumnStats.read(in);
 
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_10) {
-            comment = Text.readString(in);
-        } else {
-            comment = "";
-        }
+        comment = Text.readString(in);
     }
 
     public static Column read(DataInput in) throws IOException {
-        if (Catalog.getCurrentCatalogJournalVersion() < FeMetaVersion.VERSION_86) {
-            Column column = new Column();
-            column.readFields(in);
-            return column;
-        } else {
-            String json = Text.readString(in);
-            return GsonUtils.GSON.fromJson(json, Column.class);
-        }
+        String json = Text.readString(in);
+        return GsonUtils.GSON.fromJson(json, Column.class);
     }
 
     // Gen a signature string of this column, contains:
@@ -650,14 +678,20 @@ public class Column implements Writable {
                 sb.append(String.format(typeStringMap.get(dataType), getStrLen()));
                 break;
             case DECIMALV2:
+            case DECIMAL32:
+            case DECIMAL64:
+            case DECIMAL128:
                 sb.append(String.format(typeStringMap.get(dataType), getPrecision(), getScale()));
                 break;
             case ARRAY:
                 sb.append(type.toString());
+                break;
             case MAP:
                 sb.append(type.toString());
+                break;
             case STRUCT:
                 sb.append(type.toString());
+                break;
             default:
                 sb.append(typeStringMap.get(dataType));
                 break;
@@ -667,5 +701,29 @@ public class Column implements Writable {
         sb.append(aggregationType);
         sb.append(defaultValue == null ? "" : defaultValue);
         return sb.toString();
+    }
+
+    public void setUniqueId(int colUniqueId) {
+        this.uniqueId = colUniqueId;
+    }
+
+    public int getUniqueId() {
+        return this.uniqueId;
+    }
+
+    public void setIndexFlag(TColumn tColumn, OlapTable olapTable) {
+        List<Index> indexes = olapTable.getIndexes();
+        for (Index index : indexes) {
+            if (index.getIndexType() == IndexDef.IndexType.BITMAP) {
+                List<String> columns = index.getColumns();
+                if (tColumn.getColumnName().equals(columns.get(0))) {
+                    tColumn.setHasBitmapIndex(true);
+                }
+            }
+        }
+        Set<String> bfColumns = olapTable.getCopiedBfColumns();
+        if (bfColumns != null && bfColumns.contains(tColumn.getColumnName())) {
+            tColumn.setIsBloomFilterColumn(true);
+        }
     }
 }

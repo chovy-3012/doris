@@ -14,11 +14,13 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/analytic-eval-node.cc
+// and modified by Doris
 
 #include "exec/analytic_eval_node.h"
 
 #include "exprs/agg_fn_evaluator.h"
-#include "exprs/anyval_util.h"
 #include "runtime/descriptors.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
@@ -140,20 +142,21 @@ Status AnalyticEvalNode::init(const TPlanNode& tnode, RuntimeState* state) {
 Status AnalyticEvalNode::prepare(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::prepare(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     DCHECK(child(0)->row_desc().is_prefix_of(row_desc()));
     _child_tuple_desc = child(0)->row_desc().tuple_descriptors()[0];
-    _curr_tuple_pool.reset(new MemPool(mem_tracker().get()));
-    _prev_tuple_pool.reset(new MemPool(mem_tracker().get()));
-    _mem_pool.reset(new MemPool(mem_tracker().get()));
+    _curr_tuple_pool.reset(new MemPool(mem_tracker()));
+    _prev_tuple_pool.reset(new MemPool(mem_tracker()));
+    _mem_pool.reset(new MemPool(mem_tracker()));
 
     _evaluation_timer = ADD_TIMER(runtime_profile(), "EvaluationTime");
     DCHECK_EQ(_result_tuple_desc->slots().size(), _evaluators.size());
 
     for (int i = 0; i < _evaluators.size(); ++i) {
         doris_udf::FunctionContext* ctx;
-        RETURN_IF_ERROR(_evaluators[i]->prepare(
-                state, child(0)->row_desc(), _mem_pool.get(), _intermediate_tuple_desc->slots()[i],
-                _result_tuple_desc->slots()[i], mem_tracker(), &ctx));
+        RETURN_IF_ERROR(_evaluators[i]->prepare(state, child(0)->row_desc(), _mem_pool.get(),
+                                                _intermediate_tuple_desc->slots()[i],
+                                                _result_tuple_desc->slots()[i], &ctx));
         _fn_ctxs.push_back(ctx);
         state->obj_pool()->add(ctx);
     }
@@ -166,14 +169,12 @@ Status AnalyticEvalNode::prepare(RuntimeState* state) {
         RowDescriptor cmp_row_desc(state->desc_tbl(), tuple_ids, std::vector<bool>(2, false));
 
         if (_partition_by_eq_expr_ctx != nullptr) {
-            RETURN_IF_ERROR(
-                    _partition_by_eq_expr_ctx->prepare(state, cmp_row_desc, expr_mem_tracker()));
+            RETURN_IF_ERROR(_partition_by_eq_expr_ctx->prepare(state, cmp_row_desc));
             //AddExprCtxToFree(_partition_by_eq_expr_ctx);
         }
 
         if (_order_by_eq_expr_ctx != nullptr) {
-            RETURN_IF_ERROR(
-                    _order_by_eq_expr_ctx->prepare(state, cmp_row_desc, expr_mem_tracker()));
+            RETURN_IF_ERROR(_order_by_eq_expr_ctx->prepare(state, cmp_row_desc));
             //AddExprCtxToFree(_order_by_eq_expr_ctx);
         }
     }
@@ -185,11 +186,11 @@ Status AnalyticEvalNode::prepare(RuntimeState* state) {
 Status AnalyticEvalNode::open(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::open(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_CANCELLED(state);
     //RETURN_IF_ERROR(QueryMaintenance(state));
     RETURN_IF_ERROR(child(0)->open(state));
-    RETURN_IF_ERROR(
-            state->block_mgr2()->register_client(2, mem_tracker(), state, &_block_mgr_client));
+    RETURN_IF_ERROR(state->block_mgr2()->register_client(2, state, &_block_mgr_client));
     _input_stream.reset(new BufferedTupleStream2(state, child(0)->row_desc(), state->block_mgr2(),
                                                  _block_mgr_client, false, true));
     RETURN_IF_ERROR(_input_stream->init(id(), runtime_profile(), true));
@@ -201,7 +202,7 @@ Status AnalyticEvalNode::open(RuntimeState* state) {
                 "Failed to acquire initial read buffer for analytic function "
                 "evaluation. Reducing query concurrency or increasing the memory limit may "
                 "help this query to complete successfully.");
-        return mem_tracker()->MemLimitExceeded(state, msg, -1);
+        RETURN_LIMIT_EXCEEDED(state, msg);
     }
 
     DCHECK_EQ(_evaluators.size(), _fn_ctxs.size());
@@ -236,10 +237,8 @@ Status AnalyticEvalNode::open(RuntimeState* state) {
 
     // Fetch the first input batch so that some _prev_input_row can be set here to avoid
     // special casing in GetNext().
-    _prev_child_batch.reset(
-            new RowBatch(child(0)->row_desc(), state->batch_size(), mem_tracker().get()));
-    _curr_child_batch.reset(
-            new RowBatch(child(0)->row_desc(), state->batch_size(), mem_tracker().get()));
+    _prev_child_batch.reset(new RowBatch(child(0)->row_desc(), state->batch_size()));
+    _curr_child_batch.reset(new RowBatch(child(0)->row_desc(), state->batch_size()));
 
     while (!_input_eos && _prev_input_row == nullptr) {
         RETURN_IF_ERROR(child(0)->get_next(state, _curr_child_batch.get(), &_input_eos));
@@ -738,7 +737,7 @@ Status AnalyticEvalNode::get_next_output_batch(RuntimeState* state, RowBatch* ou
     ExprContext** ctxs = &_conjunct_ctxs[0];
     int num_ctxs = _conjunct_ctxs.size();
 
-    RowBatch input_batch(child(0)->row_desc(), output_batch->capacity(), mem_tracker().get());
+    RowBatch input_batch(child(0)->row_desc(), output_batch->capacity());
     int64_t stream_idx = _input_stream->rows_returned();
     RETURN_IF_ERROR(_input_stream->get_next(&input_batch, eos));
 
@@ -814,7 +813,7 @@ inline int64_t AnalyticEvalNode::num_output_rows_ready() const {
 
 Status AnalyticEvalNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::GETNEXT));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_CANCELLED(state);
     //RETURN_IF_ERROR(QueryMaintenance(state));
     RETURN_IF_ERROR(state->check_query_state("Analytic eval, while get_next."));

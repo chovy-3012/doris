@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-3.0.0/be/src/runtime/buffered-tuple-stream.h
+// and modified by Doris
 
-#ifndef DORIS_BE_RUNTIME_BUFFERED_TUPLE_STREAM_H
-#define DORIS_BE_RUNTIME_BUFFERED_TUPLE_STREAM_H
+#pragma once
 
 #include <functional>
 #include <set>
@@ -30,7 +32,6 @@
 
 namespace doris {
 
-class MemTracker;
 class RuntimeState;
 class RowDescriptor;
 class SlotDescriptor;
@@ -333,8 +334,7 @@ public:
     /// process. If the current unused reservation is not sufficient to pin the stream in
     /// memory, this will try to increase the reservation. If that fails, 'got_rows' is set
     /// to false.
-    Status GetRows(const std::shared_ptr<MemTracker>& tracker, std::unique_ptr<RowBatch>* batch,
-                   bool* got_rows) WARN_UNUSED_RESULT;
+    Status GetRows(std::unique_ptr<RowBatch>* batch, bool* got_rows) WARN_UNUSED_RESULT;
 
     /// Must be called once at the end to cleanup all resources. If 'batch' is non-nullptr,
     /// attaches buffers from pinned pages that rows returned from GetNext() may reference.
@@ -378,9 +378,9 @@ private:
     struct Page {
         Page() : num_rows(0), retrieved_buffer(true) {}
 
-        inline int len() const { return handle.len(); }
-        inline bool is_pinned() const { return handle.is_pinned(); }
-        inline int pin_count() const { return handle.pin_count(); }
+        int len() const { return handle.len(); }
+        bool is_pinned() const { return handle.is_pinned(); }
+        int pin_count() const { return handle.pin_count(); }
         Status GetBuffer(const BufferPool::BufferHandle** buffer) {
             RETURN_IF_ERROR(handle.GetBuffer(buffer));
             retrieved_buffer = true;
@@ -562,7 +562,7 @@ private:
 
     /// Determines what page size is needed to fit a row of 'row_size' bytes.
     /// Returns an error if the row cannot fit in a page.
-    Status CalcPageLenForRow(int64_t row_size, int64_t* page_len);
+    void CalcPageLenForRow(int64_t row_size, int64_t* page_len);
 
     /// Wrapper around NewWritePage() that allocates a new write page that fits a row of
     /// 'row_size' bytes. Increases reservation if needed to allocate the next page.
@@ -689,5 +689,3 @@ private:
     void CheckPageConsistency(const Page* page) const;
 };
 } // namespace doris
-
-#endif

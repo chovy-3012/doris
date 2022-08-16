@@ -14,11 +14,13 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/disk-io-mgr-scan-range.cc
+// and modified by Doris
 
 #include "runtime/disk_io_mgr.h"
 #include "runtime/disk_io_mgr_internal.h"
 #include "util/error_util.h"
-// #include "util/hdfs-util.h"
 
 using std::string;
 using std::stringstream;
@@ -295,17 +297,14 @@ Status DiskIoMgr::ScanRange::open() {
     _local_file = fopen(file(), "r");
     if (_local_file == nullptr) {
         string error_msg = get_str_err_msg();
-        stringstream ss;
-        ss << "Could not open file: " << _file << ": " << error_msg;
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Could not open file: {}: {}", _file, error_msg);
     }
     if (fseek(_local_file, _offset, SEEK_SET) == -1) {
         fclose(_local_file);
         _local_file = nullptr;
         string error_msg = get_str_err_msg();
-        stringstream ss;
-        ss << "Could not seek to " << _offset << " for file: " << _file << ": " << error_msg;
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Could not seek to {} for file: {}: {}", _offset, _file,
+                                     error_msg);
     }
     // }
     return Status::OK();
@@ -414,10 +413,8 @@ Status DiskIoMgr::ScanRange::read(char* buffer, int64_t* bytes_read, bool* eosr)
     if (*bytes_read < bytes_to_read) {
         if (ferror(_local_file) != 0) {
             string error_msg = get_str_err_msg();
-            stringstream ss;
-            ss << "Error reading from " << _file << " at byte offset: " << (_offset + _bytes_read)
-               << ": " << error_msg;
-            return Status::InternalError(ss.str());
+            return Status::InternalError("Error reading from {} at byte offset: {}: {}", _file,
+                                         (_offset + _bytes_read), error_msg);
         } else {
             // On Linux, we should only get partial reads from block devices on error or eof.
             DCHECK(feof(_local_file) != 0);

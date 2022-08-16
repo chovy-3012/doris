@@ -25,25 +25,12 @@ include "PlanNodes.thrift"
 include "Descriptors.thrift"
 include "Exprs.thrift"
 
-struct TColumn {
-    1: required string column_name
-    2: required Types.TColumnType column_type
-    3: optional Types.TAggregationType aggregation_type
-    4: optional bool is_key
-    5: optional bool is_allow_null
-    6: optional string default_value
-    7: optional bool is_bloom_filter_column
-    8: optional Exprs.TExpr define_expr
-    9: optional bool visible = true
-    10: optional list<TColumn> children_column
-}
-
 struct TTabletSchema {
     1: required i16 short_key_column_count
     2: required Types.TSchemaHash schema_hash
     3: required Types.TKeysType keys_type
     4: required Types.TStorageType storage_type
-    5: required list<TColumn> columns
+    5: required list<Descriptors.TColumn> columns
     6: optional double bloom_filter_fpp
     7: optional list<Descriptors.TOlapTableIndex> indexes
     8: optional bool is_in_memory
@@ -67,6 +54,43 @@ enum TTabletType {
     TABLET_TYPE_MEMORY = 1
 }
 
+struct TS3StorageParam {
+    1: optional string s3_endpoint
+    2: optional string s3_region
+    3: optional string s3_ak
+    4: optional string s3_sk
+    5: optional i32 s3_max_conn = 50
+    6: optional i32 s3_request_timeout_ms = 3000
+    7: optional i32 s3_conn_timeout_ms = 1000
+    8: optional string root_path
+    9: optional string bucket
+}
+
+struct TGetStoragePolicy {
+    1: optional string policy_name
+    2: optional i64 cooldown_datetime
+    3: optional i64 cooldown_ttl
+    4: optional TS3StorageParam s3_storage_param
+    5: optional string md5_checksum
+}
+
+struct TGetStoragePolicyResult {
+    1: optional Status.TStatus status
+    2: optional list<TGetStoragePolicy> result_entrys
+}
+
+enum TCompressionType {
+    UNKNOWN_COMPRESSION = 0,
+    DEFAULT_COMPRESSION = 1,
+    NO_COMPRESSION = 2,
+    SNAPPY = 3,
+    LZ4 = 4,
+    LZ4F = 5,
+    ZLIB = 6,
+    ZSTD = 7
+}
+
+
 struct TCreateTabletReq {
     1: required Types.TTabletId tablet_id
     2: required TTabletSchema tablet_schema
@@ -87,17 +111,30 @@ struct TCreateTabletReq {
     12: optional bool is_eco_mode
     13: optional TStorageFormat storage_format
     14: optional TTabletType tablet_type
+    // 15: optional TStorageParam storage_param
+    16: optional TCompressionType compression_type = TCompressionType.LZ4F
+    17: optional Types.TReplicaId replica_id = 0
+    18: optional string storage_policy
+    19: optional bool enable_unique_key_merge_on_write = false
 }
 
 struct TDropTabletReq {
     1: required Types.TTabletId tablet_id
     2: optional Types.TSchemaHash schema_hash
+    3: optional Types.TReplicaId replica_id = 0
+    4: optional bool is_drop_table_or_partition = false
 }
 
 struct TAlterTabletReq {
     1: required Types.TTabletId base_tablet_id
     2: required Types.TSchemaHash base_schema_hash
     3: required TCreateTabletReq new_tablet_req
+}
+
+enum TAlterTabletType {
+    SCHEMA_CHANGE = 1,
+    ROLLUP = 2,
+    MIGRATION = 3
 }
 
 // This v2 request will replace the old TAlterTabletReq.
@@ -111,12 +148,23 @@ struct TAlterTabletReqV2 {
     5: optional Types.TVersion alter_version
     6: optional Types.TVersionHash alter_version_hash // Deprecated
     7: optional list<TAlterMaterializedViewParam> materialized_view_params
+    8: optional TAlterTabletType alter_tablet_type = TAlterTabletType.SCHEMA_CHANGE
+    9: optional Descriptors.TDescriptorTable desc_tbl
+    10: optional list<Descriptors.TColumn> columns
 }
 
 struct TAlterMaterializedViewParam {
     1: required string column_name
     2: optional string origin_column_name
     3: optional Exprs.TExpr mv_expr
+}
+
+struct TStorageMigrationReqV2 {
+    1: optional Types.TTabletId base_tablet_id
+    2: optional Types.TTabletId new_tablet_id
+    3: optional Types.TSchemaHash base_schema_hash
+    4: optional Types.TSchemaHash new_schema_hash
+    5: optional Types.TVersion migration_version
 }
 
 struct TClusterInfo {
@@ -144,6 +192,7 @@ struct TPushReq {
     // 14 and 15 are used by spark load
     14: optional PlanNodes.TBrokerScanRange broker_scan_range
     15: optional Descriptors.TDescriptorTable desc_tbl
+    16: optional list<Descriptors.TColumn> columns_desc
 }
 
 struct TCloneReq {
@@ -158,6 +207,13 @@ struct TCloneReq {
     8: optional i64 src_path_hash;
     9: optional i64 dest_path_hash;
     10: optional i32 timeout_s;
+    11: optional Types.TReplicaId replica_id = 0
+}
+
+struct TCompactionReq {
+    1: optional Types.TTabletId tablet_id
+    2: optional Types.TSchemaHash schema_hash
+    3: optional string type
 }
 
 struct TStorageMediumMigrateReq {
@@ -277,6 +333,7 @@ struct TTabletMetaInfo {
     3: optional Types.TPartitionId partition_id
     4: optional TTabletMetaType meta_type
     5: optional bool is_in_memory
+    6: optional string storage_policy;
 }
 
 struct TUpdateTabletMetaInfoReq {
@@ -318,6 +375,9 @@ struct TAgentTaskRequest {
     24: optional TAlterTabletReqV2 alter_tablet_req_v2
     25: optional i64 recv_time // time the task is inserted to queue
     26: optional TUpdateTabletMetaInfoReq update_tablet_meta_info_req
+    27: optional TCompactionReq compaction_req
+    28: optional TStorageMigrationReqV2 storage_migration_req_v2
+    29: optional TGetStoragePolicy update_policy
 }
 
 struct TAgentResult {
@@ -349,31 +409,5 @@ struct TTopicUpdate {
 struct TAgentPublishRequest {
     1: required TAgentServiceVersion protocol_version
     2: required list<TTopicUpdate> updates
-}
-
-struct TMiniLoadEtlTaskRequest {
-    1: required TAgentServiceVersion protocol_version
-    2: required PaloInternalService.TExecPlanFragmentParams params
-}
-
-struct TMiniLoadEtlStatusRequest {
-    1: required TAgentServiceVersion protocol_version
-    2: required Types.TUniqueId mini_load_id
-}
-
-struct TMiniLoadEtlStatusResult {
-    1: required Status.TStatus status
-    2: required Types.TEtlState etl_state
-    3: optional map<string, i64> file_map
-    4: optional map<string, string> counters
-    5: optional string tracking_url
-    // progress
-}
-
-struct TDeleteEtlFilesRequest {
-    1: required TAgentServiceVersion protocol_version
-    2: required Types.TUniqueId mini_load_id
-    3: required string db_name
-    4: required string label
 }
 

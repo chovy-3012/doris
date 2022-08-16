@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_BUFFER_POOL_INTERNAL_H
-#define DORIS_BE_RUNTIME_BUFFER_POOL_INTERNAL_H
+#pragma once
 
 #include <memory>
 #include <mutex>
@@ -25,7 +24,6 @@
 #include "runtime/bufferpool/buffer_pool.h"
 #include "runtime/bufferpool/buffer_pool_counters.h"
 #include "runtime/bufferpool/reservation_tracker.h"
-#include "util/condition_variable.h"
 
 // Ensure that DCheckConsistency() function calls get removed in release builds.
 #ifndef NDEBUG
@@ -135,8 +133,7 @@ class BufferPool::Client {
 public:
     Client(BufferPool* pool, //TmpFileMgr::FileGroup* file_group,
            const std::string& name, ReservationTracker* parent_reservation,
-           const std::shared_ptr<MemTracker>& mem_tracker, int64_t reservation_limit,
-           RuntimeProfile* profile);
+           int64_t reservation_limit, RuntimeProfile* profile);
 
     ~Client() {
         DCHECK_EQ(0, num_pages_);
@@ -316,5 +313,3 @@ private:
     PageList in_flight_write_pages_;
 };
 } // namespace doris
-
-#endif

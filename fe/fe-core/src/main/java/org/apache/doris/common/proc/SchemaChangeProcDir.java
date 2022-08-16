@@ -35,7 +35,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -74,7 +73,22 @@ public class SchemaChangeProcDir implements ProcDirInterface {
             return ((StringLiteral) subExpr.getChild(1)).getValue().equals(element);
         }
         if (subExpr.getChild(1) instanceof DateLiteral) {
-            Long leftVal = (new DateLiteral((String) element, Type.DATETIME)).getLongValue();
+            Type type;
+            switch (subExpr.getChild(1).getType().getPrimitiveType()) {
+                case DATE:
+                case DATETIME:
+                    type = Type.DATETIME;
+                    break;
+                case DATEV2:
+                    type = Type.DATETIMEV2;
+                    break;
+                case DATETIMEV2:
+                    type = subExpr.getChild(1).getType();
+                    break;
+                default:
+                    throw new AnalysisException("Invalid date type: " + subExpr.getChild(1).getType());
+            }
+            Long leftVal = (new DateLiteral((String) element, type)).getLongValue();
             Long rightVal = ((DateLiteral) subExpr.getChild(1)).getLongValue();
             switch (binaryPredicate.getOp()) {
                 case EQ:
@@ -106,14 +120,14 @@ public class SchemaChangeProcDir implements ProcDirInterface {
 
         //where
         List<List<Comparable>> jobInfos;
-        if (filter == null || filter.size() == 0){
+        if (filter == null || filter.size() == 0) {
             jobInfos = schemaChangeJobInfos;
         } else {
-            jobInfos = Lists.newArrayList();        
+            jobInfos = Lists.newArrayList();
             for (List<Comparable> infoStr : schemaChangeJobInfos) {
                 if (infoStr.size() != TITLE_NAMES.size()) {
                     LOG.warn("SchemaChangeJobInfos.size() " + schemaChangeJobInfos.size()
-                        + " not equal TITLE_NAMES.size() " + TITLE_NAMES.size());
+                            + " not equal TITLE_NAMES.size() " + TITLE_NAMES.size());
                     continue;
                 }
                 boolean isNeed = true;
@@ -144,7 +158,7 @@ public class SchemaChangeProcDir implements ProcDirInterface {
             if (endIndex > jobInfos.size()) {
                 endIndex = jobInfos.size();
             }
-            jobInfos = jobInfos.subList(beginIndex,endIndex);
+            jobInfos = jobInfos.subList(beginIndex, endIndex);
         }
 
         BaseProcResult result = new BaseProcResult();

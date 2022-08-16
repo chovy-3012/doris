@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/util/hash-util.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_COMMON_UTIL_HASH_UTIL_HPP
-#define DORIS_BE_SRC_COMMON_UTIL_HASH_UTIL_HPP
+#pragma once
 
 #include "common/compiler_util.h"
 #include "common/logging.h"
@@ -27,6 +29,8 @@
 // the code that is built and the runtime checks to control what code is run.
 #ifdef __SSE4_2__
 #include <nmmintrin.h>
+#elif __aarch64__
+#include <sse2neon.h>
 #endif
 #include <zlib.h>
 
@@ -42,7 +46,7 @@ public:
     static uint32_t zlib_crc_hash(const void* data, int32_t bytes, uint32_t hash) {
         return crc32(hash, (const unsigned char*)data, bytes);
     }
-#ifdef __SSE4_2__
+#if defined(__SSE4_2__) || defined(__aarch64__)
     // Compute the Crc32 hash for data using SSE4 instructions.  The input hash parameter is
     // the current hash/seed value.
     // This should only be called if SSE is supported.
@@ -345,7 +349,7 @@ public:
 #endif
     }
     // hash_combine is the same with boost hash_combine,
-    // except replace boost::hash with std::hash 
+    // except replace boost::hash with std::hash
     template <class T>
     static inline void hash_combine(std::size_t& seed, const T& v) {
         std::hash<T> hasher;
@@ -376,7 +380,7 @@ struct hash<doris::TNetworkAddress> {
     }
 };
 
-#if !defined(IR_COMPILE) && __GNUC__ < 6 && !defined(__clang__)
+#if __GNUC__ < 6 && !defined(__clang__)
 // Cause this is builtin function
 template <>
 struct hash<__int128> {
@@ -398,5 +402,3 @@ struct hash<std::pair<doris::TUniqueId, int64_t>> {
 };
 
 } // namespace std
-
-#endif

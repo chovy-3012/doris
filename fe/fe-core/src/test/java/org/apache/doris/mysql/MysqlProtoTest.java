@@ -17,21 +17,22 @@
 
 package org.apache.doris.mysql;
 
-import mockit.Delegate;
-import mockit.Expectations;
-import mockit.Mocked;
 import org.apache.doris.analysis.UserIdentity;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.cluster.ClusterNamespace;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.LdapConfig;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.ldap.LdapAuthenticate;
 import org.apache.doris.ldap.LdapClient;
 import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 
+import mockit.Delegate;
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -51,7 +52,9 @@ public class MysqlProtoTest {
     @Mocked
     private MysqlPassword password;
     @Mocked
-    private Catalog catalog;
+    private Env env;
+    @Mocked
+    private InternalCatalog catalog;
     @Mocked
     private PaloAuth auth;
     @Mocked
@@ -74,36 +77,40 @@ public class MysqlProtoTest {
                 auth.checkPassword(anyString, anyString, (byte[]) any, (byte[]) any, (List<UserIdentity>) any);
                 minTimes = 0;
                 result = new Delegate() {
-                    boolean fakeCheckPassword(String remoteUser, String remoteHost, byte[] remotePasswd, byte[] randomString,
-                                              List<UserIdentity> currentUser) {
+                    boolean fakeCheckPassword(String remoteUser, String remoteHost, byte[] remotePasswd,
+                            byte[] randomString, List<UserIdentity> currentUser) {
                         UserIdentity userIdentity = new UserIdentity("default_cluster:user", "192.168.1.1");
                         currentUser.add(userIdentity);
                         return true;
                     }
                 };
 
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
+
                 catalog.getDbNullable(anyString);
                 minTimes = 0;
                 result = new Database();
 
-                catalog.getAuth();
+                env.getAuth();
                 minTimes = 0;
                 result = auth;
 
-                catalog.changeDb((ConnectContext) any, anyString);
+                env.changeDb((ConnectContext) any, anyString);
                 minTimes = 0;
             }
         };
 
-        new Expectations(catalog) {
+        new Expectations(env) {
             {
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
             }
         };
 
@@ -225,7 +232,7 @@ public class MysqlProtoTest {
         mockPassword(true);
         mockAccess();
         ConnectContext context = new ConnectContext(null);
-        context.setCatalog(catalog);
+        context.setEnv(env);
         context.setThreadLocalInfo();
         Assert.assertTrue(MysqlProto.negotiate(context));
     }
@@ -266,7 +273,7 @@ public class MysqlProtoTest {
         mockMysqlClearTextPacket(PASSWORD_CLEAR_TEXT);
         mockLdap("user", true);
         ConnectContext context = new ConnectContext(null);
-        context.setCatalog(catalog);
+        context.setEnv(env);
         context.setThreadLocalInfo();
         Assert.assertTrue(MysqlProto.negotiate(context));
     }
@@ -279,7 +286,7 @@ public class MysqlProtoTest {
         mockMysqlClearTextPacket("654321");
         mockLdap("user", true);
         ConnectContext context = new ConnectContext(null);
-        context.setCatalog(catalog);
+        context.setEnv(env);
         context.setThreadLocalInfo();
         Assert.assertFalse(MysqlProto.negotiate(context));
     }
@@ -292,7 +299,7 @@ public class MysqlProtoTest {
         mockLdap("root", false);
         mockMysqlClearTextPacket("654321");
         ConnectContext context = new ConnectContext(null);
-        context.setCatalog(catalog);
+        context.setEnv(env);
         context.setThreadLocalInfo();
         Assert.assertTrue(MysqlProto.negotiate(context));
     }

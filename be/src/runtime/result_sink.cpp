@@ -22,12 +22,14 @@
 #include "runtime/buffer_control_block.h"
 #include "runtime/exec_env.h"
 #include "runtime/file_result_writer.h"
-#include "runtime/mem_tracker.h"
+#include "runtime/memory/mem_tracker.h"
 #include "runtime/mysql_result_writer.h"
 #include "runtime/result_buffer_mgr.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "util/uid_util.h"
+#include "vec/exprs/vexpr.h"
 
 namespace doris {
 
@@ -40,11 +42,6 @@ ResultSink::ResultSink(const RowDescriptor& row_desc, const std::vector<TExpr>& 
         _sink_type = sink.type;
     }
 
-    if (_sink_type == TResultSinkType::FILE) {
-        CHECK(sink.__isset.file_options);
-        _file_opts.reset(new ResultFileOptions(sink.file_options));
-    }
-
     _name = "ResultSink";
 }
 
@@ -54,7 +51,7 @@ Status ResultSink::prepare_exprs(RuntimeState* state) {
     // From the thrift expressions create the real exprs.
     RETURN_IF_ERROR(Expr::create_expr_trees(state->obj_pool(), _t_output_expr, &_output_expr_ctxs));
     // Prepare the exprs to run.
-    RETURN_IF_ERROR(Expr::prepare(_output_expr_ctxs, state, _row_desc, _expr_mem_tracker));
+    RETURN_IF_ERROR(Expr::prepare(_output_expr_ctxs, state, _row_desc));
     return Status::OK();
 }
 
@@ -75,14 +72,8 @@ Status ResultSink::prepare(RuntimeState* state) {
     // create writer based on sink type
     switch (_sink_type) {
     case TResultSinkType::MYSQL_PROTOCAL:
-        _writer.reset(new (std::nothrow)
-                              MysqlResultWriter(_sender.get(), _output_expr_ctxs, _profile));
-        break;
-    // deprecated
-    case TResultSinkType::FILE:
-        CHECK(_file_opts.get() != nullptr);
-        _writer.reset(new (std::nothrow) FileResultWriter(_file_opts.get(), _output_expr_ctxs,
-                                                          _profile, _sender.get()));
+        _writer.reset(new (std::nothrow) MysqlResultWriter(
+                _sender.get(), _output_expr_ctxs, _profile, state->return_object_data_as_binary()));
         break;
     default:
         return Status::InternalError("Unknown result sink type");
@@ -97,6 +88,9 @@ Status ResultSink::open(RuntimeState* state) {
 }
 
 Status ResultSink::send(RuntimeState* state, RowBatch* batch) {
+    // The memory consumption in the process of sending the results is not check query memory limit.
+    // Avoid the query being cancelled when the memory limit is reached after the query result comes out.
+    STOP_CHECK_THREAD_MEM_TRACKER_LIMIT();
     return _writer->append_row_batch(batch);
 }
 
@@ -117,7 +111,7 @@ Status ResultSink::close(RuntimeState* state, Status exec_status) {
 
     // close sender, this is normal path end
     if (_sender) {
-        _sender->update_num_written_rows(_writer->get_written_rows());
+        _sender->update_num_written_rows(_writer == nullptr ? 0 : _writer->get_written_rows());
         _sender->update_max_peak_memory_bytes();
         _sender->close(final_status);
     }
@@ -127,8 +121,7 @@ Status ResultSink::close(RuntimeState* state, Status exec_status) {
 
     Expr::close(_output_expr_ctxs, state);
 
-    _closed = true;
-    return Status::OK();
+    return DataSink::close(state, exec_status);
 }
 
 void ResultSink::set_query_statistics(std::shared_ptr<QueryStatistics> statistics) {

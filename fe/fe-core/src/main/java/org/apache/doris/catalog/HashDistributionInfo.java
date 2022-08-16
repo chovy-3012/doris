@@ -73,6 +73,7 @@ public class HashDistributionInfo extends DistributionInfo {
         }
         out.writeInt(bucketNum);
     }
+
     public void readFields(DataInput in) throws IOException {
         super.readFields(in);
         int columnCount = in.readInt();
@@ -142,8 +143,12 @@ public class HashDistributionInfo extends DistributionInfo {
         }
         builder.append("]; ");
 
-        builder.append("bucket num: ").append(bucketNum).append("; ");;
+        builder.append("bucket num: ").append(bucketNum).append("; ");
 
         return builder.toString();
+    }
+
+    public RandomDistributionInfo toRandomDistributionInfo() {
+        return new RandomDistributionInfo(bucketNum);
     }
 }

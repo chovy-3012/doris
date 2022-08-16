@@ -30,8 +30,7 @@ namespace doris {
 
 class ExecEnv;
 
-template <typename T>
-class PInternalServiceImpl : public T {
+class PInternalServiceImpl : public PBackendService {
 public:
     PInternalServiceImpl(ExecEnv* exec_env);
     virtual ~PInternalServiceImpl();
@@ -41,10 +40,25 @@ public:
                        ::doris::PTransmitDataResult* response,
                        ::google::protobuf::Closure* done) override;
 
+    void transmit_data_by_http(::google::protobuf::RpcController* controller,
+                               const ::doris::PEmptyRequest* request,
+                               ::doris::PTransmitDataResult* response,
+                               ::google::protobuf::Closure* done) override;
+
     void exec_plan_fragment(google::protobuf::RpcController* controller,
                             const PExecPlanFragmentRequest* request,
                             PExecPlanFragmentResult* result,
                             google::protobuf::Closure* done) override;
+
+    void exec_plan_fragment_prepare(google::protobuf::RpcController* controller,
+                                    const PExecPlanFragmentRequest* request,
+                                    PExecPlanFragmentResult* result,
+                                    google::protobuf::Closure* done) override;
+
+    void exec_plan_fragment_start(google::protobuf::RpcController* controller,
+                                  const PExecPlanFragmentStartRequest* request,
+                                  PExecPlanFragmentResult* result,
+                                  google::protobuf::Closure* done) override;
 
     void cancel_plan_fragment(google::protobuf::RpcController* controller,
                               const PCancelPlanFragmentRequest* request,
@@ -63,6 +77,21 @@ public:
                                  const PTabletWriterAddBatchRequest* request,
                                  PTabletWriterAddBatchResult* response,
                                  google::protobuf::Closure* done) override;
+
+    void tablet_writer_add_batch_by_http(google::protobuf::RpcController* controller,
+                                         const ::doris::PEmptyRequest* request,
+                                         PTabletWriterAddBatchResult* response,
+                                         google::protobuf::Closure* done) override;
+
+    void tablet_writer_add_block(google::protobuf::RpcController* controller,
+                                 const PTabletWriterAddBlockRequest* request,
+                                 PTabletWriterAddBlockResult* response,
+                                 google::protobuf::Closure* done) override;
+
+    void tablet_writer_add_block_by_http(google::protobuf::RpcController* controller,
+                                         const ::doris::PEmptyRequest* request,
+                                         PTabletWriterAddBlockResult* response,
+                                         google::protobuf::Closure* done) override;
 
     void tablet_writer_cancel(google::protobuf::RpcController* controller,
                               const PTabletWriterCancelRequest* request,
@@ -95,13 +124,17 @@ public:
                         const ::doris::PTransmitDataParams* request,
                         ::doris::PTransmitDataResult* response,
                         ::google::protobuf::Closure* done) override;
+    void transmit_block_by_http(::google::protobuf::RpcController* controller,
+                                const ::doris::PEmptyRequest* request,
+                                ::doris::PTransmitDataResult* response,
+                                ::google::protobuf::Closure* done) override;
 
     void send_data(google::protobuf::RpcController* controller, const PSendDataRequest* request,
-                   PSendDataResult* response, google::protobuf::Closure* done);
+                   PSendDataResult* response, google::protobuf::Closure* done) override;
     void commit(google::protobuf::RpcController* controller, const PCommitRequest* request,
-                PCommitResult* response, google::protobuf::Closure* done);
+                PCommitResult* response, google::protobuf::Closure* done) override;
     void rollback(google::protobuf::RpcController* controller, const PRollbackRequest* request,
-                  PRollbackResult* response, google::protobuf::Closure* done);
+                  PRollbackResult* response, google::protobuf::Closure* done) override;
     void fold_constant_expr(google::protobuf::RpcController* controller,
                             const PConstantExprRequest* request, PConstantExprResult* response,
                             google::protobuf::Closure* done) override;
@@ -115,15 +148,49 @@ public:
                            google::protobuf::Closure* done) override;
     void hand_shake(google::protobuf::RpcController* controller, const PHandShakeRequest* request,
                     PHandShakeResponse* response, google::protobuf::Closure* done) override;
+    void request_slave_tablet_pull_rowset(google::protobuf::RpcController* controller,
+                                          const PTabletWriteSlaveRequest* request,
+                                          PTabletWriteSlaveResult* response,
+                                          google::protobuf::Closure* done) override;
+    void response_slave_tablet_pull_rowset(google::protobuf::RpcController* controller,
+                                           const PTabletWriteSlaveDoneRequest* request,
+                                           PTabletWriteSlaveDoneResult* response,
+                                           google::protobuf::Closure* done) override;
 
 private:
-    Status _exec_plan_fragment(const std::string& s_request, bool compact);
+    Status _exec_plan_fragment(const std::string& s_request, PFragmentRequestVersion version,
+                               bool compact);
 
     Status _fold_constant_expr(const std::string& ser_request, PConstantExprResult* response);
+
+    void _transmit_data(::google::protobuf::RpcController* controller,
+                        const ::doris::PTransmitDataParams* request,
+                        ::doris::PTransmitDataResult* response, ::google::protobuf::Closure* done,
+                        const Status& extract_st);
+
+    void _transmit_block(::google::protobuf::RpcController* controller,
+                         const ::doris::PTransmitDataParams* request,
+                         ::doris::PTransmitDataResult* response, ::google::protobuf::Closure* done,
+                         const Status& extract_st);
+
+    void _tablet_writer_add_batch(google::protobuf::RpcController* controller,
+                                  const PTabletWriterAddBatchRequest* request,
+                                  PTabletWriterAddBatchResult* response,
+                                  google::protobuf::Closure* done);
+
+    void _tablet_writer_add_block(google::protobuf::RpcController* controller,
+                                  const PTabletWriterAddBlockRequest* request,
+                                  PTabletWriterAddBlockResult* response,
+                                  google::protobuf::Closure* done);
+
+    void _response_pull_slave_rowset(const std::string& remote_host, int64_t brpc_port,
+                                     int64_t txn_id, int64_t tablet_id, int64_t node_id,
+                                     bool is_succeed);
 
 private:
     ExecEnv* _exec_env;
     PriorityThreadPool _tablet_worker_pool;
+    PriorityThreadPool _slave_replica_worker_pool;
 };
 
 } // namespace doris

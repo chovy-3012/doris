@@ -23,7 +23,6 @@
 #include "gen_cpp/PlanNodes_types.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
-#include "util/debug_util.h"
 #include "util/runtime_profile.h"
 
 namespace doris {
@@ -34,6 +33,7 @@ CrossJoinNode::CrossJoinNode(ObjectPool* pool, const TPlanNode& tnode, const Des
 Status CrossJoinNode::prepare(RuntimeState* state) {
     DCHECK(_join_op == TJoinOp::CROSS_JOIN);
     RETURN_IF_ERROR(BlockingJoinNode::prepare(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     _build_batch_pool.reset(new ObjectPool());
     return Status::OK();
 }
@@ -54,17 +54,14 @@ Status CrossJoinNode::construct_build_side(RuntimeState* state) {
     RETURN_IF_ERROR(child(1)->open(state));
 
     while (true) {
-        RowBatch* batch = _build_batch_pool->add(
-                new RowBatch(child(1)->row_desc(), state->batch_size(), mem_tracker().get()));
+        RowBatch* batch =
+                _build_batch_pool->add(new RowBatch(child(1)->row_desc(), state->batch_size()));
 
         RETURN_IF_CANCELLED(state);
         // TODO(zhaochun):
         // RETURN_IF_ERROR(state->CheckQueryState());
         bool eos = false;
         RETURN_IF_ERROR(child(1)->get_next(state, batch, &eos));
-
-        // to prevent use too many memory
-        RETURN_IF_LIMIT_EXCEEDED(state, "Cross join, while getting next from the child 1.");
 
         SCOPED_TIMER(_build_timer);
         _build_batches.add_row_batch(batch);
@@ -84,12 +81,12 @@ void CrossJoinNode::init_get_next(TupleRow* first_left_row) {
 }
 
 Status CrossJoinNode::get_next(RuntimeState* state, RowBatch* output_batch, bool* eos) {
-    // RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::GETNEXT, state));
     RETURN_IF_CANCELLED(state);
     *eos = false;
     // TOOD(zhaochun)
     // RETURN_IF_ERROR(state->check_query_state());
     SCOPED_TIMER(_runtime_profile->total_time_counter());
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
 
     if (reached_limit() || _eos) {
         *eos = true;

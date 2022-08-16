@@ -34,9 +34,9 @@ import org.apache.doris.analysis.ShowTableStmt;
 import org.apache.doris.analysis.ShowVariablesStmt;
 import org.apache.doris.analysis.ShowViewStmt;
 import org.apache.doris.analysis.TableName;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.OlapTable;
@@ -45,17 +45,22 @@ import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.RandomDistributionInfo;
 import org.apache.doris.catalog.SinglePartitionInfo;
 import org.apache.doris.catalog.Table;
-import org.apache.doris.catalog.Table.TableType;
+import org.apache.doris.catalog.TableIf.TableType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.PatternMatcher;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.jmockit.Deencapsulation;
+import org.apache.doris.datasource.CatalogMgr;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.mysql.MysqlCommand;
 import org.apache.doris.mysql.privilege.PaloAuth;
 import org.apache.doris.system.SystemInfoService;
 import org.apache.doris.thrift.TStorageType;
-import com.google.common.collect.Lists;
 
+import com.google.common.collect.Lists;
+import mockit.Expectations;
+import mockit.Mock;
+import mockit.MockUp;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Ignore;
@@ -66,13 +71,13 @@ import org.junit.rules.ExpectedException;
 import java.io.IOException;
 import java.net.URL;
 import java.util.List;
-import mockit.Expectations;
-import mockit.Mock;
-import mockit.MockUp;
+import java.util.function.Function;
 
 public class ShowExecutorTest {
+    private static final String internalCtl = InternalCatalog.INTERNAL_CATALOG_NAME;
     private ConnectContext ctx;
-    private Catalog catalog;
+    private Env env;
+    private InternalCatalog catalog;
 
     @Rule
     public ExpectedException expectedEx = ExpectedException.none();
@@ -89,9 +94,6 @@ public class ShowExecutorTest {
         column2.setIsKey(true);
         // mock index 1
         MaterializedIndex index1 = new MaterializedIndex();
-
-        // mock index 2
-        MaterializedIndex index2 = new MaterializedIndex();
 
         // mock partition
         Partition partition = Deencapsulation.newInstance(Partition.class);
@@ -164,12 +166,12 @@ public class ShowExecutorTest {
                 result = table;
             }
         };
-        
+
         // mock auth
         PaloAuth auth = AccessTestUtil.fetchAdminAccess();
 
-        // mock catalog.
-        catalog = Deencapsulation.newInstance(Catalog.class);
+        // mock catalog
+        catalog = Deencapsulation.newInstance(InternalCatalog.class);
         new Expectations(catalog) {
             {
                 catalog.getDbNullable("testCluster:testDb");
@@ -187,24 +189,59 @@ public class ShowExecutorTest {
                 catalog.getClusterDbNames("");
                 minTimes = 0;
                 result = Lists.newArrayList("");
+            }
+        };
 
-                catalog.getAuth();
+        CatalogMgr dsMgr = new CatalogMgr();
+        new Expectations(dsMgr) {
+            {
+                dsMgr.getCatalog((String) any);
+                minTimes = 0;
+                result = catalog;
+
+                dsMgr.getCatalogOrException((String) any, (Function) any);
+                minTimes = 0;
+                result = catalog;
+
+                dsMgr.getCatalogOrAnalysisException((String) any);
+                minTimes = 0;
+                result = catalog;
+            }
+        };
+
+        // mock catalog.
+        env = Deencapsulation.newInstance(Env.class);
+        new Expectations(env) {
+            {
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
+
+                env.getCurrentCatalog();
+                minTimes = 0;
+                result = catalog;
+
+                env.getAuth();
                 minTimes = 0;
                 result = auth;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
-                Catalog.getDdlStmt((Table) any, (List) any, (List) any, (List) any, anyBoolean, anyBoolean);
+                Env.getDdlStmt((Table) any, (List) any, (List) any, (List) any, anyBoolean, anyBoolean);
                 minTimes = 0;
 
-                Catalog.getDdlStmt((Table) any, (List) any, null, null, anyBoolean, anyBoolean);
+                Env.getDdlStmt((Table) any, (List) any, null, null, anyBoolean, anyBoolean);
                 minTimes = 0;
+
+                env.getCatalogMgr();
+                minTimes = 0;
+                result = dsMgr;
             }
         };
 
@@ -212,14 +249,15 @@ public class ShowExecutorTest {
         ConnectScheduler scheduler = new ConnectScheduler(10);
         new Expectations(scheduler) {
             {
-                scheduler.listConnection("testCluster:testUser");
+                scheduler.listConnection("testCluster:testUser", anyBoolean);
                 minTimes = 0;
-                result = Lists.newArrayList(ctx.toThreadInfo());
+                result = Lists.newArrayList(ctx.toThreadInfo(false));
             }
         };
 
+        ctx.changeDefaultCatalog(InternalCatalog.INTERNAL_CATALOG_NAME);
         ctx.setConnectScheduler(scheduler);
-        ctx.setCatalog(AccessTestUtil.fetchAdminCatalog());
+        ctx.setEnv(AccessTestUtil.fetchAdminCatalog());
         ctx.setQualifiedUser("testCluster:testUser");
         ctx.setCluster("testCluster");
 
@@ -252,11 +290,21 @@ public class ShowExecutorTest {
     }
 
     @Test
+    public void testShowDbFromCatalog() throws AnalysisException {
+        ShowDbStmt stmt = new ShowDbStmt(null, null, InternalCatalog.INTERNAL_CATALOG_NAME);
+        ShowExecutor executor = new ShowExecutor(ctx, stmt);
+        ShowResultSet resultSet = executor.execute();
+
+        Assert.assertTrue(resultSet.next());
+        Assert.assertEquals("testDb", resultSet.getString(0));
+    }
+
+    @Test
     public void testShowDbPriv() throws AnalysisException {
         ShowDbStmt stmt = new ShowDbStmt(null);
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
-        ctx.setCatalog(AccessTestUtil.fetchBlockCatalog());
-        ShowResultSet resultSet = executor.execute();
+        ctx.setEnv(AccessTestUtil.fetchBlockCatalog());
+        executor.execute();
     }
 
     @Test
@@ -293,20 +341,21 @@ public class ShowExecutorTest {
     public void testDescribe() {
         SystemInfoService clusterInfo = AccessTestUtil.fetchSystemInfoService();
         Analyzer analyzer = AccessTestUtil.fetchAdminAnalyzer(false);
-        Catalog catalog = AccessTestUtil.fetchAdminCatalog();
+        Env env = AccessTestUtil.fetchAdminCatalog();
 
-        new MockUp<Catalog>() {
+        new MockUp<Env>() {
             @Mock
-            Catalog getCurrentCatalog() {
-                return catalog;
+            Env getCurrentEnv() {
+                return env;
             }
+
             @Mock
             SystemInfoService getCurrentSystemInfo() {
                 return clusterInfo;
             }
         };
 
-        DescribeStmt stmt = new DescribeStmt(new TableName("testCluster:testDb", "testTbl"), false);
+        DescribeStmt stmt = new DescribeStmt(new TableName(internalCtl, "testCluster:testDb", "testTbl"), false);
         try {
             stmt.analyze(analyzer);
         } catch (Exception e) {
@@ -379,7 +428,7 @@ public class ShowExecutorTest {
 
     @Test
     public void testShowCreateDb() throws AnalysisException {
-        ctx.setCatalog(catalog);
+        ctx.setEnv(env);
         ctx.setQualifiedUser("testCluster:testUser");
 
         ShowCreateDbStmt stmt = new ShowCreateDbStmt("testCluster:testDb");
@@ -394,28 +443,28 @@ public class ShowExecutorTest {
 
     @Test(expected = AnalysisException.class)
     public void testShowCreateNoDb() throws AnalysisException {
-        ctx.setCatalog(catalog);
+        ctx.setEnv(env);
         ctx.setQualifiedUser("testCluster:testUser");
 
         ShowCreateDbStmt stmt = new ShowCreateDbStmt("testCluster:emptyDb");
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
-        ShowResultSet resultSet = executor.execute();
+        executor.execute();
 
         Assert.fail("No exception throws.");
     }
 
     @Test(expected = AnalysisException.class)
     public void testShowCreateTableEmptyDb() throws AnalysisException {
-        ShowCreateTableStmt stmt = new ShowCreateTableStmt(new TableName("testCluster:emptyDb", "testTable"));
+        ShowCreateTableStmt stmt = new ShowCreateTableStmt(new TableName(internalCtl, "testCluster:emptyDb", "testTable"));
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
-        ShowResultSet resultSet = executor.execute();
+        executor.execute();
 
         Assert.fail("No Exception throws.");
     }
 
     @Test(expected = AnalysisException.class)
     public void testShowCreateTableEmptyTbl() throws AnalysisException {
-        ShowCreateTableStmt stmt = new ShowCreateTableStmt(new TableName("testCluster:testDb", "emptyTable"));
+        ShowCreateTableStmt stmt = new ShowCreateTableStmt(new TableName(internalCtl, "testCluster:testDb", "emptyTable"));
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
         ShowResultSet resultSet = executor.execute();
 
@@ -424,9 +473,9 @@ public class ShowExecutorTest {
 
     @Test
     public void testShowColumn() throws AnalysisException {
-        ctx.setCatalog(catalog);
+        ctx.setEnv(env);
         ctx.setQualifiedUser("testCluster:testUser");
-        ShowColumnStmt stmt = new ShowColumnStmt(new TableName("testCluster:testDb", "testTbl"), null, null, false);
+        ShowColumnStmt stmt = new ShowColumnStmt(new TableName(internalCtl, "testCluster:testDb", "testTbl"), null, null, false);
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(false));
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
         ShowResultSet resultSet = executor.execute();
@@ -439,7 +488,7 @@ public class ShowExecutorTest {
         Assert.assertFalse(resultSet.next());
 
         // verbose
-        stmt = new ShowColumnStmt(new TableName("testCluster:testDb", "testTbl"), null, null, true);
+        stmt = new ShowColumnStmt(new TableName(internalCtl, "testCluster:testDb", "testTbl"), null, null, true);
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(false));
         executor = new ShowExecutor(ctx, stmt);
         resultSet = executor.execute();
@@ -453,7 +502,7 @@ public class ShowExecutorTest {
         Assert.assertFalse(resultSet.next());
 
         // pattern
-        stmt = new ShowColumnStmt(new TableName("testCluster:testDb", "testTable"), null, "%1", true);
+        stmt = new ShowColumnStmt(new TableName(internalCtl, "testCluster:testDb", "testTable"), null, "%1", true);
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(false));
         executor = new ShowExecutor(ctx, stmt);
         resultSet = executor.execute();
@@ -466,9 +515,9 @@ public class ShowExecutorTest {
 
     @Test
     public void testShowView() throws UserException {
-        ctx.setCatalog(catalog);
+        ctx.setEnv(env);
         ctx.setQualifiedUser("testCluster:testUser");
-        ShowViewStmt stmt = new ShowViewStmt("", new TableName("testDb", "testTbl"));
+        ShowViewStmt stmt = new ShowViewStmt("", new TableName(internalCtl, "testDb", "testTbl"));
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(true));
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
         ShowResultSet resultSet = executor.execute();
@@ -478,7 +527,7 @@ public class ShowExecutorTest {
 
     @Test
     public void testShowColumnFromUnknownTable() throws AnalysisException {
-        ShowColumnStmt stmt = new ShowColumnStmt(new TableName("testCluster:emptyDb", "testTable"), null, null, false);
+        ShowColumnStmt stmt = new ShowColumnStmt(new TableName(internalCtl, "testCluster:emptyDb", "testTable"), null, null, false);
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(false));
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
 
@@ -487,7 +536,7 @@ public class ShowExecutorTest {
         executor.execute();
 
         // empty table
-        stmt = new ShowColumnStmt(new TableName("testCluster:testDb", "emptyTable"), null, null, true);
+        stmt = new ShowColumnStmt(new TableName(internalCtl, "testCluster:testDb", "emptyTable"), null, null, true);
         stmt.analyze(AccessTestUtil.fetchAdminAnalyzer(false));
         executor = new ShowExecutor(ctx, stmt);
 
@@ -596,11 +645,14 @@ public class ShowExecutorTest {
         ShowSqlBlockRuleStmt stmt = new ShowSqlBlockRuleStmt("test_rule");
         ShowExecutor executor = new ShowExecutor(ctx, stmt);
         ShowResultSet resultSet = executor.execute();
-        Assert.assertEquals(5, resultSet.getMetaData().getColumnCount());
+        Assert.assertEquals(8, resultSet.getMetaData().getColumnCount());
         Assert.assertEquals("Name", resultSet.getMetaData().getColumn(0).getName());
         Assert.assertEquals("Sql", resultSet.getMetaData().getColumn(1).getName());
         Assert.assertEquals("SqlHash", resultSet.getMetaData().getColumn(2).getName());
-        Assert.assertEquals("Global", resultSet.getMetaData().getColumn(3).getName());
-        Assert.assertEquals("Enable", resultSet.getMetaData().getColumn(4).getName());
+        Assert.assertEquals("PartitionNum", resultSet.getMetaData().getColumn(3).getName());
+        Assert.assertEquals("TabletNum", resultSet.getMetaData().getColumn(4).getName());
+        Assert.assertEquals("Cardinality", resultSet.getMetaData().getColumn(5).getName());
+        Assert.assertEquals("Global", resultSet.getMetaData().getColumn(6).getName());
+        Assert.assertEquals("Enable", resultSet.getMetaData().getColumn(7).getName());
     }
 }

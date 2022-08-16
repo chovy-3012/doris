@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/SortNode.java
+// and modified by Doris
 
 package org.apache.doris.planner;
 
@@ -24,57 +27,53 @@ import org.apache.doris.analysis.SlotDescriptor;
 import org.apache.doris.analysis.SlotId;
 import org.apache.doris.analysis.SlotRef;
 import org.apache.doris.analysis.SortInfo;
+import org.apache.doris.analysis.TupleDescriptor;
+import org.apache.doris.common.NotImplementedException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.statistics.StatisticalType;
+import org.apache.doris.statistics.StatsRecursiveDerive;
 import org.apache.doris.thrift.TExplainLevel;
 import org.apache.doris.thrift.TPlanNode;
 import org.apache.doris.thrift.TPlanNodeType;
 import org.apache.doris.thrift.TSortInfo;
 import org.apache.doris.thrift.TSortNode;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import com.google.common.base.Joiner;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Sorting.
+ * Attention, in some corner case, we need enable projection planner to promise the correctness of the Plan.
+ * Please refer to this regression test:regression-test/suites/query/aggregate/aggregate_count1.groovy.
  */
 public class SortNode extends PlanNode {
-    private final static Logger LOG = LogManager.getLogger(SortNode.class);
+    private static final Logger LOG = LogManager.getLogger(SortNode.class);
+    // info_.sortTupleSlotExprs_ substituted with the outputSmap_ for materialized slots in init().
+    List<Expr> resolvedTupleExprs;
     private final SortInfo info;
     private final boolean  useTopN;
-    private final boolean  isDefaultLimit;
 
+    private boolean  isDefaultLimit;
     private long offset;
     // if true, the output of this node feeds an AnalyticNode
     private boolean isAnalyticSort;
-
-    // info_.sortTupleSlotExprs_ substituted with the outputSmap_ for materialized slots in init().
-    List<Expr> resolvedTupleExprs;
-
-    public void setIsAnalyticSort(boolean v) {
-        isAnalyticSort = v;
-    }
-    public boolean isAnalyticSort() {
-        return isAnalyticSort;
-    }
     private DataPartition inputPartition;
-    public void setInputPartition(DataPartition inputPartition) {
-        this.inputPartition = inputPartition;
-    }
-    public DataPartition getInputPartition() {
-        return inputPartition;
-    }
 
+    /**
+     * Constructor.
+     */
     public SortNode(PlanNodeId id, PlanNode input, SortInfo info, boolean useTopN,
-                    boolean isDefaultLimit, long offset) {
-        super(id, useTopN ? "TOP-N" : "SORT");
+            boolean isDefaultLimit, long offset) {
+        super(id, useTopN ? "TOP-N" : "SORT", StatisticalType.SORT_NODE);
         this.info = info;
         this.useTopN = useTopN;
         this.isDefaultLimit = isDefaultLimit;
@@ -86,16 +85,44 @@ public class SortNode extends PlanNode {
         Preconditions.checkArgument(info.getOrderingExprs().size() == info.getIsAscOrder().size());
     }
 
+    public SortNode(PlanNodeId id, PlanNode input, SortInfo info, boolean useTopN) {
+        this(id, input, info, useTopN, true, 0);
+    }
+
     /**
-     * Clone 'inputSortNode' for distributed Top-N
+     * Clone 'inputSortNode' for distributed Top-N.
      */
     public SortNode(PlanNodeId id, SortNode inputSortNode, PlanNode child) {
-        super(id, inputSortNode, inputSortNode.useTopN ? "TOP-N" : "SORT");
+        super(id, inputSortNode, inputSortNode.useTopN ? "TOP-N" : "SORT", StatisticalType.SORT_NODE);
         this.info = inputSortNode.info;
         this.useTopN = inputSortNode.useTopN;
         this.isDefaultLimit = inputSortNode.isDefaultLimit;
         this.children.add(child);
         this.offset = inputSortNode.offset;
+    }
+
+    /**
+     * set isDefaultLimit when translate PhysicalLimit
+     * @param defaultLimit
+     */
+    public void setDefaultLimit(boolean defaultLimit) {
+        isDefaultLimit = defaultLimit;
+    }
+
+    public void setIsAnalyticSort(boolean v) {
+        isAnalyticSort = v;
+    }
+
+    public boolean isAnalyticSort() {
+        return isAnalyticSort;
+    }
+
+    public DataPartition getInputPartition() {
+        return inputPartition;
+    }
+
+    public void setInputPartition(DataPartition inputPartition) {
+        this.inputPartition = inputPartition;
     }
 
     public long getOffset() {
@@ -111,75 +138,8 @@ public class SortNode extends PlanNode {
     }
 
     @Override
-    public void getMaterializedIds(Analyzer analyzer, List<SlotId> ids) {
-        super.getMaterializedIds(analyzer, ids);
-        Expr.getIds(info.getOrderingExprs(), null, ids);
-    }
-
-    @Override
     public void setCompactData(boolean on) {
         this.compactData = on;
-    }
-
-    @Override
-    protected void computeStats(Analyzer analyzer) {
-        super.computeStats(analyzer);
-        if (!analyzer.safeIsEnableJoinReorderBasedCost()) {
-            return;
-        }
-        cardinality = getChild(0).cardinality;
-        applyConjunctsSelectivity();
-        capCardinalityAtLimit();
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("stats Sort: cardinality=" + cardinality);
-        }
-    }
-
-    @Override
-    protected void computeOldCardinality() {
-        cardinality = getChild(0).cardinality;
-        if (hasLimit()) {
-            if (cardinality == -1) {
-                cardinality = limit;
-            } else {
-                cardinality = Math.min(cardinality, limit);
-            }
-        }
-        LOG.debug("stats Sort: cardinality=" + Long.toString(cardinality));
-    }
-
-    @Override
-    protected String debugString() {
-        List<String> strings = Lists.newArrayList();
-        for (Boolean isAsc : info.getIsAscOrder()) {
-            strings.add(isAsc ? "a" : "d");
-        }
-        return MoreObjects.toStringHelper(this).add("ordering_exprs",
-          Expr.debugString(info.getOrderingExprs())).add("is_asc",
-          "[" + Joiner.on(" ").join(strings) + "]").addValue(super.debugString()).toString();
-    }
-
-    @Override
-    protected void toThrift(TPlanNode msg) {
-        msg.node_type = TPlanNodeType.SORT_NODE;
-        TSortInfo sortInfo = new TSortInfo(
-                Expr.treesToThrift(info.getOrderingExprs()),
-                info.getIsAscOrder(),
-                info.getNullsFirst());
-        Preconditions.checkState(tupleIds.size() == 1, "Incorrect size for tupleIds in SortNode");
-        sortInfo.setSortTupleSlotExprs(Expr.treesToThrift(resolvedTupleExprs));
-        TSortNode sortNode = new TSortNode(sortInfo, useTopN);
-
-        msg.sort_node = sortNode;
-        msg.sort_node.setOffset(offset);
-
-        // TODO(lingbin): remove blew codes, because it is duplicate with TSortInfo
-        msg.sort_node.setOrderingExprs(Expr.treesToThrift(info.getOrderingExprs()));
-        msg.sort_node.setIsAscOrder(info.getIsAscOrder());
-        msg.sort_node.setNullsFirst(info.getNullsFirst());
-        if (info.getSortTupleSlotExprs() != null) {
-            msg.sort_node.setSortTupleSlotExprs(Expr.treesToThrift(info.getSortTupleSlotExprs()));
-        }
     }
 
     @Override
@@ -208,8 +168,31 @@ public class SortNode extends PlanNode {
     }
 
     @Override
-    public int getNumInstances() {
-        return children.get(0).getNumInstances();
+    protected void computeStats(Analyzer analyzer) throws UserException {
+        super.computeStats(analyzer);
+        if (!analyzer.safeIsEnableJoinReorderBasedCost()) {
+            return;
+        }
+
+        StatsRecursiveDerive.getStatsRecursiveDerive().statsRecursiveDerive(this);
+        cardinality = statsDeriveResult.getRowCount();
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("stats Sort: cardinality=" + cardinality);
+        }
+    }
+
+    @Override
+    protected void computeOldCardinality() {
+        cardinality = getChild(0).cardinality;
+        if (hasLimit()) {
+            if (cardinality == -1) {
+                cardinality = limit;
+            } else {
+                cardinality = Math.min(cardinality, limit);
+            }
+        }
+        LOG.debug("stats Sort: cardinality=" + Long.toString(cardinality));
     }
 
     public void init(Analyzer analyzer) throws UserException {
@@ -230,9 +213,6 @@ public class SortNode extends PlanNode {
         outputSmap = new ExprSubstitutionMap();
 
         for (int i = 0; i < slotExprs.size(); ++i) {
-            if (!sortTupleSlots.get(i).isMaterialized()) {
-                continue;
-            }
             resolvedTupleExprs.add(slotExprs.get(i));
             outputSmap.put(slotExprs.get(i), new SlotRef(sortTupleSlots.get(i)));
         }
@@ -242,8 +222,8 @@ public class SortNode extends PlanNode {
 
         // Remap the ordering exprs to the tuple materialized by this sort node. The mapping
         // is a composition of the childSmap and the outputSmap_ because the child node may
-        // have also remapped its input (e.g., as in a a series of (sort->analytic)* nodes).
-        // Parent nodes have have to do the same so set the composition as the outputSmap_.
+        // have also remapped its input (e.g., as in a series of (sort->analytic)* nodes).
+        // Parent nodes have to do the same so set the composition as the outputSmap_.
         outputSmap = ExprSubstitutionMap.compose(childSmap, outputSmap, analyzer);
         info.substituteOrderingExprs(outputSmap, analyzer);
 
@@ -252,5 +232,72 @@ public class SortNode extends PlanNode {
                     + outputSmap.debugString());
             LOG.debug("sort input exprs: " + Expr.debugString(resolvedTupleExprs));
         }
+    }
+
+    @Override
+    public void getMaterializedIds(Analyzer analyzer, List<SlotId> ids) {
+        super.getMaterializedIds(analyzer, ids);
+        Expr.getIds(info.getOrderingExprs(), null, ids);
+    }
+
+    @Override
+    protected void toThrift(TPlanNode msg) {
+        msg.node_type = TPlanNodeType.SORT_NODE;
+
+        TSortInfo sortInfo = info.toThrift();
+        Preconditions.checkState(tupleIds.size() == 1, "Incorrect size for tupleIds in SortNode");
+        if (resolvedTupleExprs != null) {
+            sortInfo.setSortTupleSlotExprs(Expr.treesToThrift(resolvedTupleExprs));
+        }
+        TSortNode sortNode = new TSortNode(sortInfo, useTopN);
+
+        msg.sort_node = sortNode;
+        msg.sort_node.setOffset(offset);
+    }
+
+    @Override
+    protected String debugString() {
+        List<String> strings = Lists.newArrayList();
+        for (Boolean isAsc : info.getIsAscOrder()) {
+            strings.add(isAsc ? "a" : "d");
+        }
+        return MoreObjects.toStringHelper(this).add("ordering_exprs",
+                Expr.debugString(info.getOrderingExprs())).add("is_asc",
+                "[" + Joiner.on(" ").join(strings) + "]").addValue(super.debugString()).toString();
+    }
+
+    @Override
+    public int getNumInstances() {
+        return children.get(0).getNumInstances();
+    }
+
+    @Override
+    public Set<SlotId> computeInputSlotIds(Analyzer analyzer) throws NotImplementedException {
+        List<SlotDescriptor> slotDescriptorList = this.info.getSortTupleDescriptor().getSlots();
+        for (int i = 0; i < slotDescriptorList.size(); i++) {
+            if (!slotDescriptorList.get(i).isMaterialized()) {
+                resolvedTupleExprs.remove(i);
+            }
+        }
+        List<SlotId> result = Lists.newArrayList();
+        Expr.getIds(resolvedTupleExprs, null, result);
+        return new HashSet<>(result);
+    }
+
+    /**
+     * Supplement the information needed by be for the sort node.
+     * TODO: currently we only process slotref, so when order key is a + 1, we will failed.
+     */
+    public void finalizeForNereids(TupleDescriptor tupleDescriptor,
+            List<Expr> outputList, List<Expr> orderingExpr) {
+        resolvedTupleExprs = Lists.newArrayList(orderingExpr);
+        for (Expr output : outputList) {
+            if (!resolvedTupleExprs.contains(output)) {
+                resolvedTupleExprs.add(output);
+            }
+        }
+        info.setSortTupleDesc(tupleDescriptor);
+        info.setSortTupleSlotExprs(resolvedTupleExprs);
+
     }
 }

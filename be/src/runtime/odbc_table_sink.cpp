@@ -21,18 +21,14 @@
 
 #include "exprs/expr.h"
 #include "runtime/runtime_state.h"
-#include "runtime/mem_tracker.h"
-#include "util/runtime_profile.h"
 #include "util/debug_util.h"
+#include "util/runtime_profile.h"
 
 namespace doris {
 
 OdbcTableSink::OdbcTableSink(ObjectPool* pool, const RowDescriptor& row_desc,
-                               const std::vector<TExpr>& t_exprs)
-        : _pool(pool),
-          _row_desc(row_desc),
-          _t_output_expr(t_exprs),
-          _mem_tracker(MemTracker::CreateTracker(-1, "OdbcTableSink")) {
+                             const std::vector<TExpr>& t_exprs)
+        : _pool(pool), _row_desc(row_desc), _t_output_expr(t_exprs) {
     _name = "OOBC_TABLE_SINK";
 }
 
@@ -56,9 +52,9 @@ Status OdbcTableSink::init(const TDataSink& t_sink) {
 Status OdbcTableSink::prepare(RuntimeState* state) {
     RETURN_IF_ERROR(DataSink::prepare(state));
     // Prepare the exprs to run.
-    RETURN_IF_ERROR(Expr::prepare(_output_expr_ctxs, state, _row_desc, _mem_tracker));
+    RETURN_IF_ERROR(Expr::prepare(_output_expr_ctxs, state, _row_desc));
     std::stringstream title;
-    title << "ODBC_TABLE_SINK (frag_id=" << state->fragment_instance_id() << ")";
+    title << _name << " (frag_id=" << state->fragment_instance_id() << ")";
     // create profile
     _profile = state->obj_pool()->add(new RuntimeProfile(title.str()));
     return Status::OK();
@@ -93,11 +89,14 @@ Status OdbcTableSink::send(RuntimeState* state, RowBatch* batch) {
 }
 
 Status OdbcTableSink::close(RuntimeState* state, Status exec_status) {
+    if (_closed) {
+        return Status::OK();
+    }
     Expr::close(_output_expr_ctxs, state);
     if (exec_status.ok() && _use_transaction) {
         RETURN_IF_ERROR(_writer->finish_trans());
     }
-    return Status::OK();
+    return DataSink::close(state, exec_status);
 }
 
-}
+} // namespace doris

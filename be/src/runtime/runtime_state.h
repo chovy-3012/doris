@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/runtime-state.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H
-#define DORIS_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H
+#pragma once
 
 #include <atomic>
 #include <fstream>
@@ -36,6 +38,7 @@
 #include "runtime/thread_resource_mgr.h"
 #include "util/logging.h"
 #include "util/runtime_profile.h"
+#include "util/telemetry/telemetry.h"
 
 namespace doris {
 
@@ -73,6 +76,9 @@ public:
     // RuntimeState for executing expr in fe-support.
     RuntimeState(const TQueryGlobals& query_globals);
 
+    // for job task only
+    RuntimeState();
+
     // Empty d'tor to avoid issues with unique_ptr.
     ~RuntimeState();
 
@@ -84,7 +90,6 @@ public:
     // The instance tracker is tied to our profile.
     // Specific parts of the fragment (i.e. exec nodes, sinks, data stream senders, etc)
     // will add a fourth level when they are initialized.
-    // This function also initializes a user function mem tracker (in the fourth level).
     Status init_mem_trackers(const TUniqueId& query_id);
 
     // for ut only
@@ -104,7 +109,7 @@ public:
     std::shared_ptr<ObjectPool> obj_pool_ptr() const { return _obj_pool; }
 
     const DescriptorTbl& desc_tbl() const { return *_desc_tbl; }
-    void set_desc_tbl(DescriptorTbl* desc_tbl) { _desc_tbl = desc_tbl; }
+    void set_desc_tbl(const DescriptorTbl* desc_tbl) { _desc_tbl = desc_tbl; }
     int batch_size() const { return _query_options.batch_size; }
     bool abort_on_error() const { return _query_options.abort_on_error; }
     bool abort_on_default_limit_exceeded() const {
@@ -113,6 +118,7 @@ public:
     int max_errors() const { return _query_options.max_errors; }
     int max_io_buffers() const { return _query_options.max_io_buffers; }
     int num_scanner_threads() const { return _query_options.num_scanner_threads; }
+    TQueryType::type query_type() const { return _query_options.query_type; }
     int64_t timestamp_ms() const { return _timestamp_ms; }
     const std::string& timezone() const { return _timezone; }
     const cctz::time_zone& timezone_obj() const { return _timezone_obj; }
@@ -121,10 +127,8 @@ public:
     const TUniqueId& query_id() const { return _query_id; }
     const TUniqueId& fragment_instance_id() const { return _fragment_instance_id; }
     ExecEnv* exec_env() { return _exec_env; }
-    const std::vector<std::shared_ptr<MemTracker>>& mem_trackers() { return _mem_trackers; }
-    std::shared_ptr<MemTracker> fragment_mem_tracker() { return _fragment_mem_tracker; }
-    std::shared_ptr<MemTracker> query_mem_tracker() { return _query_mem_tracker; }
-    std::shared_ptr<MemTracker> instance_mem_tracker() { return _instance_mem_tracker; }
+    std::shared_ptr<MemTrackerLimiter> query_mem_tracker() { return _query_mem_tracker; }
+    std::shared_ptr<MemTrackerLimiter> instance_mem_tracker() { return _instance_mem_tracker; }
     ThreadResourceMgr::ResourcePool* resource_pool() { return _resource_pool; }
 
     void set_fragment_root_id(PlanNodeId id) {
@@ -142,6 +146,11 @@ public:
     // Returns true if codegen is enabled for this query.
     bool codegen_enabled() const { return !_query_options.disable_codegen; }
 
+    bool enable_function_pushdown() const {
+        return _query_options.__isset.enable_function_pushdown &&
+               _query_options.enable_function_pushdown;
+    }
+
     // Create a codegen object in _codegen. No-op if it has already been called.
     // If codegen is enabled for the query, this is created when the runtime
     // state is created. If codegen is disabled for the query, this is created
@@ -157,22 +166,6 @@ public:
         std::lock_guard<std::mutex> l(_process_status_lock);
         return _process_status;
     };
-
-    //    MemPool* udf_pool() {
-    //        return _udf_pool.get();
-    //    };
-
-    // Create and return a stream receiver for _fragment_instance_id
-    // from the data stream manager. The receiver is added to _data_stream_recvrs_pool.
-    DataStreamRecvr* create_recvr(const RowDescriptor& row_desc, PlanNodeId dest_node_id,
-                                  int num_senders, int buffer_size, RuntimeProfile* profile);
-
-    // Sets the fragment memory limit and adds it to _mem_trackers
-    void set_fragment_mem_tracker(std::shared_ptr<MemTracker> tracker) {
-        DCHECK(_fragment_mem_tracker == nullptr);
-        _fragment_mem_tracker = tracker;
-        _mem_trackers.push_back(tracker);
-    }
 
     // Appends error to the _error_log if there is space
     bool log_error(const std::string& error);
@@ -204,7 +197,7 @@ public:
     int64_t backend_id() const { return _backend_id; }
 
     void set_be_number(int be_number) { _be_number = be_number; }
-    int be_number(void) { return _be_number; }
+    int be_number(void) const { return _be_number; }
 
     // Sets _process_status with err_msg if no error has been set yet.
     void set_process_status(const std::string& err_msg) {
@@ -226,19 +219,11 @@ public:
         _process_status = status;
     }
 
-    // Sets query_status_ to MEM_LIMIT_EXCEEDED and logs all the registered trackers.
-    // Subsequent calls to this will be no-ops. Returns query_status_.
-    // If 'failed_allocation_size' is not 0, then it is the size of the allocation (in
-    // bytes) that would have exceeded the limit allocated for 'tracker'.
-    // This value and tracker are only used for error reporting.
+    // Sets _process_status to MEM_LIMIT_EXCEEDED.
+    // Subsequent calls to this will be no-ops. Returns _process_status.
     // If 'msg' is non-nullptr, it will be appended to query_status_ in addition to the
     // generic "Memory limit exceeded" error.
-    Status set_mem_limit_exceeded(MemTracker* tracker = nullptr, int64_t failed_allocation_size = 0,
-                                  const std::string* msg = nullptr);
-
-    Status set_mem_limit_exceeded(const std::string& msg) {
-        return set_mem_limit_exceeded(nullptr, 0, &msg);
-    }
+    Status set_mem_limit_exceeded(const std::string& msg = "Memory limit exceeded");
 
     // Returns a non-OK status if query execution should stop (e.g., the query was cancelled
     // or a mem limit was exceeded). Exec nodes should check this periodically so execution
@@ -263,7 +248,7 @@ public:
 
     void set_load_job_id(int64_t job_id) { _load_job_id = job_id; }
 
-    const int64_t load_job_id() { return _load_job_id; }
+    const int64_t load_job_id() const { return _load_job_id; }
 
     // we only initialize object for load jobs
     void set_load_error_hub_info(const TLoadErrorHubInfo& hub_info) {
@@ -287,9 +272,12 @@ public:
 
     const std::string get_error_log_file_path() const { return _error_log_file_path; }
 
+    // append error msg and error line to file when loading data.
     // is_summary is true, means we are going to write the summary line
-    void append_error_msg_to_file(const std::string& line, const std::string& error_msg,
-                                  bool is_summary = false);
+    // If we need to stop the processing, set stop_processing to true
+    Status append_error_msg_to_file(std::function<std::string()> line,
+                                    std::function<std::string()> error_msg, bool* stop_processing,
+                                    bool is_summary = false);
 
     int64_t num_bytes_load_total() { return _num_bytes_load_total.load(); }
 
@@ -309,10 +297,6 @@ public:
 
     void update_num_bytes_load_total(int64_t bytes_load) {
         _num_bytes_load_total.fetch_add(bytes_load);
-    }
-
-    void set_update_num_bytes_load_total(int64_t bytes_load) {
-        _num_bytes_load_total.store(bytes_load);
     }
 
     void update_num_rows_load_filtered(int64_t num_rows) {
@@ -337,19 +321,31 @@ public:
 
     ReservationTracker* instance_buffer_reservation() { return _instance_buffer_reservation.get(); }
 
-    int64_t min_reservation() { return _query_options.min_reservation; }
+    int64_t min_reservation() const { return _query_options.min_reservation; }
 
-    int64_t max_reservation() { return _query_options.max_reservation; }
+    int64_t max_reservation() const { return _query_options.max_reservation; }
 
-    bool disable_stream_preaggregations() { return _query_options.disable_stream_preaggregations; }
+    bool disable_stream_preaggregations() const {
+        return _query_options.disable_stream_preaggregations;
+    }
 
     bool enable_spill() const { return _query_options.enable_spilling; }
 
-    int32_t runtime_filter_wait_time_ms() { return _query_options.runtime_filter_wait_time_ms; }
+    int32_t runtime_filter_wait_time_ms() const {
+        return _query_options.runtime_filter_wait_time_ms;
+    }
 
-    int32_t runtime_filter_max_in_num() { return _query_options.runtime_filter_max_in_num; }
+    int32_t runtime_filter_max_in_num() const { return _query_options.runtime_filter_max_in_num; }
 
     bool enable_vectorized_exec() const { return _query_options.enable_vectorized_engine; }
+
+    bool trim_tailing_spaces_for_external_table_query() const {
+        return _query_options.trim_tailing_spaces_for_external_table_query;
+    }
+
+    bool return_object_data_as_binary() const {
+        return _query_options.return_object_data_as_binary;
+    }
 
     bool enable_exchange_node_parallel_merge() const {
         return _query_options.enable_enable_exchange_node_parallel_merge;
@@ -366,6 +362,10 @@ public:
 
     std::vector<TTabletCommitInfo>& tablet_commit_infos() { return _tablet_commit_infos; }
 
+    const std::vector<TErrorTabletInfo>& error_tablet_infos() const { return _error_tablet_infos; }
+
+    std::vector<TErrorTabletInfo>& error_tablet_infos() { return _error_tablet_infos; }
+
     /// Helper to call QueryState::StartSpilling().
     Status StartSpilling(MemTracker* mem_tracker);
 
@@ -379,6 +379,10 @@ public:
 
     QueryFragmentsCtx* get_query_fragments_ctx() { return _query_ctx; }
 
+    OpentelemetryTracer get_tracer() { return _tracer; }
+
+    void set_tracer(OpentelemetryTracer&& tracer) { _tracer = std::move(tracer); }
+
 private:
     // Use a custom block manager for the query for testing purposes.
     void set_block_mgr2(const std::shared_ptr<BufferedBlockMgr2>& block_mgr) {
@@ -389,24 +393,18 @@ private:
 
     static const int DEFAULT_BATCH_SIZE = 2048;
 
-    // all mem limits that apply to this query
-    std::vector<std::shared_ptr<MemTracker>> _mem_trackers;
-
-    // Fragment memory limit.  Also contained in _mem_trackers
-    std::shared_ptr<MemTracker> _fragment_mem_tracker;
-
     // MemTracker that is shared by all fragment instances running on this host.
     // The query mem tracker must be released after the _instance_mem_tracker.
-    std::shared_ptr<MemTracker> _query_mem_tracker;
+    std::shared_ptr<MemTrackerLimiter> _query_mem_tracker;
 
     // Memory usage of this fragment instance
-    std::shared_ptr<MemTracker> _instance_mem_tracker;
+    std::shared_ptr<MemTrackerLimiter> _instance_mem_tracker;
 
     // put runtime state before _obj_pool, so that it will be deconstructed after
     // _obj_pool. Because some of object in _obj_pool will use profile when deconstructing.
     RuntimeProfile _profile;
 
-    DescriptorTbl* _desc_tbl;
+    const DescriptorTbl* _desc_tbl;
     std::shared_ptr<ObjectPool> _obj_pool;
 
     // runtime filter
@@ -504,7 +502,9 @@ private:
     std::string _error_log_file_path;
     std::ofstream* _error_log_file = nullptr; // error file path, absolute path
     std::unique_ptr<LoadErrorHub> _error_hub;
+    std::mutex _create_error_hub_lock;
     std::vector<TTabletCommitInfo> _tablet_commit_infos;
+    std::vector<TErrorTabletInfo> _error_tablet_infos;
 
     //TODO chenhao , remove this to QueryState
     /// Pool of buffer reservations used to distribute initial reservations to operators
@@ -524,9 +524,15 @@ private:
     /// Number of fragment instances executing, which may need to claim
     /// from 'initial_reservations_'.
     /// TODO: not needed if we call ReleaseResources() in a timely manner (IMPALA-1575).
-    AtomicInt32 _initial_reservation_refcnt;
+    std::atomic<int32_t> _initial_reservation_refcnt {0};
 
     QueryFragmentsCtx* _query_ctx;
+
+    // true if max_filter_ratio is 0
+    bool _load_zero_tolerance = false;
+
+    OpentelemetryTracer _tracer = telemetry::get_noop_tracer();
+
     // prohibit copies
     RuntimeState(const RuntimeState&);
 };
@@ -537,5 +543,3 @@ private:
     } while (false)
 
 } // namespace doris
-
-#endif // end of DORIS_BE_SRC_QUERY_RUNTIME_RUNTIME_STATE_H

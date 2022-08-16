@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/expr-context.cc
+// and modified by Doris
 
 #include "exprs/expr_context.h"
 
@@ -25,22 +28,15 @@
 #include "exprs/expr.h"
 #include "exprs/slot_ref.h"
 #include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
 #include "runtime/raw_value.h"
 #include "runtime/runtime_state.h"
+#include "runtime/thread_context.h"
 #include "udf/udf_internal.h"
-#include "util/debug_util.h"
-#include "util/stack_util.h"
 
 namespace doris {
 
 ExprContext::ExprContext(Expr* root)
-        : _fn_contexts_ptr(nullptr),
-          _root(root),
-          _is_clone(false),
-          _prepared(false),
-          _opened(false),
-          _closed(false) {}
+        : _root(root), _is_clone(false), _prepared(false), _opened(false), _closed(false) {}
 
 ExprContext::~ExprContext() {
     DCHECK(!_prepared || _closed);
@@ -49,15 +45,11 @@ ExprContext::~ExprContext() {
     }
 }
 
-// TODO(zc): memory tracker
-Status ExprContext::prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                            const std::shared_ptr<MemTracker>& tracker) {
-    DCHECK(tracker != nullptr) << std::endl << get_stack_trace();
+Status ExprContext::prepare(RuntimeState* state, const RowDescriptor& row_desc) {
+    DCHECK(!_prepared);
     DCHECK(_pool.get() == nullptr);
     _prepared = true;
-    // TODO: use param tracker to replace instance_mem_tracker, be careful about tracker's life cycle
-    // _pool.reset(new MemPool(new MemTracker(-1)));
-    _pool.reset(new MemPool(state->instance_mem_tracker().get()));
+    _pool.reset(new MemPool());
     return _root->prepare(state, row_desc, this);
 }
 
@@ -104,7 +96,6 @@ int ExprContext::register_func(RuntimeState* state,
                                int varargs_buffer_size) {
     _fn_contexts.push_back(FunctionContextImpl::create_context(
             state, _pool.get(), return_type, arg_types, varargs_buffer_size, false));
-    _fn_contexts_ptr = &_fn_contexts[0];
     return _fn_contexts.size() - 1;
 }
 
@@ -114,11 +105,10 @@ Status ExprContext::clone(RuntimeState* state, ExprContext** new_ctx) {
     DCHECK(*new_ctx == nullptr);
 
     *new_ctx = state->obj_pool()->add(new ExprContext(_root));
-    (*new_ctx)->_pool.reset(new MemPool(_pool->mem_tracker()));
+    (*new_ctx)->_pool.reset(new MemPool());
     for (int i = 0; i < _fn_contexts.size(); ++i) {
         (*new_ctx)->_fn_contexts.push_back(_fn_contexts[i]->impl()->clone((*new_ctx)->_pool.get()));
     }
-    (*new_ctx)->_fn_contexts_ptr = &((*new_ctx)->_fn_contexts[0]);
 
     (*new_ctx)->_is_clone = true;
     (*new_ctx)->_prepared = true;
@@ -133,11 +123,10 @@ Status ExprContext::clone(RuntimeState* state, ExprContext** new_ctx, Expr* root
     DCHECK(*new_ctx == nullptr);
 
     *new_ctx = state->obj_pool()->add(new ExprContext(root));
-    (*new_ctx)->_pool.reset(new MemPool(_pool->mem_tracker()));
+    (*new_ctx)->_pool.reset(new MemPool());
     for (int i = 0; i < _fn_contexts.size(); ++i) {
         (*new_ctx)->_fn_contexts.push_back(_fn_contexts[i]->impl()->clone((*new_ctx)->_pool.get()));
     }
-    (*new_ctx)->_fn_contexts_ptr = &((*new_ctx)->_fn_contexts[0]);
 
     (*new_ctx)->_is_clone = true;
     (*new_ctx)->_prepared = true;
@@ -172,7 +161,7 @@ bool ExprContext::is_nullable() {
     return false;
 }
 
-void* ExprContext::get_value(Expr* e, TupleRow* row) {
+void* ExprContext::get_value(Expr* e, TupleRow* row, int precision, int scale) {
     switch (e->_type.type) {
     case TYPE_NULL: {
         return nullptr;
@@ -234,6 +223,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         return &_result.float_val;
     }
     case TYPE_TIME:
+    case TYPE_TIMEV2:
     case TYPE_DOUBLE: {
         doris_udf::DoubleVal v = e->get_double_val(this, row);
         if (v.is_null) {
@@ -246,6 +236,7 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
     case TYPE_VARCHAR:
     case TYPE_HLL:
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING: {
         doris_udf::StringVal v = e->get_string_val(this, row);
         if (v.is_null) {
@@ -255,21 +246,6 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         _result.string_val.len = v.len;
         return &_result.string_val;
     }
-#if 0
-    case TYPE_CHAR: {
-        doris_udf::StringVal v = e->get_string_val(this, row);
-        if (v.is_null) {
-            return nullptr;
-        }
-        _result.string_val.ptr = reinterpret_cast<char*>(v.ptr);
-        _result.string_val.len = v.len;
-        if (e->_type.IsVarLenStringType()) {
-            return &_result.string_val;
-        } else {
-            return _result.string_val.ptr;
-        }
-    }
-#endif
     case TYPE_DATE:
     case TYPE_DATETIME: {
         doris_udf::DateTimeVal v = e->get_datetime_val(this, row);
@@ -279,6 +255,25 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         _result.datetime_val = DateTimeValue::from_datetime_val(v);
         return &_result.datetime_val;
     }
+    case TYPE_DATEV2: {
+        doris_udf::DateV2Val v = e->get_datev2_val(this, row);
+        if (v.is_null) {
+            return nullptr;
+        }
+        _result.datev2_val =
+                doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>::from_datev2_val(
+                        v);
+        return &_result.datev2_val;
+    }
+    case TYPE_DATETIMEV2: {
+        doris_udf::DateTimeV2Val v = e->get_datetimev2_val(this, row);
+        if (v.is_null) {
+            return nullptr;
+        }
+        _result.datetimev2_val = doris::vectorized::DateV2Value<
+                doris::vectorized::DateTimeV2ValueType>::from_datetimev2_val(v);
+        return &_result.datetimev2_val;
+    }
     case TYPE_DECIMALV2: {
         DecimalV2Val v = e->get_decimalv2_val(this, row);
         if (v.is_null) {
@@ -286,6 +281,30 @@ void* ExprContext::get_value(Expr* e, TupleRow* row) {
         }
         _result.decimalv2_val = DecimalV2Value::from_decimal_val(v);
         return &_result.decimalv2_val;
+    }
+    case TYPE_DECIMAL32: {
+        doris_udf::Decimal32Val v = e->get_decimal32_val(this, row);
+        if (v.is_null) {
+            return nullptr;
+        }
+        _result.int_val = v.val;
+        return &_result.int_val;
+    }
+    case TYPE_DECIMAL64: {
+        doris_udf::Decimal64Val v = e->get_decimal64_val(this, row);
+        if (v.is_null) {
+            return nullptr;
+        }
+        _result.bigint_val = v.val;
+        return &_result.bigint_val;
+    }
+    case TYPE_DECIMAL128: {
+        doris_udf::Decimal128Val v = e->get_decimal128_val(this, row);
+        if (v.is_null) {
+            return nullptr;
+        }
+        _result.large_int_val = v.val;
+        return &_result.large_int_val;
     }
     case TYPE_ARRAY: {
         doris_udf::CollectionVal v = e->get_array_val(this, row);
@@ -359,6 +378,14 @@ DateTimeVal ExprContext::get_datetime_val(TupleRow* row) {
     return _root->get_datetime_val(this, row);
 }
 
+DateV2Val ExprContext::get_datev2_val(TupleRow* row) {
+    return _root->get_datev2_val(this, row);
+}
+
+DateTimeV2Val ExprContext::get_datetimev2_val(TupleRow* row) {
+    return _root->get_datetimev2_val(this, row);
+}
+
 DecimalV2Val ExprContext::get_decimalv2_val(TupleRow* row) {
     return _root->get_decimalv2_val(this, row);
 }
@@ -388,8 +415,7 @@ Status ExprContext::get_const_value(RuntimeState* state, Expr& expr, AnyVal** co
             // Make sure the memory is owned by this evaluator.
             char* ptr_copy = reinterpret_cast<char*>(_pool->try_allocate(sv->len));
             if (ptr_copy == nullptr) {
-                return _pool->mem_tracker()->MemLimitExceeded(
-                        state, "Could not allocate constant string value", sv->len);
+                RETURN_LIMIT_EXCEEDED(state, "Could not allocate constant string value", sv->len);
             }
             memcpy(ptr_copy, sv->ptr, sv->len);
             sv->ptr = reinterpret_cast<uint8_t*>(ptr_copy);

@@ -14,11 +14,12 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/literal.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_LITERAL_H
-#define DORIS_BE_SRC_QUERY_EXPRS_LITERAL_H
+#pragma once
 
-#include "binary_predicate.h"
 #include "common/object_pool.h"
 #include "exprs/expr.h"
 
@@ -28,35 +29,34 @@ class TExprNode;
 
 class Literal final : public Expr {
 public:
+    Literal(const TExprNode& node);
     virtual ~Literal();
 
     virtual Expr* clone(ObjectPool* pool) const override { return pool->add(new Literal(*this)); }
 
-    virtual BooleanVal get_boolean_val(ExprContext* context, TupleRow*);
-    virtual TinyIntVal get_tiny_int_val(ExprContext* context, TupleRow*);
-    virtual SmallIntVal get_small_int_val(ExprContext* context, TupleRow*);
-    virtual IntVal get_int_val(ExprContext* context, TupleRow*);
-    virtual BigIntVal get_big_int_val(ExprContext* context, TupleRow*);
-    virtual LargeIntVal get_large_int_val(ExprContext* context, TupleRow*);
-    virtual FloatVal get_float_val(ExprContext* context, TupleRow*);
-    virtual DoubleVal get_double_val(ExprContext* context, TupleRow*);
-    virtual DecimalV2Val get_decimalv2_val(ExprContext* context, TupleRow*);
-    virtual DateTimeVal get_datetime_val(ExprContext* context, TupleRow*);
-    virtual StringVal get_string_val(ExprContext* context, TupleRow* row);
-    virtual CollectionVal get_array_val(ExprContext* context, TupleRow*);
+    virtual BooleanVal get_boolean_val(ExprContext* context, TupleRow*) override;
+    virtual TinyIntVal get_tiny_int_val(ExprContext* context, TupleRow*) override;
+    virtual SmallIntVal get_small_int_val(ExprContext* context, TupleRow*) override;
+    virtual IntVal get_int_val(ExprContext* context, TupleRow*) override;
+    virtual BigIntVal get_big_int_val(ExprContext* context, TupleRow*) override;
+    virtual LargeIntVal get_large_int_val(ExprContext* context, TupleRow*) override;
+    virtual FloatVal get_float_val(ExprContext* context, TupleRow*) override;
+    virtual DoubleVal get_double_val(ExprContext* context, TupleRow*) override;
+    virtual DecimalV2Val get_decimalv2_val(ExprContext* context, TupleRow*) override;
+    virtual DateTimeVal get_datetime_val(ExprContext* context, TupleRow*) override;
+    virtual DateV2Val get_datev2_val(ExprContext* context, TupleRow*) override;
+    virtual DateTimeV2Val get_datetimev2_val(ExprContext* context, TupleRow*) override;
+    virtual StringVal get_string_val(ExprContext* context, TupleRow* row) override;
+    virtual CollectionVal get_array_val(ExprContext* context, TupleRow*) override;
+    virtual Decimal32Val get_decimal32_val(ExprContext* context, TupleRow*) override;
+    virtual Decimal64Val get_decimal64_val(ExprContext* context, TupleRow*) override;
+    virtual Decimal128Val get_decimal128_val(ExprContext* context, TupleRow*) override;
     // init val before use
     virtual Status prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                           ExprContext* context);
-
-protected:
-    friend class Expr;
-    friend Expr* create_literal(ObjectPool* pool, PrimitiveType type, const void* data);
-    Literal(const TExprNode& node);
+                           ExprContext* context) override;
 
 private:
     ExprValue _value;
 };
 
 } // namespace doris
-
-#endif

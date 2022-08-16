@@ -14,35 +14,40 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/SlotDescriptor.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.ColumnStats;
 import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.thrift.TSlotDescriptor;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.Collections;
 import java.util.List;
 
 public class SlotDescriptor {
+    private static final Logger LOG = LogManager.getLogger(SlotDescriptor.class);
     private final SlotId id;
     private final TupleDescriptor parent;
     private Type type;
     private Column column;  // underlying column, if there is one
 
     // for SlotRef.toSql() in the absence of a path
-    private String label_;
+    private String label;
 
     // Expr(s) materialized into this slot; multiple exprs for unions. Should be empty if
     // path_ is set.
-    private List<Expr> sourceExprs_ = Lists.newArrayList();
+    private List<Expr> sourceExprs = Lists.newArrayList();
 
     // if false, this slot doesn't need to be materialized in parent tuple
     // (and physical layout parameters are invalid)
@@ -157,6 +162,21 @@ public class SlotDescriptor {
         isMaterialized = value;
     }
 
+    public void materializeSrcExpr() {
+        if (sourceExprs == null) {
+            return;
+        }
+        for (Expr expr : sourceExprs) {
+            if (!(expr instanceof SlotRef)) {
+                continue;
+            }
+            SlotRef slotRef = (SlotRef) expr;
+            SlotDescriptor slotDesc = slotRef.getDesc();
+            slotDesc.setIsMaterialized(true);
+            slotDesc.materializeSrcExpr();
+        }
+    }
+
     public boolean getIsNullable() {
         return isNullable;
     }
@@ -210,12 +230,29 @@ public class SlotDescriptor {
         return slotOffset;
     }
 
-    public String getLabel() { return label_; }
-    public void setLabel(String label) { label_ = label; }
-    public void setSourceExprs(List<Expr> exprs) { sourceExprs_ = exprs; }
-    public void setSourceExpr(Expr expr) { sourceExprs_ = Collections.singletonList(expr); }
-    public void addSourceExpr(Expr expr) { sourceExprs_.add(expr); }
-    public List<Expr> getSourceExprs() { return sourceExprs_; }
+    public String getLabel() {
+        return label;
+    }
+
+    public void setLabel(String label) {
+        this.label = label;
+    }
+
+    public void setSourceExprs(List<Expr> exprs) {
+        sourceExprs = exprs;
+    }
+
+    public void setSourceExpr(Expr expr) {
+        sourceExprs = Collections.singletonList(expr);
+    }
+
+    public void addSourceExpr(Expr expr) {
+        sourceExprs.add(expr);
+    }
+
+    public List<Expr> getSourceExprs() {
+        return sourceExprs;
+    }
 
 
     /**
@@ -224,7 +261,7 @@ public class SlotDescriptor {
     public void initFromExpr(Expr expr) {
         setIsNullable(expr.isNullable());
         setLabel(expr.toSql());
-        Preconditions.checkState(sourceExprs_.isEmpty());
+        Preconditions.checkState(sourceExprs.isEmpty());
         setSourceExpr(expr);
         setStats(ColumnStats.fromExpr(expr));
         Preconditions.checkState(expr.getType().isValid());
@@ -235,39 +272,50 @@ public class SlotDescriptor {
      * Return true if the physical layout of this descriptor matches the physical layout
      * of the other descriptor, but not necessarily ids.
      */
-    public boolean LayoutEquals(SlotDescriptor other) {
-        if (!getType().equals(other.getType())) return false;
-        if (isNullable != other.isNullable) return false;
-        if (getByteSize() != other.getByteSize()) return false;
-        if (getByteOffset() != other.getByteOffset()) return false;
-        if (getNullIndicatorByte() != other.getNullIndicatorByte()) return false;
-        if (getNullIndicatorBit() != other.getNullIndicatorBit()) return false;
+    public boolean layoutEquals(SlotDescriptor other) {
+        if (!getType().equals(other.getType())) {
+            return false;
+        }
+        if (isNullable != other.isNullable) {
+            return false;
+        }
+        if (getByteSize() != other.getByteSize()) {
+            return false;
+        }
+        if (getByteOffset() != other.getByteOffset()) {
+            return false;
+        }
+        if (getNullIndicatorByte() != other.getNullIndicatorByte()) {
+            return false;
+        }
+        if (getNullIndicatorBit() != other.getNullIndicatorBit()) {
+            return false;
+        }
         return true;
     }
 
     // TODO
     public TSlotDescriptor toThrift() {
-        if (originType != null) {
-            return new TSlotDescriptor(id.asInt(), parent.getId().asInt(), originType.toThrift(), -1,
-                    byteOffset, nullIndicatorByte,
-                    nullIndicatorBit, ((column != null) ? column.getName() : ""), slotIdx, isMaterialized);
-        } else {
-            return new TSlotDescriptor(id.asInt(), parent.getId().asInt(), type.toThrift(), -1,
-                    byteOffset, nullIndicatorByte,
-                    nullIndicatorBit, ((column != null) ? column.getName() : ""), slotIdx, isMaterialized);
+
+        TSlotDescriptor tSlotDescriptor = new TSlotDescriptor(id.asInt(), parent.getId().asInt(),
+                (originType != null ? originType.toThrift() : type.toThrift()), -1, byteOffset, nullIndicatorByte,
+                nullIndicatorBit, ((column != null) ? column.getName() : ""), slotIdx, isMaterialized);
+
+        if (column != null) {
+            LOG.debug("column name:{}, column unique id:{}", column.getName(), column.getUniqueId());
+            tSlotDescriptor.setColUniqueId(column.getUniqueId());
         }
+        return tSlotDescriptor;
     }
 
     public String debugString() {
         String colStr = (column == null ? "null" : column.getName());
         String typeStr = (type == null ? "null" : type.toString());
         String parentTupleId = (parent == null) ? "null" : parent.getId().toString();
-        return MoreObjects.toStringHelper(this).add("id", id.asInt()).add("parent", parentTupleId)
-                .add("col", colStr).add("type", typeStr).add("materialized", isMaterialized)
-                .add("byteSize", byteSize).add("byteOffset", byteOffset)
-                .add("nullIndicatorByte", nullIndicatorByte)
-                .add("nullIndicatorBit", nullIndicatorBit)
-                .add("slotIdx", slotIdx).toString();
+        return MoreObjects.toStringHelper(this).add("id", id.asInt()).add("parent", parentTupleId).add("col", colStr)
+                .add("type", typeStr).add("materialized", isMaterialized).add("byteSize", byteSize)
+                .add("byteOffset", byteOffset).add("nullIndicatorByte", nullIndicatorByte)
+                .add("nullIndicatorBit", nullIndicatorBit).add("slotIdx", slotIdx).toString();
     }
 
     @Override
@@ -280,10 +328,8 @@ public class SlotDescriptor {
         String colStr = (column == null ? "null" : column.getName());
         String typeStr = (type == null ? "null" : type.toString());
         String parentTupleId = (parent == null) ? "null" : parent.getId().toString();
-        builder.append(prefix).append("SlotDescriptor{")
-            .append("id=").append(id)
-            .append(", col=").append(colStr)
-            .append(", type=").append(typeStr).append("}\n");
+        builder.append(prefix).append("SlotDescriptor{").append("id=").append(id).append(", col=").append(colStr)
+                .append(", type=").append(typeStr).append("}\n");
 
         prefix += "  ";
         builder.append(prefix).append("parent=").append(parentTupleId).append("\n");
@@ -297,10 +343,6 @@ public class SlotDescriptor {
     }
 
     public boolean isScanSlot() {
-        Table table = parent.getTable();
-        if ((table != null) && (table instanceof OlapTable)) {
-            return true;
-        }
-        return false;
+        return parent.getTable() instanceof OlapTable;
     }
 }

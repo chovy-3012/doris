@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include "common/config.h"
 #include "olap/rowset/segment_v2/zone_map_index.h"
 
 #include <gtest/gtest.h>
@@ -23,9 +22,11 @@
 #include <memory>
 #include <string>
 
+#include "common/config.h"
 #include "env/env.h"
-#include "olap/fs/block_manager.h"
-#include "olap/fs/fs_util.h"
+#include "io/fs/file_system.h"
+#include "io/fs/file_writer.h"
+#include "io/fs/local_file_system.h"
 #include "olap/page_cache.h"
 #include "olap/tablet_schema_helper.h"
 #include "util/file_utils.h"
@@ -39,18 +40,19 @@ public:
 
     void SetUp() override {
         if (FileUtils::check_exist(kTestDir)) {
-            ASSERT_TRUE(FileUtils::remove_all(kTestDir).ok());
+            EXPECT_TRUE(FileUtils::remove_all(kTestDir).ok());
         }
-        ASSERT_TRUE(FileUtils::create_dir(kTestDir).ok());
+        EXPECT_TRUE(FileUtils::create_dir(kTestDir).ok());
     }
     void TearDown() override {
         if (FileUtils::check_exist(kTestDir)) {
-            ASSERT_TRUE(FileUtils::remove_all(kTestDir).ok());
+            EXPECT_TRUE(FileUtils::remove_all(kTestDir).ok());
         }
     }
 
     void test_string(std::string testname, Field* field) {
         std::string filename = kTestDir + "/" + testname;
+        auto fs = io::global_local_filesystem();
 
         ZoneMapIndexWriter builder(field);
         std::vector<std::string> values1 = {"aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"};
@@ -73,36 +75,38 @@ public:
         // write out zone map index
         ColumnIndexMetaPB index_meta;
         {
-            std::unique_ptr<fs::WritableBlock> wblock;
-            fs::CreateBlockOptions opts({filename});
-            ASSERT_TRUE(fs::fs_util::block_manager()->create_block(opts, &wblock).ok());
-            ASSERT_TRUE(builder.finish(wblock.get(), &index_meta).ok());
-            ASSERT_EQ(ZONE_MAP_INDEX, index_meta.type());
-            ASSERT_TRUE(wblock->close().ok());
+            io::FileWriterPtr file_writer;
+            EXPECT_TRUE(fs->create_file(filename, &file_writer).ok());
+            EXPECT_TRUE(builder.finish(file_writer.get(), &index_meta).ok());
+            EXPECT_EQ(ZONE_MAP_INDEX, index_meta.type());
+            EXPECT_TRUE(file_writer->close().ok());
         }
 
-        ZoneMapIndexReader column_zone_map(filename, &index_meta.zone_map_index());
+        io::FileReaderSPtr file_reader;
+        EXPECT_TRUE(fs->open_file(filename, &file_reader).ok());
+        ZoneMapIndexReader column_zone_map(file_reader, &index_meta.zone_map_index());
         Status status = column_zone_map.load(true, false);
-        ASSERT_TRUE(status.ok());
-        ASSERT_EQ(3, column_zone_map.num_pages());
+        EXPECT_TRUE(status.ok());
+        EXPECT_EQ(3, column_zone_map.num_pages());
         const std::vector<ZoneMapPB>& zone_maps = column_zone_map.page_zone_maps();
-        ASSERT_EQ(3, zone_maps.size());
-        ASSERT_EQ("aaaa", zone_maps[0].min());
-        ASSERT_EQ("ffff", zone_maps[0].max());
-        ASSERT_EQ(false, zone_maps[0].has_null());
-        ASSERT_EQ(true, zone_maps[0].has_not_null());
+        EXPECT_EQ(3, zone_maps.size());
+        EXPECT_EQ("aaaa", zone_maps[0].min());
+        EXPECT_EQ("ffff", zone_maps[0].max());
+        EXPECT_EQ(false, zone_maps[0].has_null());
+        EXPECT_EQ(true, zone_maps[0].has_not_null());
 
-        ASSERT_EQ("aaaaa", zone_maps[1].min());
-        ASSERT_EQ("fffff", zone_maps[1].max());
-        ASSERT_EQ(true, zone_maps[1].has_null());
-        ASSERT_EQ(true, zone_maps[1].has_not_null());
+        EXPECT_EQ("aaaaa", zone_maps[1].min());
+        EXPECT_EQ("fffff", zone_maps[1].max());
+        EXPECT_EQ(true, zone_maps[1].has_null());
+        EXPECT_EQ(true, zone_maps[1].has_not_null());
 
-        ASSERT_EQ(true, zone_maps[2].has_null());
-        ASSERT_EQ(false, zone_maps[2].has_not_null());
+        EXPECT_EQ(true, zone_maps[2].has_null());
+        EXPECT_EQ(false, zone_maps[2].has_not_null());
     }
 
     void test_cut_zone_map(std::string testname, Field* field) {
         std::string filename = kTestDir + "/" + testname;
+        auto fs = io::global_local_filesystem();
 
         ZoneMapIndexWriter builder(field);
         char ch = 'a';
@@ -117,35 +121,37 @@ public:
         // write out zone map index
         ColumnIndexMetaPB index_meta;
         {
-            std::unique_ptr<fs::WritableBlock> wblock;
-            fs::CreateBlockOptions opts({filename});
-            ASSERT_TRUE(fs::fs_util::block_manager()->create_block(opts, &wblock).ok());
-            ASSERT_TRUE(builder.finish(wblock.get(), &index_meta).ok());
-            ASSERT_EQ(ZONE_MAP_INDEX, index_meta.type());
-            ASSERT_TRUE(wblock->close().ok());
+            io::FileWriterPtr file_writer;
+            EXPECT_TRUE(fs->create_file(filename, &file_writer).ok());
+            EXPECT_TRUE(builder.finish(file_writer.get(), &index_meta).ok());
+            EXPECT_EQ(ZONE_MAP_INDEX, index_meta.type());
+            EXPECT_TRUE(file_writer->close().ok());
         }
 
-        ZoneMapIndexReader column_zone_map(filename, &index_meta.zone_map_index());
+        io::FileReaderSPtr file_reader;
+        EXPECT_TRUE(fs->open_file(filename, &file_reader).ok());
+        ZoneMapIndexReader column_zone_map(file_reader, &index_meta.zone_map_index());
         Status status = column_zone_map.load(true, false);
-        ASSERT_TRUE(status.ok());
-        ASSERT_EQ(1, column_zone_map.num_pages());
+        EXPECT_TRUE(status.ok());
+        EXPECT_EQ(1, column_zone_map.num_pages());
         const std::vector<ZoneMapPB>& zone_maps = column_zone_map.page_zone_maps();
-        ASSERT_EQ(1, zone_maps.size());
+        EXPECT_EQ(1, zone_maps.size());
 
         char value[512];
         memset(value, 'a', 512);
-        ASSERT_EQ(value, zone_maps[0].min());
+        EXPECT_EQ(value, zone_maps[0].min());
         memset(value, 'f', 512);
         value[511] += 1;
-        ASSERT_EQ(value, zone_maps[0].max());
-        ASSERT_EQ(false, zone_maps[0].has_null());
-        ASSERT_EQ(true, zone_maps[0].has_not_null());
+        EXPECT_EQ(value, zone_maps[0].max());
+        EXPECT_EQ(false, zone_maps[0].has_null());
+        EXPECT_EQ(true, zone_maps[0].has_not_null());
     }
 };
 
 // Test for int
 TEST_F(ColumnZoneMapTest, NormalTestIntPage) {
     std::string filename = kTestDir + "/NormalTestIntPage";
+    auto fs = io::global_local_filesystem();
 
     TabletColumn int_column = create_int_key(0);
     Field* field = FieldFactory::create(int_column);
@@ -167,33 +173,34 @@ TEST_F(ColumnZoneMapTest, NormalTestIntPage) {
     // write out zone map index
     ColumnIndexMetaPB index_meta;
     {
-        std::unique_ptr<fs::WritableBlock> wblock;
-        fs::CreateBlockOptions opts({filename});
-        ASSERT_TRUE(fs::fs_util::block_manager()->create_block(opts, &wblock).ok());
-        ASSERT_TRUE(builder.finish(wblock.get(), &index_meta).ok());
-        ASSERT_EQ(ZONE_MAP_INDEX, index_meta.type());
-        ASSERT_TRUE(wblock->close().ok());
+        io::FileWriterPtr file_writer;
+        EXPECT_TRUE(fs->create_file(filename, &file_writer).ok());
+        EXPECT_TRUE(builder.finish(file_writer.get(), &index_meta).ok());
+        EXPECT_EQ(ZONE_MAP_INDEX, index_meta.type());
+        EXPECT_TRUE(file_writer->close().ok());
     }
 
-    ZoneMapIndexReader column_zone_map(filename, &index_meta.zone_map_index());
+    io::FileReaderSPtr file_reader;
+    EXPECT_TRUE(fs->open_file(filename, &file_reader).ok());
+    ZoneMapIndexReader column_zone_map(file_reader, &index_meta.zone_map_index());
     Status status = column_zone_map.load(true, false);
-    ASSERT_TRUE(status.ok());
-    ASSERT_EQ(3, column_zone_map.num_pages());
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(3, column_zone_map.num_pages());
     const std::vector<ZoneMapPB>& zone_maps = column_zone_map.page_zone_maps();
-    ASSERT_EQ(3, zone_maps.size());
+    EXPECT_EQ(3, zone_maps.size());
 
-    ASSERT_EQ(std::to_string(1), zone_maps[0].min());
-    ASSERT_EQ(std::to_string(22), zone_maps[0].max());
-    ASSERT_EQ(false, zone_maps[0].has_null());
-    ASSERT_EQ(true, zone_maps[0].has_not_null());
+    EXPECT_EQ(std::to_string(1), zone_maps[0].min());
+    EXPECT_EQ(std::to_string(22), zone_maps[0].max());
+    EXPECT_EQ(false, zone_maps[0].has_null());
+    EXPECT_EQ(true, zone_maps[0].has_not_null());
 
-    ASSERT_EQ(std::to_string(2), zone_maps[1].min());
-    ASSERT_EQ(std::to_string(31), zone_maps[1].max());
-    ASSERT_EQ(true, zone_maps[1].has_null());
-    ASSERT_EQ(true, zone_maps[1].has_not_null());
+    EXPECT_EQ(std::to_string(2), zone_maps[1].min());
+    EXPECT_EQ(std::to_string(31), zone_maps[1].max());
+    EXPECT_EQ(true, zone_maps[1].has_null());
+    EXPECT_EQ(true, zone_maps[1].has_not_null());
 
-    ASSERT_EQ(true, zone_maps[2].has_null());
-    ASSERT_EQ(false, zone_maps[2].has_not_null());
+    EXPECT_EQ(true, zone_maps[2].has_null());
+    EXPECT_EQ(false, zone_maps[2].has_not_null());
     delete field;
 }
 
@@ -224,9 +231,3 @@ TEST_F(ColumnZoneMapTest, ZoneMapCut) {
 
 } // namespace segment_v2
 } // namespace doris
-
-int main(int argc, char** argv) {
-    doris::StoragePageCache::create_global_cache(1 << 30, 0.1);
-    testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

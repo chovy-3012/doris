@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/disk-io-mgr.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_RUNTIME_DISK_IO_MGR_H
-#define DORIS_BE_SRC_QUERY_RUNTIME_DISK_IO_MGR_H
+#pragma once
 
 #include <condition_variable>
 #include <list>
@@ -25,12 +27,10 @@
 #include <unordered_set>
 #include <vector>
 
-#include "common/atomic.h"
 #include "common/config.h"
-#include "common/hdfs.h"
 #include "common/object_pool.h"
 #include "common/status.h"
-#include "runtime/mem_tracker.h"
+#include "runtime/memory/mem_tracker_limiter.h"
 #include "util/error_util.h"
 #include "util/internal_queue.h"
 #include "util/metrics.h"
@@ -166,7 +166,7 @@ class MemTracker;
 // the cached buffer is returned (BufferDescriptor::Return()).
 //
 // Remote filesystem support (e.g. S3):
-// Remote filesystems are modeled as "remote disks". That is, there is a seperate disk
+// Remote filesystems are modeled as "remote disks". That is, there is a separate disk
 // queue for each supported remote filesystem type. In order to maximize throughput,
 // multiple connections are opened in parallel by having multiple threads running per
 // queue. Also note that reading from a remote filesystem service can be more CPU
@@ -226,7 +226,7 @@ public:
     };
 
     // Buffer struct that is used by the caller and IoMgr to pass read buffers.
-    // It is is expected that only one thread has ownership of this object at a
+    // It is expected that only one thread has ownership of this object at a
     // time.
     class BufferDescriptor {
     public:
@@ -241,10 +241,6 @@ public:
 
         // Returns the offset within the scan range that this buffer starts at
         int64_t scan_range_offset() const { return _scan_range_offset; }
-
-        // Updates this buffer to be owned by the new tracker. Consumption is
-        // release from the current tracker and added to the new one.
-        void set_mem_tracker(std::shared_ptr<MemTracker> tracker);
 
         // Returns the buffer to the IoMgr. This must be called for every buffer
         // returned by get_next()/read() that did not return an error. This is non-blocking.
@@ -262,9 +258,6 @@ public:
 
         // Reader that this buffer is for
         RequestContext* _reader;
-
-        // The current tracker this buffer is associated with.
-        std::shared_ptr<MemTracker> _mem_tracker;
 
         // Scan range that this buffer is for.
         ScanRange* _scan_range;
@@ -441,6 +434,7 @@ public:
 
         // If non-null, this is DN cached buffer. This means the cached read succeeded
         // and all the bytes for the range are in this buffer.
+        // TODO(zxy) Not used, maybe delete
         struct hadoopRzBuffer* _cached_buffer;
 
         // Lock protecting fields below.
@@ -543,7 +537,7 @@ public:
     ~DiskIoMgr();
 
     // Initialize the IoMgr. Must be called once before any of the other APIs.
-    Status init(const std::shared_ptr<MemTracker>& process_mem_tracker);
+    Status init(const int64_t mem_limit);
 
     // Allocates tracking structure for a request context.
     // Register a new request context which is returned in *request_context.
@@ -553,9 +547,7 @@ public:
     //    used for this reader will be tracked by this. If the limit is exceeded
     //    the reader will be cancelled and MEM_LIMIT_EXCEEDED will be returned via
     //    get_next().
-    Status register_context(
-            RequestContext** request_context,
-            std::shared_ptr<MemTracker> reader_mem_tracker = std::shared_ptr<MemTracker>());
+    Status register_context(RequestContext** request_context);
 
     // Unregisters context from the disk IoMgr. This must be called for every
     // register_context() regardless of cancellation and must be called in the
@@ -628,6 +620,7 @@ public:
     int64_t bytes_read_dn_cache(RequestContext* reader) const;
     int num_remote_ranges(RequestContext* reader) const;
     int64_t unexpected_remote_bytes(RequestContext* reader) const;
+    MemTrackerLimiter* mem_tracker() const { return _mem_tracker.get(); }
 
     // Returns the read throughput across all readers.
     // TODO: should this be a sliding window?  This should report metrics for the
@@ -692,8 +685,7 @@ private:
     // Pool to allocate BufferDescriptors.
     ObjectPool _pool;
 
-    // Process memory tracker; needed to account for io buffers.
-    std::shared_ptr<MemTracker> _process_mem_tracker;
+    std::unique_ptr<MemTrackerLimiter> _mem_tracker;
 
     // Number of worker(read) threads per disk. Also the max depth of queued
     // work to the disk.
@@ -748,10 +740,10 @@ private:
     std::list<BufferDescriptor*> _free_buffer_descs;
 
     // Total number of allocated buffers, used for debugging.
-    AtomicInt<int> _num_allocated_buffers;
+    std::atomic<int> _num_allocated_buffers {0};
 
     // Total number of buffers in readers
-    AtomicInt<int> _num_buffers_in_readers;
+    std::atomic<int> _num_buffers_in_readers {0};
 
     // Per disk queues. This is static and created once at init() time.  One queue is
     // allocated for each local disk on the system and for each remote filesystem type.
@@ -788,18 +780,16 @@ private:
     char* get_free_buffer(int64_t* buffer_size);
 
     // Garbage collect all unused io buffers. This is currently only triggered when the
-    // process wide limit is hit. This is not good enough. While it is sufficient for
-    // the IoMgr, other components do not trigger this GC.
+    // process wide limit is hit.
     // TODO: make this run periodically?
-    void gc_io_buffers();
+    void gc_io_buffers(int64_t bytes_to_free = INT_MAX);
 
     // Returns a buffer to the free list. buffer_size / _min_buffer_size should be a power
     // of 2, and buffer_size should be <= _max_buffer_size. These constraints will be met
     // if buffer was acquired via get_free_buffer() (which it should have been).
     void return_free_buffer(char* buffer, int64_t buffer_size);
 
-    // Returns the buffer in desc (cannot be nullptr), sets buffer to nullptr and clears the
-    // mem tracker.
+    // Returns the buffer in desc (cannot be nullptr), sets buffer to nullptr
     void return_free_buffer(BufferDescriptor* desc);
 
     // Disk worker thread loop. This function retrieves the next range to process on
@@ -845,5 +835,3 @@ private:
 };
 
 } // end namespace doris
-
-#endif // DORIS_BE_SRC_QUERY_RUNTIME_DISK_IO_MGR_H

@@ -17,8 +17,8 @@
 
 package org.apache.doris.load;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexExtState;
 import org.apache.doris.catalog.OlapTable;
@@ -27,6 +27,7 @@ import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.common.Config;
 import org.apache.doris.common.util.UnitTestUtil;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.load.FailMsg.CancelType;
 import org.apache.doris.load.LoadJob.JobState;
 import org.apache.doris.persist.EditLog;
@@ -34,12 +35,13 @@ import org.apache.doris.task.AgentTaskQueue;
 import org.apache.doris.task.MasterTask;
 import org.apache.doris.task.MasterTaskExecutor;
 
+import com.google.common.collect.Lists;
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-
-import com.google.common.collect.Lists;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -47,9 +49,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import mockit.Expectations;
-import mockit.Mocked;
 
 public class LoadCheckerTest {
     private long dbId;
@@ -62,13 +61,15 @@ public class LoadCheckerTest {
     private String label;
 
     @Mocked
-    private Catalog catalog;
+    private Env env;
+    @Mocked
+    private InternalCatalog catalog;
     @Mocked
     private EditLog editLog;
     @Mocked
     private Load load;
     private Database db;
-    
+
     @Before
     public void setUp() {
         dbId = 0L;
@@ -77,13 +78,17 @@ public class LoadCheckerTest {
         indexId = 0L;
         tabletId = 0L;
         backendId = 0L;
-        
+
         label = "test_label";
- 
+
         // mock catalog
-        db = UnitTestUtil.createDb(dbId, tableId, partitionId, indexId, tabletId, backendId, 1L, 0L);
+        db = UnitTestUtil.createDb(dbId, tableId, partitionId, indexId, tabletId, backendId, 1L);
         new Expectations() {
             {
+                env.getInternalCatalog();
+                minTimes = 0;
+                result = catalog;
+
                 catalog.getDbNullable(dbId);
                 minTimes = 0;
                 result = db;
@@ -92,17 +97,17 @@ public class LoadCheckerTest {
                 minTimes = 0;
                 result = db;
 
-                catalog.getEditLog();
+                env.getEditLog();
                 minTimes = 0;
                 result = editLog;
             }
         };
 
-        new Expectations(catalog) {
+        new Expectations(env) {
             {
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
             }
         };
 
@@ -114,7 +119,7 @@ public class LoadCheckerTest {
     public void tearDown() {
         Config.load_running_job_num_limit = 0;
     }
-    
+
     @Test
     public void testInit() throws Exception {
         LoadChecker.init(5L);
@@ -124,15 +129,15 @@ public class LoadCheckerTest {
         checkersField.setAccessible(true);
         Map<JobState, LoadChecker> checkers = (Map<JobState, LoadChecker>) checkersField.get(LoadChecker.class);
         Assert.assertEquals(4, checkers.size());
-        
+
         // verify executors
         Field executorsField = LoadChecker.class.getDeclaredField("executors");
         executorsField.setAccessible(true);
-        Map<JobState, MasterTaskExecutor> executors = 
+        Map<JobState, MasterTaskExecutor> executors =
                 (Map<JobState, MasterTaskExecutor>) executorsField.get(LoadChecker.class);
         Assert.assertEquals(2, executors.size());
     }
-    
+
     @Test
     public void testRunPendingJobs(@Mocked MasterTaskExecutor executor) throws Exception {
         List<LoadJob> pendingJobs = new ArrayList<LoadJob>();
@@ -147,7 +152,7 @@ public class LoadCheckerTest {
                 times = 1;
                 result = pendingJobs;
 
-                catalog.getLoadInstance();
+                env.getLoadInstance();
                 times = 2;
                 result = load;
 
@@ -156,7 +161,7 @@ public class LoadCheckerTest {
                 result = true;
             }
         };
-        
+
         // init
         LoadChecker.init(5L);
 
@@ -188,7 +193,7 @@ public class LoadCheckerTest {
                 times = 1;
                 result = Lists.newArrayList(job);
 
-                catalog.getLoadInstance();
+                env.getLoadInstance();
                 times = 1;
                 result = load;
 
@@ -230,7 +235,7 @@ public class LoadCheckerTest {
                 times = 1;
                 result = etlJobs;
 
-                catalog.getLoadInstance();
+                env.getLoadInstance();
                 times = 2;
                 result = load;
 
@@ -239,7 +244,7 @@ public class LoadCheckerTest {
                 result = true;
             }
         };
-        
+
         // init
         LoadChecker.init(5L);
 
@@ -250,7 +255,7 @@ public class LoadCheckerTest {
         Method runEtlJobs = UnitTestUtil.getPrivateMethod(LoadChecker.class, "runEtlJobs", new Class[] {});
         runEtlJobs.invoke(checkers.get(JobState.ETL), new Object[] {});
     }
-    
+
     @Test
     public void testRunLoadingJobs() throws Exception {
         List<LoadJob> etlJobs = new ArrayList<LoadJob>();
@@ -262,10 +267,8 @@ public class LoadCheckerTest {
         OlapTable table = (OlapTable) db.getTableOrMetaException(tableId);
         Partition partition = table.getPartition(partitionId);
         long newVersion = partition.getVisibleVersion() + 1;
-        long newVersionHash = 1L;
         PartitionLoadInfo partitionLoadInfo = new PartitionLoadInfo(new ArrayList<Source>());
         partitionLoadInfo.setVersion(newVersion);
-        partitionLoadInfo.setVersionHash(newVersionHash);
         Map<Long, PartitionLoadInfo> idToPartitionLoadInfo = new HashMap<Long, PartitionLoadInfo>();
         idToPartitionLoadInfo.put(partitionId, partitionLoadInfo);
         TableLoadInfo tableLoadInfo = new TableLoadInfo(idToPartitionLoadInfo);
@@ -300,12 +303,12 @@ public class LoadCheckerTest {
                 minTimes = 0;
                 result = true;
 
-                catalog.getLoadInstance();
+                env.getLoadInstance();
                 times = 4;
                 result = load;
             }
         };
-        
+
         // init
         LoadChecker.init(5L);
 
@@ -321,17 +324,17 @@ public class LoadCheckerTest {
         for (MaterializedIndex olapIndex : partition.getMaterializedIndices(IndexExtState.ALL)) {
             for (Tablet tablet : olapIndex.getTablets()) {
                 for (Replica replica : tablet.getReplicas()) {
-                    replica.updateVersionInfo(newVersion, newVersionHash, 0L, 0L);
+                    replica.updateVersionInfo(newVersion, 0L, 0L, 0L);
                 }
             }
-        }       
+        }
 
         // verify
         runLoadingJobs.invoke(checkers.get(JobState.LOADING), new Object[] {});
         // clear agent tasks
         AgentTaskQueue.clearAllTasks();
     }
-    
+
     @Test
     public void testRunQuorumFinishedJobs() throws Exception {
         List<LoadJob> etlJobs = new ArrayList<LoadJob>();
@@ -343,10 +346,8 @@ public class LoadCheckerTest {
         OlapTable table = (OlapTable) db.getTableOrMetaException(tableId);
         Partition partition = table.getPartition(partitionId);
         long newVersion = partition.getVisibleVersion() + 1;
-        long newVersionHash = 0L;
         PartitionLoadInfo partitionLoadInfo = new PartitionLoadInfo(new ArrayList<Source>());
         partitionLoadInfo.setVersion(newVersion);
-        partitionLoadInfo.setVersionHash(newVersionHash);
         Map<Long, PartitionLoadInfo> idToPartitionLoadInfo = new HashMap<Long, PartitionLoadInfo>();
         idToPartitionLoadInfo.put(partitionId, partitionLoadInfo);
         TableLoadInfo tableLoadInfo = new TableLoadInfo(idToPartitionLoadInfo);
@@ -359,7 +360,7 @@ public class LoadCheckerTest {
         for (MaterializedIndex index : partition.getMaterializedIndices(IndexExtState.ALL)) {
             for (Tablet tablet : index.getTablets()) {
                 for (Replica replica : tablet.getReplicas()) {
-                    replica.updateVersionInfo(newVersion, newVersionHash, 0L, 0L);
+                    replica.updateVersionInfo(newVersion, 0L, 0L, 0L);
                 }
                 TabletLoadInfo tabletLoadInfo = new TabletLoadInfo("/label/path", 1L);
                 tabletLoadInfos.put(tablet.getId(), tabletLoadInfo);
@@ -381,12 +382,12 @@ public class LoadCheckerTest {
                 load.clearJob(job, JobState.QUORUM_FINISHED);
                 minTimes = 0;
 
-                catalog.getLoadInstance();
+                env.getLoadInstance();
                 minTimes = 0;
                 result = load;
             }
         };
-        
+
         // init
         LoadChecker.init(5L);
 
@@ -397,10 +398,10 @@ public class LoadCheckerTest {
         Method runQuorumFinishedJobs = UnitTestUtil.getPrivateMethod(
                 LoadChecker.class, "runQuorumFinishedJobs", new Class[] {});
         runQuorumFinishedJobs.invoke(checkers.get(JobState.QUORUM_FINISHED), new Object[] {});
-        
+
         Assert.assertEquals(0, AgentTaskQueue.getTaskNum());
     }
-    
+
     @Test
     public void testCheckTimeout() {
         LoadJob job = new LoadJob(label);
@@ -410,11 +411,11 @@ public class LoadCheckerTest {
         // timeout is 0s
         job.setTimeoutSecond(0);
         Assert.assertFalse(LoadChecker.checkTimeout(job));
-        
+
         // timeout is 1s
         job.setTimeoutSecond(1);
         Assert.assertTrue(LoadChecker.checkTimeout(job));
-        
+
         // timeout is 10s
         job.setTimeoutSecond(10);
         Assert.assertFalse(LoadChecker.checkTimeout(job));

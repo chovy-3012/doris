@@ -17,7 +17,7 @@
 
 package org.apache.doris.load;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.FsBroker;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
@@ -84,7 +84,7 @@ public class BrokerLoadErrorHub extends LoadErrorHub {
         }
 
         public TBrokerErrorHubInfo toThrift() {
-            FsBroker fsBroker = Catalog.getCurrentCatalog().getBrokerMgr().getAnyBroker(brokerName);
+            FsBroker fsBroker = Env.getCurrentEnv().getBrokerMgr().getAnyBroker(brokerName);
             if (fsBroker == null) {
                 return null;
             }
@@ -107,7 +107,7 @@ public class BrokerLoadErrorHub extends LoadErrorHub {
     @Override
     public List<ErrorMsg> fetchLoadError(long jobId) {
         List<ErrorMsg> result = Lists.newArrayList();
-        final String hint = "Find detail load error info on '" 
+        final String hint = "Find detail load error info on '"
                 + brokerParam.path + "' with file name showed in 'SHOW LOAD' stmt";
         ErrorMsg errorMsg = new ErrorMsg(0, hint);
         result.add(errorMsg);

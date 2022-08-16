@@ -21,17 +21,15 @@
 
 #include <sstream>
 
-#include "exec/broker_writer.h"
-#include "exec/local_file_writer.h"
-#include "exec/s3_writer.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
 #include "gutil/strings/numbers.h"
-#include "runtime/mem_tracker.h"
-#include "runtime/mysql_table_sink.h"
+#include "io/file_factory.h"
+#include "runtime/large_int_value.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
 #include "runtime/tuple_row.h"
+#include "util/mysql_global.h"
 #include "util/runtime_profile.h"
 #include "util/types.h"
 #include "util/uid_util.h"
@@ -45,7 +43,8 @@ ExportSink::ExportSink(ObjectPool* pool, const RowDescriptor& row_desc,
           _t_output_expr(t_exprs),
           _bytes_written_counter(nullptr),
           _rows_written_counter(nullptr),
-          _write_timer(nullptr) {
+          _write_timer(nullptr),
+          _header_sent(false) {
     _name = "ExportSink";
 }
 
@@ -71,10 +70,8 @@ Status ExportSink::prepare(RuntimeState* state) {
     _profile = state->obj_pool()->add(new RuntimeProfile(title.str()));
     SCOPED_TIMER(_profile->total_time_counter());
 
-    _mem_tracker = MemTracker::CreateTracker(-1, "ExportSink", state->instance_mem_tracker());
-
     // Prepare the exprs to run.
-    RETURN_IF_ERROR(Expr::prepare(_output_expr_ctxs, state, _row_desc, _mem_tracker));
+    RETURN_IF_ERROR(Expr::prepare(_output_expr_ctxs, state, _row_desc));
 
     // TODO(lingbin): add some Counter
     _bytes_written_counter = ADD_COUNTER(profile(), "BytesExported", TUnit::BYTES);
@@ -92,12 +89,24 @@ Status ExportSink::open(RuntimeState* state) {
     return Status::OK();
 }
 
+Status ExportSink::write_csv_header() {
+    if (!_header_sent && _t_export_sink.header.size() > 0) {
+        size_t written_len = 0;
+        RETURN_IF_ERROR(
+                _file_writer->write(reinterpret_cast<const uint8_t*>(_t_export_sink.header.c_str()),
+                                    _t_export_sink.header.size(), &written_len));
+        _header_sent = true;
+    }
+    return Status::OK();
+}
+
 Status ExportSink::send(RuntimeState* state, RowBatch* batch) {
     VLOG_ROW << "debug: export_sink send batch: " << batch->to_string();
     SCOPED_TIMER(_profile->total_time_counter());
     int num_rows = batch->num_rows();
     // we send at most 1024 rows at a time
     int batch_send_rows = num_rows > 1024 ? 1024 : num_rows;
+    RETURN_IF_ERROR(write_csv_header());
     std::stringstream ss;
     for (int i = 0; i < num_rows;) {
         ss.str("");
@@ -218,12 +227,15 @@ Status ExportSink::gen_row_buffer(TupleRow* row, std::stringstream* ss) {
 }
 
 Status ExportSink::close(RuntimeState* state, Status exec_status) {
+    if (_closed) {
+        return Status::OK();
+    }
     Expr::close(_output_expr_ctxs, state);
     if (_file_writer != nullptr) {
         _file_writer->close();
         _file_writer = nullptr;
     }
-    return Status::OK();
+    return DataSink::close(state, exec_status);
 }
 
 Status ExportSink::open_file_writer() {
@@ -232,41 +244,14 @@ Status ExportSink::open_file_writer() {
     }
 
     std::string file_name = gen_file_name();
-
     // TODO(lingbin): gen file path
-    switch (_t_export_sink.file_type) {
-    case TFileType::FILE_LOCAL: {
-        LocalFileWriter* file_writer =
-                new LocalFileWriter(_t_export_sink.export_path + "/" + file_name, 0);
-        RETURN_IF_ERROR(file_writer->open());
-        _file_writer.reset(file_writer);
-        break;
-    }
-    case TFileType::FILE_BROKER: {
-        BrokerWriter* broker_writer = new BrokerWriter(
-                _state->exec_env(), _t_export_sink.broker_addresses, _t_export_sink.properties,
-                _t_export_sink.export_path + "/" + file_name, 0 /* offset */);
-        RETURN_IF_ERROR(broker_writer->open());
-        _file_writer.reset(broker_writer);
-        break;
-    }
-    case TFileType::FILE_S3: {
-        S3Writer* s3_writer =
-                new S3Writer(_t_export_sink.properties,
-                             _t_export_sink.export_path + "/" + file_name, 0 /* offset */);
-        RETURN_IF_ERROR(s3_writer->open());
-        _file_writer.reset(s3_writer);
-        break;
-    }
-    default: {
-        std::stringstream ss;
-        ss << "Unknown file type, type=" << _t_export_sink.file_type;
-        return Status::InternalError(ss.str());
-    }
-    }
-
+    RETURN_IF_ERROR(FileFactory::create_file_writer(
+            _t_export_sink.file_type, _state->exec_env(), _t_export_sink.broker_addresses,
+            _t_export_sink.properties, _t_export_sink.export_path + "/" + file_name, 0,
+            _file_writer));
     _state->add_export_output_file(_t_export_sink.export_path + "/" + file_name);
-    return Status::OK();
+
+    return _file_writer->open();
 }
 
 // TODO(lingbin): add some other info to file name, like partition

@@ -17,7 +17,7 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.FunctionSearchDesc;
 import org.apache.doris.common.ErrorCode;
 import org.apache.doris.common.ErrorReport;
@@ -37,8 +37,13 @@ public class DropFunctionStmt extends DdlStmt {
         this.argsDef = argsDef;
     }
 
-    public FunctionName getFunctionName() { return functionName; }
-    public FunctionSearchDesc getFunction() { return function; }
+    public FunctionName getFunctionName() {
+        return functionName;
+    }
+
+    public FunctionSearchDesc getFunction() {
+        return function;
+    }
 
     @Override
     public void analyze(Analyzer analyzer) throws UserException {
@@ -48,7 +53,7 @@ public class DropFunctionStmt extends DdlStmt {
         functionName.analyze(analyzer);
 
         // check operation privilege
-        if (!Catalog.getCurrentCatalog().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
+        if (!Env.getCurrentEnv().getAuth().checkGlobalPriv(ConnectContext.get(), PrivPredicate.ADMIN)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "ADMIN");
         }
 
@@ -64,7 +69,7 @@ public class DropFunctionStmt extends DdlStmt {
         return stringBuilder.toString();
     }
 
-    @Override 
+    @Override
     public RedirectStatus getRedirectStatus() {
         return RedirectStatus.FORWARD_WITH_SYNC;
     }

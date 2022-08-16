@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#pragma once
+
 #include <cstdint>
 #include <unordered_map>
 #include <utility>
@@ -23,11 +25,14 @@
 #include "gen_cpp/PaloInternalService_types.h"
 #include "gen_cpp/Types_types.h"
 #include "gen_cpp/internal_service.pb.h"
+#include "gutil/strings/substitute.h"
 #include "runtime/descriptors.h"
-#include "runtime/mem_tracker.h"
+#include "runtime/memory/mem_tracker.h"
+#include "runtime/thread_context.h"
 #include "util/bitmap.h"
 #include "util/priority_thread_pool.hpp"
 #include "util/uid_util.h"
+#include "vec/core/block.h"
 
 namespace doris {
 
@@ -50,26 +55,35 @@ std::ostream& operator<<(std::ostream& os, const TabletsChannelKey& key);
 
 class DeltaWriter;
 class OlapTableSchemaParam;
+class LoadChannel;
 
 // Write channel for a particular (load, index).
 class TabletsChannel {
 public:
-    TabletsChannel(const TabletsChannelKey& key, const std::shared_ptr<MemTracker>& mem_tracker);
+    TabletsChannel(const TabletsChannelKey& key,
+                   const std::shared_ptr<MemTrackerLimiter>& parent_tracker, bool is_high_priority,
+                   bool is_vec);
 
     ~TabletsChannel();
 
-    Status open(const PTabletWriterOpenRequest& params);
+    Status open(const PTabletWriterOpenRequest& request);
 
     // no-op when this channel has been closed or cancelled
-    Status add_batch(const PTabletWriterAddBatchRequest& batch);
+    template <typename TabletWriterAddRequest, typename TabletWriterAddResult>
+    Status add_batch(const TabletWriterAddRequest& request, TabletWriterAddResult* response);
 
     // Mark sender with 'sender_id' as closed.
     // If all senders are closed, close this channel, set '*finished' to true, update 'tablet_vec'
     // to include all tablets written in this channel.
     // no-op when this channel has been closed or cancelled
-    Status close(int sender_id, int64_t backend_id, bool* finished,
-                 const google::protobuf::RepeatedField<int64_t>& partition_ids,
-                 google::protobuf::RepeatedPtrField<PTabletInfo>* tablet_vec);
+    Status
+    close(LoadChannel* parent, int sender_id, int64_t backend_id, bool* finished,
+          const google::protobuf::RepeatedField<int64_t>& partition_ids,
+          google::protobuf::RepeatedPtrField<PTabletInfo>* tablet_vec,
+          google::protobuf::RepeatedPtrField<PTabletError>* tablet_error,
+          const google::protobuf::Map<int64_t, PSlaveTabletNodes>& slave_tablet_nodes,
+          google::protobuf::Map<int64_t, PSuccessSlaveTabletNodeIds>* success_slave_tablet_node_ids,
+          const bool write_single_replica);
 
     // no-op when this channel has been closed or cancelled
     Status cancel();
@@ -83,10 +97,18 @@ public:
     int64_t mem_consumption() const { return _mem_tracker->consumption(); }
 
 private:
-    // open all writer
-    Status _open_all_writers(const PTabletWriterOpenRequest& params);
+    template <typename Request>
+    Status _get_current_seq(int64_t& cur_seq, const Request& request);
 
-private:
+    // open all writer
+    Status _open_all_writers(const PTabletWriterOpenRequest& request);
+
+    // deal with DeltaWriter close_wait(), add tablet to list for return.
+    void _close_wait(DeltaWriter* writer,
+                     google::protobuf::RepeatedPtrField<PTabletInfo>* tablet_vec,
+                     google::protobuf::RepeatedPtrField<PTabletError>* tablet_error,
+                     PSlaveTabletNodes slave_tablet_nodes, const bool write_single_replica);
+
     // id of this load channel
     TabletsChannelKey _key;
 
@@ -104,6 +126,7 @@ private:
     int64_t _txn_id = -1;
     int64_t _index_id = -1;
     OlapTableSchemaParam* _schema = nullptr;
+
     TupleDescriptor* _tuple_desc = nullptr;
     // row_desc used to construct
     RowDescriptor* _row_desc = nullptr;
@@ -118,12 +141,40 @@ private:
 
     // tablet_id -> TabletChannel
     std::unordered_map<int64_t, DeltaWriter*> _tablet_writers;
+    // broken tablet ids.
+    // If a tablet write fails, it's id will be added to this set.
+    // So that following batch will not handle this tablet anymore.
+    std::unordered_set<int64_t> _broken_tablets;
 
     std::unordered_set<int64_t> _partition_ids;
 
-    std::shared_ptr<MemTracker> _mem_tracker;
-
     static std::atomic<uint64_t> _s_tablet_writer_count;
+
+    std::shared_ptr<MemTrackerLimiter> _mem_tracker;
+
+    bool _is_high_priority = false;
+
+    bool _is_vec = false;
+
+    bool _write_single_replica = false;
 };
+
+template <typename Request>
+Status TabletsChannel::_get_current_seq(int64_t& cur_seq, const Request& request) {
+    std::lock_guard<std::mutex> l(_lock);
+    if (_state != kOpened) {
+        return _state == kFinished ? _close_status
+                                   : Status::InternalError("TabletsChannel {} state: {}",
+                                                           _key.to_string(), _state);
+    }
+    cur_seq = _next_seqs[request.sender_id()];
+    // check packet
+    if (request.packet_seq() > cur_seq) {
+        LOG(WARNING) << "lost data packet, expect_seq=" << cur_seq
+                     << ", recept_seq=" << request.packet_seq();
+        return Status::InternalError("lost data packet");
+    }
+    return Status::OK();
+}
 
 } // namespace doris

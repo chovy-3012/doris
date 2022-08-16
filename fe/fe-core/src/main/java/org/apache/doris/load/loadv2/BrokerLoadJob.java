@@ -19,8 +19,8 @@ package org.apache.doris.load.loadv2;
 
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.UserIdentity;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.common.AnalysisException;
@@ -41,7 +41,6 @@ import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.BrokerFileGroupAggInfo.FileGroupAggKey;
 import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.FailMsg;
-import org.apache.doris.metric.MetricRepo;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.OriginStatement;
 import org.apache.doris.service.FrontendOptions;
@@ -53,7 +52,6 @@ import org.apache.doris.transaction.TransactionState.TxnSourceType;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -96,8 +94,7 @@ public class BrokerLoadJob extends BulkLoadJob {
     public void beginTxn()
             throws LabelAlreadyUsedException, BeginTransactionException, AnalysisException, DuplicatedRequestException,
             QuotaExceedException, MetaNotFoundException {
-        MetricRepo.COUNTER_LOAD_ADD.increase(1L);
-        transactionId = Catalog.getCurrentGlobalTransactionMgr()
+        transactionId = Env.getCurrentGlobalTransactionMgr()
                 .beginTransaction(dbId, Lists.newArrayList(fileGroupAggInfo.getAllTableIds()), label, null,
                         new TxnCoordinator(TxnSourceType.FE, FrontendOptions.getLocalHostAddress()),
                         TransactionState.LoadJobSourceType.BATCH_LOAD_JOB, id,
@@ -108,11 +105,12 @@ public class BrokerLoadJob extends BulkLoadJob {
     protected void unprotectedExecuteJob() {
         LoadTask task = new BrokerLoadPendingTask(this, fileGroupAggInfo.getAggKeyToFileGroups(), brokerDesc);
         idToTasks.put(task.getSignature(), task);
-        Catalog.getCurrentCatalog().getPendingLoadTaskScheduler().submit(task);
+        Env.getCurrentEnv().getPendingLoadTaskScheduler().submit(task);
     }
 
     /**
-     * Situation1: When attachment is instance of BrokerPendingTaskAttachment, this method is called by broker pending task.
+     * Situation1: When attachment is instance of BrokerPendingTaskAttachment,
+     * this method is called by broker pending task.
      * LoadLoadingTask will be created after BrokerPendingTask is finished.
      * Situation2: When attachment is instance of BrokerLoadingTaskAttachment, this method is called by LoadLoadingTask.
      * CommitTxn will be called after all of LoadingTasks are finished.
@@ -184,13 +182,15 @@ public class BrokerLoadJob extends BulkLoadJob {
     }
 
     private void createLoadingTask(Database db, BrokerPendingTaskAttachment attachment) throws UserException {
-        List<Table> tableList = db.getTablesOnIdOrderOrThrowException(Lists.newArrayList(fileGroupAggInfo.getAllTableIds()));
+        List<Table> tableList = db.getTablesOnIdOrderOrThrowException(
+                Lists.newArrayList(fileGroupAggInfo.getAllTableIds()));
         // divide job into broker loading task by table
         List<LoadLoadingTask> newLoadingTasks = Lists.newArrayList();
         this.jobProfile = new RuntimeProfile("BrokerLoadJob " + id + ". " + label);
         MetaLockUtils.readLockTables(tableList);
         try {
-            for (Map.Entry<FileGroupAggKey, List<BrokerFileGroup>> entry : fileGroupAggInfo.getAggKeyToFileGroups().entrySet()) {
+            for (Map.Entry<FileGroupAggKey, List<BrokerFileGroup>> entry
+                    : fileGroupAggInfo.getAggKeyToFileGroups().entrySet()) {
                 FileGroupAggKey aggKey = entry.getKey();
                 List<BrokerFileGroup> brokerFileGroups = entry.getValue();
                 long tableId = aggKey.getTableId();
@@ -199,7 +199,9 @@ public class BrokerLoadJob extends BulkLoadJob {
                 LoadLoadingTask task = new LoadLoadingTask(db, table, brokerDesc,
                         brokerFileGroups, getDeadlineMs(), getExecMemLimit(),
                         isStrictMode(), transactionId, this, getTimeZone(), getTimeout(),
-                        getLoadParallelism(), getSendBatchParallelism(), enableProfile ? jobProfile : null);
+                        getLoadParallelism(), getSendBatchParallelism(),
+                        getMaxFilterRatio() <= 0, enableProfile ? jobProfile : null, isSingleTabletLoadPerSink());
+
                 UUID uuid = UUID.randomUUID();
                 TUniqueId loadId = new TUniqueId(uuid.getMostSignificantBits(), uuid.getLeastSignificantBits());
                 task.init(loadId, attachment.getFileStatusByTable(aggKey),
@@ -211,18 +213,19 @@ public class BrokerLoadJob extends BulkLoadJob {
                 // load id will be added to loadStatistic when executing this task
 
                 // save all related tables and rollups in transaction state
-                TransactionState txnState = Catalog.getCurrentGlobalTransactionMgr().getTransactionState(dbId, transactionId);
+                TransactionState txnState = Env.getCurrentGlobalTransactionMgr()
+                        .getTransactionState(dbId, transactionId);
                 if (txnState == null) {
                     throw new UserException("txn does not exist: " + transactionId);
                 }
                 txnState.addTableIndexes(table);
             }
         } finally {
-           MetaLockUtils.readUnlockTables(tableList);
+            MetaLockUtils.readUnlockTables(tableList);
         }
         // Submit task outside the database lock, cause it may take a while if task queue is full.
         for (LoadTask loadTask : newLoadingTasks) {
-            Catalog.getCurrentCatalog().getLoadingLoadTaskScheduler().submit(loadTask);
+            Env.getCurrentEnv().getLoadingLoadTaskScheduler().submit(loadTask);
         }
     }
 
@@ -266,8 +269,8 @@ public class BrokerLoadJob extends BulkLoadJob {
 
         // check data quality
         if (!checkDataQuality()) {
-            cancelJobWithoutCheck(new FailMsg(FailMsg.CancelType.ETL_QUALITY_UNSATISFIED, DataQualityException.QUALITY_FAIL_MSG),
-                    true, true);
+            cancelJobWithoutCheck(new FailMsg(FailMsg.CancelType.ETL_QUALITY_UNSATISFIED,
+                            DataQualityException.QUALITY_FAIL_MSG), true, true);
             return;
         }
         Database db = null;
@@ -275,6 +278,7 @@ public class BrokerLoadJob extends BulkLoadJob {
         try {
             db = getDb();
             tableList = db.getTablesOnIdOrderOrThrowException(Lists.newArrayList(fileGroupAggInfo.getAllTableIds()));
+            MetaLockUtils.writeLockTablesOrMetaException(tableList);
         } catch (MetaNotFoundException e) {
             LOG.warn(new LogBuilder(LogKey.LOAD_JOB, id)
                     .add("database_id", dbId)
@@ -283,14 +287,12 @@ public class BrokerLoadJob extends BulkLoadJob {
             cancelJobWithoutCheck(new FailMsg(FailMsg.CancelType.LOAD_RUN_FAIL, e.getMessage()), true, true);
             return;
         }
-        MetaLockUtils.writeLockTables(tableList);
         try {
             LOG.info(new LogBuilder(LogKey.LOAD_JOB, id)
                     .add("txn_id", transactionId)
                     .add("msg", "Load job try to commit txn")
                     .build());
-            MetricRepo.COUNTER_LOAD_FINISHED.increase(1L);
-            Catalog.getCurrentGlobalTransactionMgr().commitTransaction(
+            Env.getCurrentGlobalTransactionMgr().commitTransaction(
                     dbId, tableList, transactionId, commitInfos,
                     new LoadJobFinalOperation(id, loadingStatus, progress, loadStartTimestamp,
                             finishTimestamp, state, failMsg));
@@ -314,7 +316,8 @@ public class BrokerLoadJob extends BulkLoadJob {
         summaryProfile.addInfoString(ProfileManager.QUERY_ID, String.valueOf(id));
         summaryProfile.addInfoString(ProfileManager.START_TIME, TimeUtils.longToTimeString(createTimestamp));
         summaryProfile.addInfoString(ProfileManager.END_TIME, TimeUtils.longToTimeString(finishTimestamp));
-        summaryProfile.addInfoString(ProfileManager.TOTAL_TIME, DebugUtil.getPrettyStringMs(finishTimestamp - createTimestamp));
+        summaryProfile.addInfoString(ProfileManager.TOTAL_TIME,
+                DebugUtil.getPrettyStringMs(finishTimestamp - createTimestamp));
 
         summaryProfile.addInfoString(ProfileManager.QUERY_TYPE, "Load");
         summaryProfile.addInfoString(ProfileManager.QUERY_STATE, "N/A");
@@ -340,6 +343,8 @@ public class BrokerLoadJob extends BulkLoadJob {
             loadingStatus.setTrackingUrl(attachment.getTrackingUrl());
         }
         commitInfos.addAll(attachment.getCommitInfoList());
+        errorTabletInfos.addAll(attachment.getErrorTabletInfos());
+
         progress = (int) ((double) finishedTaskIds.size() / idToTasks.size() * 100);
         if (progress == 100) {
             progress = 99;

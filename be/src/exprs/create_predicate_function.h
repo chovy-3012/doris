@@ -20,7 +20,6 @@
 #include "exprs/bloomfilter_predicate.h"
 #include "exprs/hybrid_set.h"
 #include "exprs/minmax_predicate.h"
-#include "runtime/mem_tracker.h"
 
 namespace doris {
 
@@ -28,19 +27,20 @@ class MinmaxFunctionTraits {
 public:
     using BasePtr = MinMaxFuncBase*;
     template <PrimitiveType type>
-    static BasePtr get_function([[maybe_unused]] MemTracker* tracker) {
+    static BasePtr get_function() {
         return new (std::nothrow) MinMaxNumFunc<typename PrimitiveTypeTraits<type>::CppType>();
     };
 };
 
+template <bool is_vec>
 class HybridSetTraits {
 public:
     using BasePtr = HybridSetBase*;
     template <PrimitiveType type>
-    static BasePtr get_function([[maybe_unused]] MemTracker* tracker) {
+    static BasePtr get_function() {
         using CppType = typename PrimitiveTypeTraits<type>::CppType;
         using Set = std::conditional_t<std::is_same_v<CppType, StringValue>, StringValueSet,
-                                       HybridSet<CppType>>;
+                                       HybridSet<type, is_vec>>;
         return new (std::nothrow) Set();
     };
 };
@@ -49,8 +49,8 @@ class BloomFilterTraits {
 public:
     using BasePtr = IBloomFilterFuncBase*;
     template <PrimitiveType type>
-    static BasePtr get_function(MemTracker* tracker) {
-        return new BloomFilterFunc<type, CurrentBloomFilterAdaptor>(tracker);
+    static BasePtr get_function() {
+        return new BloomFilterFunc<type, CurrentBloomFilterAdaptor>();
     };
 };
 
@@ -58,49 +58,58 @@ template <class Traits>
 class PredicateFunctionCreator {
 public:
     template <PrimitiveType type>
-    static typename Traits::BasePtr create(MemTracker* tracker = nullptr) {
-        return Traits::template get_function<type>(tracker);
+    static typename Traits::BasePtr create() {
+        return Traits::template get_function<type>();
     }
 };
 
 template <class Traits>
-typename Traits::BasePtr create_predicate_function(PrimitiveType type,
-                                                   MemTracker* tracker = nullptr) {
+typename Traits::BasePtr create_predicate_function(PrimitiveType type) {
     using Creator = PredicateFunctionCreator<Traits>;
 
     switch (type) {
     case TYPE_BOOLEAN:
-        return Creator::template create<TYPE_BOOLEAN>(tracker);
+        return Creator::template create<TYPE_BOOLEAN>();
     case TYPE_TINYINT:
-        return Creator::template create<TYPE_TINYINT>(tracker);
+        return Creator::template create<TYPE_TINYINT>();
     case TYPE_SMALLINT:
-        return Creator::template create<TYPE_SMALLINT>(tracker);
+        return Creator::template create<TYPE_SMALLINT>();
     case TYPE_INT:
-        return Creator::template create<TYPE_INT>(tracker);
+        return Creator::template create<TYPE_INT>();
     case TYPE_BIGINT:
-        return Creator::template create<TYPE_BIGINT>(tracker);
+        return Creator::template create<TYPE_BIGINT>();
     case TYPE_LARGEINT:
-        return Creator::template create<TYPE_LARGEINT>(tracker);
+        return Creator::template create<TYPE_LARGEINT>();
 
     case TYPE_FLOAT:
-        return Creator::template create<TYPE_FLOAT>(tracker);
+        return Creator::template create<TYPE_FLOAT>();
     case TYPE_DOUBLE:
-        return Creator::template create<TYPE_DOUBLE>(tracker);
+        return Creator::template create<TYPE_DOUBLE>();
 
     case TYPE_DECIMALV2:
-        return Creator::template create<TYPE_DECIMALV2>(tracker);
+        return Creator::template create<TYPE_DECIMALV2>();
 
     case TYPE_DATE:
-        return Creator::template create<TYPE_DATE>(tracker);
+        return Creator::template create<TYPE_DATE>();
     case TYPE_DATETIME:
-        return Creator::template create<TYPE_DATETIME>(tracker);
+        return Creator::template create<TYPE_DATETIME>();
+    case TYPE_DATEV2:
+        return Creator::template create<TYPE_DATEV2>();
+    case TYPE_DATETIMEV2:
+        return Creator::template create<TYPE_DATETIMEV2>();
 
     case TYPE_CHAR:
-        return Creator::template create<TYPE_CHAR>(tracker);
+        return Creator::template create<TYPE_CHAR>();
     case TYPE_VARCHAR:
-        return Creator::template create<TYPE_VARCHAR>(tracker);
+        return Creator::template create<TYPE_VARCHAR>();
     case TYPE_STRING:
-        return Creator::template create<TYPE_STRING>(tracker);
+        return Creator::template create<TYPE_STRING>();
+    case TYPE_DECIMAL32:
+        return Creator::template create<TYPE_DECIMAL32>();
+    case TYPE_DECIMAL64:
+        return Creator::template create<TYPE_DECIMAL64>();
+    case TYPE_DECIMAL128:
+        return Creator::template create<TYPE_DECIMAL128>();
 
     default:
         DCHECK(false) << "Invalid type.";
@@ -114,11 +123,16 @@ inline auto create_minmax_filter(PrimitiveType type) {
 }
 
 inline auto create_set(PrimitiveType type) {
-    return create_predicate_function<HybridSetTraits>(type);
+    return create_predicate_function<HybridSetTraits<false>>(type);
 }
 
-inline auto create_bloom_filter(MemTracker* tracker, PrimitiveType type) {
-    return create_predicate_function<BloomFilterTraits>(type, tracker);
+// used for VInPredicate
+inline auto vec_create_set(PrimitiveType type) {
+    return create_predicate_function<HybridSetTraits<true>>(type);
+}
+
+inline auto create_bloom_filter(PrimitiveType type) {
+    return create_predicate_function<BloomFilterTraits>(type);
 }
 
 } // namespace doris

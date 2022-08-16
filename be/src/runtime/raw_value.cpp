@@ -14,16 +14,20 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/raw-value.cpp
+// and modified by Doris
 
 #include "runtime/raw_value.h"
 
 #include <sstream>
 
-#include "olap/utils.h"
+#include "common/consts.h"
 #include "runtime/collection_value.h"
-#include "runtime/string_value.hpp"
+#include "runtime/large_int_value.h"
 #include "runtime/tuple.h"
 #include "util/types.h"
+#include "vec/io/io_helper.h"
 
 namespace doris {
 
@@ -82,8 +86,31 @@ void RawValue::print_value_as_bytes(const void* value, const TypeDescriptor& typ
         stream->write(chars, sizeof(DateTimeValue));
         break;
 
+    case TYPE_DATEV2:
+        stream->write(chars,
+                      sizeof(doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>));
+        break;
+
+    case TYPE_DATETIMEV2:
+        stream->write(
+                chars,
+                sizeof(doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>));
+        break;
+
     case TYPE_DECIMALV2:
         stream->write(chars, sizeof(DecimalV2Value));
+        break;
+
+    case TYPE_DECIMAL32:
+        stream->write(chars, 4);
+        break;
+
+    case TYPE_DECIMAL64:
+        stream->write(chars, 8);
+        break;
+
+    case TYPE_DECIMAL128:
+        stream->write(chars, 16);
         break;
 
     case TYPE_LARGEINT:
@@ -160,9 +187,38 @@ void RawValue::print_value(const void* value, const TypeDescriptor& type, int sc
         *stream << *reinterpret_cast<const DateTimeValue*>(value);
         break;
 
+    case TYPE_DATEV2:
+        *stream << *reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(value);
+        break;
+
+    case TYPE_DATETIMEV2:
+        *stream << *reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>*>(
+                value);
+        break;
+
     case TYPE_DECIMALV2:
         *stream << DecimalV2Value(reinterpret_cast<const PackedInt128*>(value)->value).to_string();
         break;
+
+    case TYPE_DECIMAL32: {
+        auto decimal_val = reinterpret_cast<const doris::vectorized::Decimal32*>(value);
+        write_text(*decimal_val, type.scale, *stream);
+        break;
+    }
+
+    case TYPE_DECIMAL64: {
+        auto decimal_val = reinterpret_cast<const doris::vectorized::Decimal64*>(value);
+        write_text(*decimal_val, type.scale, *stream);
+        break;
+    }
+
+    case TYPE_DECIMAL128: {
+        auto decimal_val = reinterpret_cast<const doris::vectorized::Decimal128*>(value);
+        write_text(*decimal_val, type.scale, *stream);
+        break;
+    }
 
     case TYPE_LARGEINT:
         *stream << reinterpret_cast<const PackedInt128*>(value)->value;
@@ -173,11 +229,11 @@ void RawValue::print_value(const void* value, const TypeDescriptor& type, int sc
         auto children_type = type.children.at(0);
         auto iter = src->iterator(children_type.type);
         *stream << "[";
-        print_value(iter.value(), children_type, scale, stream);
+        print_value(iter.get(), children_type, scale, stream);
         iter.next();
         for (; iter.has_next(); iter.next()) {
             *stream << ", ";
-            print_value(iter.value(), children_type, scale, stream);
+            print_value(iter.get(), children_type, scale, stream);
         }
         *stream << "]";
         break;
@@ -216,6 +272,7 @@ void RawValue::print_value(const void* value, const TypeDescriptor& type, int sc
     case TYPE_VARCHAR:
     case TYPE_OBJECT:
     case TYPE_HLL:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING: {
         string_val = reinterpret_cast<const StringValue*>(value);
         std::stringstream ss;
@@ -290,12 +347,41 @@ void RawValue::write(const void* value, void* dst, const TypeDescriptor& type, M
         *reinterpret_cast<DateTimeValue*>(dst) = *reinterpret_cast<const DateTimeValue*>(value);
         break;
 
+    case TYPE_DATEV2:
+        *reinterpret_cast<doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(
+                dst) =
+                *reinterpret_cast<
+                        const doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(
+                        value);
+        break;
+
+    case TYPE_DATETIMEV2:
+        *reinterpret_cast<doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>*>(
+                dst) =
+                *reinterpret_cast<const doris::vectorized::DateV2Value<
+                        doris::vectorized::DateTimeV2ValueType>*>(value);
+        break;
+
     case TYPE_DECIMALV2:
         *reinterpret_cast<PackedInt128*>(dst) = *reinterpret_cast<const PackedInt128*>(value);
         break;
 
+    case TYPE_DECIMAL32:
+        *reinterpret_cast<doris::vectorized::Decimal32*>(dst) =
+                *reinterpret_cast<const doris::vectorized::Decimal32*>(value);
+        break;
+    case TYPE_DECIMAL64:
+        *reinterpret_cast<doris::vectorized::Decimal64*>(dst) =
+                *reinterpret_cast<const doris::vectorized::Decimal64*>(value);
+        break;
+    case TYPE_DECIMAL128:
+        *reinterpret_cast<doris::vectorized::Decimal128*>(dst) =
+                *reinterpret_cast<const doris::vectorized::Decimal128*>(value);
+        break;
+
     case TYPE_OBJECT:
     case TYPE_HLL:
+    case TYPE_QUANTILE_STATE:
     case TYPE_VARCHAR:
     case TYPE_CHAR:
     case TYPE_STRING: {
@@ -319,18 +405,16 @@ void RawValue::write(const void* value, void* dst, const TypeDescriptor& type, M
         CollectionValue* val = reinterpret_cast<CollectionValue*>(dst);
 
         if (pool != nullptr) {
-            auto children_type = type.children.at(0).type;
-            CollectionValue::init_collection(pool, src->size(), children_type, val);
-            ArrayIterator src_iter = src->iterator(children_type);
-            ArrayIterator val_iter = val->iterator(children_type);
+            const auto& item_type = type.children[0];
+            CollectionValue::init_collection(pool, src->size(), item_type.type, val);
+            ArrayIterator src_iter = src->iterator(item_type.type);
+            ArrayIterator val_iter = val->iterator(item_type.type);
 
+            val->set_has_null(src->has_null());
             val->copy_null_signs(src);
 
             while (src_iter.has_next() && val_iter.has_next()) {
-                if (!src_iter.is_null()) {
-                    // write children
-                    write(src_iter.value(), val_iter.value(), children_type, pool);
-                }
+                val_iter.raw_value_write(src_iter.get(), item_type, pool);
                 src_iter.next();
                 val_iter.next();
             }
@@ -376,6 +460,19 @@ void RawValue::write(const void* value, const TypeDescriptor& type, void* dst, u
     case TYPE_DATETIME:
         *reinterpret_cast<DateTimeValue*>(dst) = *reinterpret_cast<const DateTimeValue*>(value);
         break;
+    case TYPE_DATEV2:
+        *reinterpret_cast<doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(
+                dst) =
+                *reinterpret_cast<
+                        const doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(
+                        value);
+        break;
+    case TYPE_DATETIMEV2:
+        *reinterpret_cast<doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>*>(
+                dst) =
+                *reinterpret_cast<const doris::vectorized::DateV2Value<
+                        doris::vectorized::DateTimeV2ValueType>*>(value);
+        break;
     case TYPE_VARCHAR:
     case TYPE_CHAR:
     case TYPE_STRING: {
@@ -393,6 +490,19 @@ void RawValue::write(const void* value, const TypeDescriptor& type, void* dst, u
         *reinterpret_cast<PackedInt128*>(dst) = *reinterpret_cast<const PackedInt128*>(value);
         break;
 
+    case TYPE_DECIMAL32:
+        *reinterpret_cast<doris::vectorized::Decimal32*>(dst) =
+                *reinterpret_cast<const doris::vectorized::Decimal32*>(value);
+        break;
+    case TYPE_DECIMAL64:
+        *reinterpret_cast<doris::vectorized::Decimal64*>(dst) =
+                *reinterpret_cast<const doris::vectorized::Decimal64*>(value);
+        break;
+    case TYPE_DECIMAL128:
+        *reinterpret_cast<doris::vectorized::Decimal128*>(dst) =
+                *reinterpret_cast<const doris::vectorized::Decimal128*>(value);
+        break;
+
     default:
         DCHECK(false) << "RawValue::write(): bad type: " << type.debug_string();
     }
@@ -406,6 +516,131 @@ void RawValue::write(const void* value, Tuple* tuple, const SlotDescriptor* slot
         void* slot = tuple->get_slot(slot_desc->tuple_offset());
         RawValue::write(value, slot, slot_desc->type(), pool);
     }
+}
+
+int RawValue::compare(const void* v1, const void* v2, const TypeDescriptor& type) {
+    const StringValue* string_value1;
+    const StringValue* string_value2;
+    const DateTimeValue* ts_value1;
+    const DateTimeValue* ts_value2;
+    float f1 = 0;
+    float f2 = 0;
+    double d1 = 0;
+    double d2 = 0;
+    int32_t i1;
+    int32_t i2;
+    int64_t b1;
+    int64_t b2;
+
+    if (nullptr == v1 && nullptr == v2) {
+        return 0;
+    } else if (nullptr == v1 && nullptr != v2) {
+        return -1;
+    } else if (nullptr != v1 && nullptr == v2) {
+        return 1;
+    }
+
+    switch (type.type) {
+    case TYPE_NULL:
+        return 0;
+
+    case TYPE_BOOLEAN:
+        return *reinterpret_cast<const bool*>(v1) - *reinterpret_cast<const bool*>(v2);
+
+    case TYPE_TINYINT:
+        return *reinterpret_cast<const int8_t*>(v1) - *reinterpret_cast<const int8_t*>(v2);
+
+    case TYPE_SMALLINT:
+        return *reinterpret_cast<const int16_t*>(v1) - *reinterpret_cast<const int16_t*>(v2);
+
+    case TYPE_INT:
+        i1 = *reinterpret_cast<const int32_t*>(v1);
+        i2 = *reinterpret_cast<const int32_t*>(v2);
+        return i1 > i2 ? 1 : (i1 < i2 ? -1 : 0);
+
+    case TYPE_BIGINT:
+        b1 = *reinterpret_cast<const int64_t*>(v1);
+        b2 = *reinterpret_cast<const int64_t*>(v2);
+        return b1 > b2 ? 1 : (b1 < b2 ? -1 : 0);
+
+    case TYPE_FLOAT:
+        // TODO: can this be faster? (just returning the difference has underflow problems)
+        f1 = *reinterpret_cast<const float*>(v1);
+        f2 = *reinterpret_cast<const float*>(v2);
+        return f1 > f2 ? 1 : (f1 < f2 ? -1 : 0);
+
+    case TYPE_DOUBLE:
+        // TODO: can this be faster?
+        d1 = *reinterpret_cast<const double*>(v1);
+        d2 = *reinterpret_cast<const double*>(v2);
+        return d1 > d2 ? 1 : (d1 < d2 ? -1 : 0);
+
+    case TYPE_CHAR:
+    case TYPE_VARCHAR:
+    case TYPE_HLL:
+    case TYPE_STRING:
+        string_value1 = reinterpret_cast<const StringValue*>(v1);
+        string_value2 = reinterpret_cast<const StringValue*>(v2);
+        return string_value1->compare(*string_value2);
+
+    case TYPE_DATE:
+    case TYPE_DATETIME:
+        ts_value1 = reinterpret_cast<const DateTimeValue*>(v1);
+        ts_value2 = reinterpret_cast<const DateTimeValue*>(v2);
+        return *ts_value1 > *ts_value2 ? 1 : (*ts_value1 < *ts_value2 ? -1 : 0);
+
+    case TYPE_DATEV2: {
+        auto date_v2_value1 = reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(v1);
+        auto date_v2_value2 = reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(v2);
+        return *date_v2_value1 > *date_v2_value2 ? 1 : (*date_v2_value1 < *date_v2_value2 ? -1 : 0);
+    }
+
+    case TYPE_DATETIMEV2: {
+        auto date_v2_value1 = reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>*>(v1);
+        auto date_v2_value2 = reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>*>(v2);
+        return *date_v2_value1 > *date_v2_value2 ? 1 : (*date_v2_value1 < *date_v2_value2 ? -1 : 0);
+    }
+
+    case TYPE_DECIMALV2: {
+        DecimalV2Value decimal_value1(reinterpret_cast<const PackedInt128*>(v1)->value);
+        DecimalV2Value decimal_value2(reinterpret_cast<const PackedInt128*>(v2)->value);
+        return (decimal_value1 > decimal_value2) ? 1 : (decimal_value1 < decimal_value2 ? -1 : 0);
+    }
+
+    case TYPE_DECIMAL32: {
+        i1 = *reinterpret_cast<const int32_t*>(v1);
+        i2 = *reinterpret_cast<const int32_t*>(v2);
+        return i1 > i2 ? 1 : (i1 < i2 ? -1 : 0);
+    }
+
+    case TYPE_DECIMAL64: {
+        b1 = *reinterpret_cast<const int64_t*>(v1);
+        b2 = *reinterpret_cast<const int64_t*>(v2);
+        return b1 > b2 ? 1 : (b1 < b2 ? -1 : 0);
+    }
+
+    case TYPE_DECIMAL128: {
+        __int128 large_int_value1 = reinterpret_cast<const PackedInt128*>(v1)->value;
+        __int128 large_int_value2 = reinterpret_cast<const PackedInt128*>(v2)->value;
+        return large_int_value1 > large_int_value2 ? 1
+                                                   : (large_int_value1 < large_int_value2 ? -1 : 0);
+    }
+
+    case TYPE_LARGEINT: {
+        __int128 large_int_value1 = reinterpret_cast<const PackedInt128*>(v1)->value;
+        __int128 large_int_value2 = reinterpret_cast<const PackedInt128*>(v2)->value;
+        return large_int_value1 > large_int_value2 ? 1
+                                                   : (large_int_value1 < large_int_value2 ? -1 : 0);
+    }
+
+    default:
+        DCHECK(false) << "invalid type: " << type.type;
+        return 0;
+    };
 }
 
 } // namespace doris

@@ -17,16 +17,15 @@
 
 #include "olap/rowset/rowset.h"
 
+#include "olap/tablet_schema.h"
+#include "olap/tablet_schema_cache.h"
 #include "util/time.h"
 
 namespace doris {
 
-Rowset::Rowset(const TabletSchema* schema, std::string rowset_path, RowsetMetaSharedPtr rowset_meta)
-        : _schema(schema),
-          _rowset_path(std::move(rowset_path)),
-          _rowset_meta(std::move(rowset_meta)),
-          _refs_by_reader(0),
-          _rowset_state_machine(RowsetStateMachine()) {
+Rowset::Rowset(TabletSchemaSPtr schema, const std::string& tablet_path,
+               RowsetMetaSharedPtr rowset_meta)
+        : _tablet_path(tablet_path), _rowset_meta(std::move(rowset_meta)), _refs_by_reader(0) {
     _is_pending = !_rowset_meta->has_version();
     if (_is_pending) {
         _is_cumulative = false;
@@ -34,13 +33,15 @@ Rowset::Rowset(const TabletSchema* schema, std::string rowset_path, RowsetMetaSh
         Version version = _rowset_meta->version();
         _is_cumulative = version.first != version.second;
     }
+    // build schema from RowsetMeta.tablet_schema or Tablet.tablet_schema
+    _schema = _rowset_meta->tablet_schema() ? _rowset_meta->tablet_schema() : schema;
 }
 
-OLAPStatus Rowset::load(bool use_cache) {
+Status Rowset::load(bool use_cache) {
     // if the state is ROWSET_UNLOADING it means close() is called
     // and the rowset is already loaded, and the resource is not closed yet.
     if (_rowset_state_machine.rowset_state() == ROWSET_LOADED) {
-        return OLAP_SUCCESS;
+        return Status::OK();
     }
     {
         // before lock, if rowset state is ROWSET_UNLOADING, maybe it is doing do_close in release
@@ -53,16 +54,16 @@ OLAPStatus Rowset::load(bool use_cache) {
         }
     }
     // load is done
-    VLOG_CRITICAL << "rowset is loaded. " << rowset_id() << ", rowset version:" << rowset_meta()->version()
-              << ", state from ROWSET_UNLOADED to ROWSET_LOADED. tabletid:"
-              << _rowset_meta->tablet_id();
-    return OLAP_SUCCESS;
+    VLOG_CRITICAL << "rowset is loaded. " << rowset_id()
+                  << ", rowset version:" << rowset_meta()->version()
+                  << ", state from ROWSET_UNLOADED to ROWSET_LOADED. tabletid:"
+                  << _rowset_meta->tablet_id();
+    return Status::OK();
 }
 
-void Rowset::make_visible(Version version, VersionHash version_hash) {
+void Rowset::make_visible(Version version) {
     _is_pending = false;
     _rowset_meta->set_version(version);
-    _rowset_meta->set_version_hash(version_hash);
     _rowset_meta->set_rowset_state(VISIBLE);
     // update create time to the visible time,
     // it's used to skip recently published version during compaction
@@ -72,7 +73,12 @@ void Rowset::make_visible(Version version, VersionHash version_hash) {
         _rowset_meta->mutable_delete_predicate()->set_version(version.first);
         return;
     }
-    make_visible_extra(version, version_hash);
+    make_visible_extra(version);
+}
+
+bool Rowset::check_rowset_segment() {
+    std::lock_guard<std::mutex> load_lock(_lock);
+    return check_current_rowset_segment();
 }
 
 } // namespace doris

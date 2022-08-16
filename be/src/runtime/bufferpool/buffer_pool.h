@@ -15,21 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_BUFFER_POOL_H
-#define DORIS_BE_RUNTIME_BUFFER_POOL_H
+#pragma once
 
 #include <stdint.h>
 
 #include <string>
 #include <vector>
 
-#include "common/atomic.h"
 #include "common/compiler_util.h"
 #include "common/object_pool.h"
 #include "common/status.h"
 #include "gutil/dynamic_annotations.h"
 #include "gutil/macros.h"
-//#include "runtime/tmp_file_mgr.h"
 #include "util/aligned_new.h"
 #include "util/internal_queue.h"
 #include "util/mem_range.h"
@@ -148,7 +145,7 @@ class MemTracker;
 /// same Client, PageHandle or BufferHandle.
 class BufferPool : public CacheLineAligned {
 public:
-    class BufferAllocator;
+    struct BufferAllocator;
     class BufferHandle;
     class ClientHandle;
     class PageHandle;
@@ -175,8 +172,8 @@ public:
     /// 'reservation_limit' and associated with MemTracker 'mem_tracker'. The initial
     /// reservation is 0 bytes.
     Status RegisterClient(const std::string& name, ReservationTracker* parent_reservation,
-                          const std::shared_ptr<MemTracker>& mem_tracker, int64_t reservation_limit,
-                          RuntimeProfile* profile, ClientHandle* client) WARN_UNUSED_RESULT;
+                          int64_t reservation_limit, RuntimeProfile* profile,
+                          ClientHandle* client) WARN_UNUSED_RESULT;
 
     /// Deregister 'client' if it is registered. All pages must be destroyed and buffers
     /// must be freed for the client before calling this. Releases any reservation that
@@ -295,7 +292,7 @@ private:
     class Client;
     class FreeBufferArena;
     class PageList;
-    struct Page;
+    class Page;
 
     /// Allocator for allocating and freeing all buffer memory and managing lists of free
     /// buffers and clean pages.
@@ -414,11 +411,11 @@ public:
 
     /// Allow move construction of handles to support std::move(). Inline to make moving
     /// efficient.
-    inline BufferHandle(BufferHandle&& src);
+    BufferHandle(BufferHandle&& src);
 
     /// Allow move assignment of handles to support STL classes like std::vector.
     /// Destination must be uninitialized. Inline to make moving efficient.
-    inline BufferHandle& operator=(BufferHandle&& src);
+    BufferHandle& operator=(BufferHandle&& src);
 
     bool is_open() const { return data_ != nullptr; }
     int64_t len() const {
@@ -453,7 +450,7 @@ private:
 
     /// Internal helper to reset the handle to an unopened state. Inlined to make moving
     /// efficient.
-    inline void Reset();
+    void Reset();
 
     /// The client the buffer handle belongs to, used to validate that the correct client
     /// is provided in BufferPool method calls. Set to nullptr if the buffer is in a free list.
@@ -543,5 +540,3 @@ inline void BufferPool::BufferHandle::Reset() {
     home_core_ = -1;
 }
 } // namespace doris
-
-#endif

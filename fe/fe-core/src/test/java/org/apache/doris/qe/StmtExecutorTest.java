@@ -30,22 +30,25 @@ import org.apache.doris.analysis.ShowStmt;
 import org.apache.doris.analysis.SqlParser;
 import org.apache.doris.analysis.StatementBase;
 import org.apache.doris.analysis.UseStmt;
-import org.apache.doris.catalog.Catalog;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.jmockit.Deencapsulation;
 import org.apache.doris.common.util.RuntimeProfile;
+import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.metric.MetricRepo;
 import org.apache.doris.mysql.MysqlChannel;
 import org.apache.doris.mysql.MysqlSerializer;
-import org.apache.doris.planner.Planner;
+import org.apache.doris.planner.OriginalPlanner;
 import org.apache.doris.rewrite.ExprRewriter;
 import org.apache.doris.service.FrontendOptions;
 import org.apache.doris.thrift.TQueryOptions;
 import org.apache.doris.thrift.TUniqueId;
 
 import com.google.common.collect.Lists;
-
-import org.glassfish.jersey.internal.guava.Sets;
+import com.google.common.collect.Sets;
+import java_cup.runtime.Symbol;
+import mockit.Expectations;
+import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -58,10 +61,6 @@ import java.nio.channels.SocketChannel;
 import java.util.List;
 import java.util.SortedMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import java_cup.runtime.Symbol;
-import mockit.Expectations;
-import mockit.Mocked;
 
 public class StmtExecutorTest {
     private ConnectContext ctx;
@@ -91,7 +90,7 @@ public class StmtExecutorTest {
 
         SessionVariable sessionVariable = new SessionVariable();
         MysqlSerializer serializer = MysqlSerializer.newInstance();
-        Catalog catalog = AccessTestUtil.fetchAdminCatalog();
+        Env env = AccessTestUtil.fetchAdminCatalog();
 
         channel = new MysqlChannel(socketChannel);
         new Expectations(channel) {
@@ -114,9 +113,9 @@ public class StmtExecutorTest {
                 minTimes = 0;
                 result = serializer;
 
-                ctx.getCatalog();
+                ctx.getEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
 
                 ctx.getState();
                 minTimes = 0;
@@ -176,10 +175,10 @@ public class StmtExecutorTest {
     @Test
     public void testSelect(@Mocked QueryStmt queryStmt,
                            @Mocked SqlParser parser,
-                           @Mocked Planner planner,
+                           @Mocked OriginalPlanner planner,
                            @Mocked Coordinator coordinator) throws Exception {
-        Catalog catalog = Catalog.getCurrentCatalog();
-        Deencapsulation.setField(catalog, "canRead", new AtomicBoolean(true));
+        Env env = Env.getCurrentEnv();
+        Deencapsulation.setField(env, "canRead", new AtomicBoolean(true));
 
         new Expectations() {
             {
@@ -213,7 +212,7 @@ public class StmtExecutorTest {
                 minTimes = 0;
                 result = symbol;
 
-                planner.plan((QueryStmt) any, (Analyzer) any, (TQueryOptions) any);
+                planner.plan((QueryStmt) any, (TQueryOptions) any);
                 minTimes = 0;
 
                 // mock coordinator
@@ -235,9 +234,9 @@ public class StmtExecutorTest {
                 minTimes = 0;
                 result = -1L;
 
-                Catalog.getCurrentCatalog();
+                Env.getCurrentEnv();
                 minTimes = 0;
-                result = catalog;
+                result = env;
             }
         };
 
@@ -248,7 +247,8 @@ public class StmtExecutorTest {
     }
 
     @Test
-    public void testShow(@Mocked ShowStmt showStmt, @Mocked SqlParser parser, @Mocked ShowExecutor executor) throws Exception {
+    public void testShow(@Mocked ShowStmt showStmt, @Mocked SqlParser parser,
+            @Mocked ShowExecutor executor) throws Exception {
         new Expectations() {
             {
                 showStmt.analyze((Analyzer) any);
@@ -283,7 +283,8 @@ public class StmtExecutorTest {
     }
 
     @Test
-    public void testShowNull(@Mocked ShowStmt showStmt, @Mocked SqlParser parser, @Mocked ShowExecutor executor) throws Exception {
+    public void testShowNull(@Mocked ShowStmt showStmt, @Mocked SqlParser parser,
+            @Mocked ShowExecutor executor) throws Exception {
         new Expectations() {
             {
                 showStmt.analyze((Analyzer) any);
@@ -342,7 +343,7 @@ public class StmtExecutorTest {
         new Expectations(scheduler) {
             {
                 // suicide
-                scheduler.getContext(1L);
+                scheduler.getContext(1);
                 result = ctx;
             }
         };
@@ -354,8 +355,9 @@ public class StmtExecutorTest {
     }
 
     @Test
-    public void testKillOtherFail(@Mocked KillStmt killStmt, @Mocked SqlParser parser, @Mocked ConnectContext killCtx) throws Exception {
-        Catalog killCatalog = AccessTestUtil.fetchAdminCatalog();
+    public void testKillOtherFail(@Mocked KillStmt killStmt, @Mocked SqlParser parser,
+            @Mocked ConnectContext killCtx) throws Exception {
+        Env killEnv = AccessTestUtil.fetchAdminCatalog();
 
         new Expectations() {
             {
@@ -379,9 +381,9 @@ public class StmtExecutorTest {
                 minTimes = 0;
                 result = symbol;
 
-                killCtx.getCatalog();
+                killCtx.getEnv();
                 minTimes = 0;
-                result = killCatalog;
+                result = killEnv;
 
                 killCtx.getQualifiedUser();
                 minTimes = 0;
@@ -399,7 +401,7 @@ public class StmtExecutorTest {
         new Expectations(scheduler) {
             {
                 // suicide
-                scheduler.getContext(1L);
+                scheduler.getContext(1);
                 result = killCtx;
             }
         };
@@ -411,8 +413,9 @@ public class StmtExecutorTest {
     }
 
     @Test
-    public void testKillOther(@Mocked KillStmt killStmt, @Mocked SqlParser parser, @Mocked ConnectContext killCtx) throws Exception {
-        Catalog killCatalog = AccessTestUtil.fetchAdminCatalog();
+    public void testKillOther(@Mocked KillStmt killStmt, @Mocked SqlParser parser,
+            @Mocked ConnectContext killCtx) throws Exception {
+        Env killEnv = AccessTestUtil.fetchAdminCatalog();
         new Expectations() {
             {
                 killStmt.analyze((Analyzer) any);
@@ -420,7 +423,7 @@ public class StmtExecutorTest {
 
                 killStmt.getConnectionId();
                 minTimes = 0;
-                result = 1L;
+                result = 1;
 
                 killStmt.isConnectionKill();
                 minTimes = 0;
@@ -435,9 +438,9 @@ public class StmtExecutorTest {
                 minTimes = 0;
                 result = symbol;
 
-                killCtx.getCatalog();
+                killCtx.getEnv();
                 minTimes = 0;
-                result = killCatalog;
+                result = killEnv;
 
                 killCtx.getQualifiedUser();
                 minTimes = 0;
@@ -455,7 +458,7 @@ public class StmtExecutorTest {
         new Expectations(scheduler) {
             {
                 // suicide
-                scheduler.getContext(1L);
+                scheduler.getContext(1);
                 result = killCtx;
             }
         };
@@ -475,7 +478,7 @@ public class StmtExecutorTest {
 
                 killStmt.getConnectionId();
                 minTimes = 0;
-                result = 1L;
+                result = 1;
 
                 killStmt.getRedirectStatus();
                 minTimes = 0;
@@ -490,7 +493,7 @@ public class StmtExecutorTest {
 
         new Expectations(scheduler) {
             {
-                scheduler.getContext(1L);
+                scheduler.getContext(1);
                 result = null;
             }
         };
@@ -502,7 +505,8 @@ public class StmtExecutorTest {
     }
 
     @Test
-    public void testSet(@Mocked SetStmt setStmt, @Mocked SqlParser parser, @Mocked SetExecutor executor) throws Exception {
+    public void testSet(@Mocked SetStmt setStmt, @Mocked SqlParser parser,
+            @Mocked SetExecutor executor) throws Exception {
         new Expectations() {
             {
                 setStmt.analyze((Analyzer) any);
@@ -535,12 +539,13 @@ public class StmtExecutorTest {
         Deencapsulation.setField(stmtExecutor, "parsedStmt", null);
         Deencapsulation.setField(stmtExecutor, "originStmt", new OriginStatement("show databases;", 1));
         stmtExecutor.execute();
-        StatementBase newstmt = (StatementBase)Deencapsulation.getField(stmtExecutor, "parsedStmt");
-        Assert.assertTrue(newstmt.getUserInfo() != null);
+        StatementBase newstmt = Deencapsulation.getField(stmtExecutor, "parsedStmt");
+        Assert.assertNotNull(newstmt.getUserInfo());
     }
 
     @Test
-    public void testSetFail(@Mocked SetStmt setStmt, @Mocked SqlParser parser, @Mocked SetExecutor executor) throws Exception {
+    public void testSetFail(@Mocked SetStmt setStmt, @Mocked SqlParser parser,
+            @Mocked SetExecutor executor) throws Exception {
         new Expectations() {
             {
                 setStmt.analyze((Analyzer) any);
@@ -590,7 +595,7 @@ public class StmtExecutorTest {
         new Expectations(ddlExecutor) {
             {
                 // Mock ddl
-                DdlExecutor.execute((Catalog) any, (DdlStmt) any);
+                DdlExecutor.execute((Env) any, (DdlStmt) any);
                 minTimes = 0;
             }
         };
@@ -623,7 +628,7 @@ public class StmtExecutorTest {
         new Expectations(ddlExecutor) {
             {
                 // Mock ddl
-                DdlExecutor.execute((Catalog) any, (DdlStmt) any);
+                DdlExecutor.execute((Env) any, (DdlStmt) any);
                 minTimes = 0;
                 result = new DdlException("ddl fail");
             }
@@ -657,7 +662,7 @@ public class StmtExecutorTest {
         new Expectations(ddlExecutor) {
             {
                 // Mock ddl
-                DdlExecutor.execute((Catalog) any, (DdlStmt) any);
+                DdlExecutor.execute((Env) any, (DdlStmt) any);
                 minTimes = 0;
                 result = new Exception("bug");
             }
@@ -732,5 +737,76 @@ public class StmtExecutorTest {
 
         Assert.assertEquals(QueryState.MysqlStateType.ERR, state.getStateType());
     }
-}
 
+    @Test
+    public void testUseWithCatalog(@Mocked UseStmt useStmt, @Mocked SqlParser parser) throws Exception {
+        new Expectations() {
+            {
+                useStmt.analyze((Analyzer) any);
+                minTimes = 0;
+
+                useStmt.getDatabase();
+                minTimes = 0;
+                result = "testCluster:testDb";
+
+                useStmt.getRedirectStatus();
+                minTimes = 0;
+                result = RedirectStatus.NO_FORWARD;
+
+                useStmt.getClusterName();
+                minTimes = 0;
+                result = "testCluster";
+
+                useStmt.getCatalogName();
+                minTimes = 0;
+                result = InternalCatalog.INTERNAL_CATALOG_NAME;
+
+                Symbol symbol = new Symbol(0, Lists.newArrayList(useStmt));
+                parser.parse();
+                minTimes = 0;
+                result = symbol;
+            }
+        };
+
+        StmtExecutor executor = new StmtExecutor(ctx, "");
+        executor.execute();
+
+        Assert.assertEquals(QueryState.MysqlStateType.OK, state.getStateType());
+    }
+
+    @Test
+    public void testUseWithCatalogFail(@Mocked UseStmt useStmt, @Mocked SqlParser parser) throws Exception {
+        new Expectations() {
+            {
+                useStmt.analyze((Analyzer) any);
+                minTimes = 0;
+
+                useStmt.getDatabase();
+                minTimes = 0;
+                result = "blockDb";
+
+                useStmt.getRedirectStatus();
+                minTimes = 0;
+                result = RedirectStatus.NO_FORWARD;
+
+                useStmt.getClusterName();
+                minTimes = 0;
+                result = "testCluster";
+
+                useStmt.getCatalogName();
+                minTimes = 0;
+                result = "testcatalog";
+
+                Symbol symbol = new Symbol(0, Lists.newArrayList(useStmt));
+                parser.parse();
+                minTimes = 0;
+                result = symbol;
+            }
+        };
+
+        StmtExecutor executor = new StmtExecutor(ctx, "");
+        executor.execute();
+
+        Assert.assertEquals(QueryState.MysqlStateType.ERR, state.getStateType());
+    }
+}

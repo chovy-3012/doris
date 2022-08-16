@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_QUERY_EXEC_OLAP_SCAN_NODE_H
-#define DORIS_BE_SRC_QUERY_EXEC_OLAP_SCAN_NODE_H
+#pragma once
 
 #include <atomic>
 #include <condition_variable>
@@ -26,12 +25,12 @@
 #include "exec/olap_scanner.h"
 #include "exec/scan_node.h"
 #include "exprs/bloomfilter_predicate.h"
+#include "exprs/function_filter.h"
 #include "exprs/in_predicate.h"
 #include "runtime/descriptors.h"
-#include "runtime/row_batch_interface.hpp"
-#include "runtime/vectorized_row_batch.h"
 #include "util/progress_updater.h"
 #include "util/spinlock.h"
+#include "vec/exec/volap_scanner.h"
 
 namespace doris {
 class IRuntimeFilter;
@@ -49,21 +48,24 @@ enum TransferStatus {
 class OlapScanNode : public ScanNode {
 public:
     OlapScanNode(ObjectPool* pool, const TPlanNode& tnode, const DescriptorTbl& descs);
-    ~OlapScanNode();
-    virtual Status init(const TPlanNode& tnode, RuntimeState* state = nullptr);
-    virtual Status prepare(RuntimeState* state);
-    virtual Status open(RuntimeState* state);
-    virtual Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos);
+    Status init(const TPlanNode& tnode, RuntimeState* state = nullptr) override;
+    Status prepare(RuntimeState* state) override;
+    Status open(RuntimeState* state) override;
+    Status get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) override;
     Status collect_query_statistics(QueryStatistics* statistics) override;
-    virtual Status close(RuntimeState* state);
-    virtual Status set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges);
-    inline void set_no_agg_finalize() { _need_agg_finalize = false; }
+    Status close(RuntimeState* state) override;
+    Status set_scan_ranges(const std::vector<TScanRangeParams>& scan_ranges) override;
+    Status get_hints(TabletSharedPtr table, const TPaloScanRange& scan_range, int block_row_count,
+                     bool is_begin_include, bool is_end_include,
+                     const std::vector<std::unique_ptr<OlapScanRange>>& scan_key_range,
+                     std::vector<std::unique_ptr<OlapScanRange>>* sub_scan_range,
+                     RuntimeProfile* profile);
 
 protected:
-    typedef struct {
+    struct HeapType {
         Tuple* tuple;
         int id;
-    } HeapType;
+    };
 
     class MergeComparison {
     public:
@@ -82,7 +84,7 @@ protected:
 
     typedef std::priority_queue<HeapType, std::vector<HeapType>, MergeComparison> Heap;
 
-    void display_heap(Heap& heap) {
+    void display_heap(const Heap& heap) const {
         Heap h = heap;
         std::stringstream s;
         s << "Heap: [";
@@ -105,25 +107,26 @@ protected:
 
     void eval_const_conjuncts();
     Status normalize_conjuncts();
-    Status build_olap_filters();
-    Status build_scan_key();
-    virtual Status start_scan_thread(RuntimeState* state);
+    Status build_key_ranges_and_filters();
+    Status build_function_filters();
 
-    template <class T>
+    Status start_scan_thread(RuntimeState* state);
+
+    template <PrimitiveType T>
     Status normalize_predicate(ColumnValueRange<T>& range, SlotDescriptor* slot);
 
-    template <class T>
+    template <PrimitiveType T>
     Status normalize_in_and_eq_predicate(SlotDescriptor* slot, ColumnValueRange<T>* range);
 
-    template <class T>
+    template <PrimitiveType T>
     Status normalize_not_in_and_not_eq_predicate(SlotDescriptor* slot, ColumnValueRange<T>* range);
 
-    template <class T>
+    template <PrimitiveType T>
     Status normalize_noneq_binary_predicate(SlotDescriptor* slot, ColumnValueRange<T>* range);
 
     Status normalize_bloom_filter_predicate(SlotDescriptor* slot);
 
-    template <typename T>
+    template <PrimitiveType T>
     static bool normalize_is_null_predicate(Expr* expr, SlotDescriptor* slot,
                                             const std::string& is_null_str,
                                             ColumnValueRange<T>* range);
@@ -134,9 +137,11 @@ protected:
     Status add_one_batch(RowBatch* row_batch);
 
     // Write debug string of this into out.
-    virtual void debug_string(int indentation_level, std::stringstream* out) const;
+    void debug_string(int indentation_level, std::stringstream* out) const override {}
 
-    const std::vector<TRuntimeFilterDesc>& runtime_filter_descs() { return _runtime_filter_descs; }
+    const std::vector<TRuntimeFilterDesc>& runtime_filter_descs() const {
+        return _runtime_filter_descs;
+    }
 
     void _init_counter(RuntimeState* state);
     // OLAP_SCAN_NODE profile layering: OLAP_SCAN_NODE, OlapScanner, and SegmentIterator
@@ -145,18 +150,12 @@ protected:
 
     bool should_push_down_in_predicate(SlotDescriptor* slot, InPredicate* in_pred);
 
-    template <typename T, typename ChangeFixedValueRangeFunc>
-    static Status change_fixed_value_range(ColumnValueRange<T>& range, PrimitiveType type,
-                                           void* value, const ChangeFixedValueRangeFunc& func);
+    template <PrimitiveType T, typename ChangeFixedValueRangeFunc>
+    static Status change_fixed_value_range(ColumnValueRange<T>& range, void* value,
+                                           const ChangeFixedValueRangeFunc& func);
 
     std::pair<bool, void*> should_push_down_eq_predicate(SlotDescriptor* slot, Expr* pred,
                                                          int conj_idx, int child_idx);
-
-    static Status get_hints(const TPaloScanRange& scan_range, int block_row_count,
-                            bool is_begin_include, bool is_end_include,
-                            const std::vector<std::unique_ptr<OlapScanRange>>& scan_key_range,
-                            std::vector<std::unique_ptr<OlapScanRange>>* sub_scan_range,
-                            RuntimeProfile* profile);
 
     friend class OlapScanner;
 
@@ -192,10 +191,21 @@ protected:
     std::vector<std::pair<std::string, std::shared_ptr<IBloomFilterFuncBase>>>
             _bloom_filters_push_down;
 
+    // push down functions to storage engine
+    // only support scalar functions, now just support like / not like
+    std::vector<FunctionFilter> _push_down_functions;
+    // functions conjunct's index which already be push down storage engine
+    std::set<uint32_t> _pushed_func_conjuncts_index;
+    // need keep these conjunct to the end of scan node,
+    // since some memory referenced by pushed function filters
+    std::vector<ExprContext*> _pushed_func_conjunct_ctxs;
+
     // Pool for storing allocated scanner objects.  We don't want to use the
     // runtime pool to ensure that the scanner objects are deleted before this
     // object is.
     ObjectPool _scanner_pool;
+
+    size_t _batch_size = 0;
 
     std::shared_ptr<std::thread> _transfer_thread;
 
@@ -213,17 +223,23 @@ protected:
     std::condition_variable _row_batch_consumed_cv;
 
     std::list<RowBatch*> _materialized_row_batches;
+    // to limit _materialized_row_batches_bytes < _max_scanner_queue_size_bytes / 2
+    std::atomic_size_t _materialized_row_batches_bytes = 0;
 
     std::mutex _scan_batches_lock;
     std::condition_variable _scan_batch_added_cv;
-    int64_t _running_thread = 0;
+    std::atomic_int _running_thread = 0;
     std::condition_variable _scan_thread_exit_cv;
 
     std::list<RowBatch*> _scan_row_batches;
+    // to limit _scan_row_batches_bytes < _max_scanner_queue_size_bytes / 2
+    std::atomic_size_t _scan_row_batches_bytes = 0;
 
     std::list<OlapScanner*> _olap_scanners;
 
     int _max_materialized_row_batches;
+    // to limit _materialized_row_batches_bytes and _scan_row_batches_bytes
+    size_t _max_scanner_queue_size_bytes;
     bool _start;
     // Used in Scan thread to ensure thread-safe
     std::atomic_bool _scanner_done;
@@ -237,18 +253,19 @@ protected:
     SpinLock _status_mutex;
     Status _status;
     RuntimeState* _runtime_state;
+
     RuntimeProfile::Counter* _scan_timer;
     RuntimeProfile::Counter* _scan_cpu_timer = nullptr;
     RuntimeProfile::Counter* _tablet_counter;
     RuntimeProfile::Counter* _rows_pushed_cond_filtered_counter = nullptr;
     RuntimeProfile::Counter* _reader_init_timer = nullptr;
-
+    RuntimeProfile::Counter* _scanner_sched_counter = nullptr;
     TResourceInfo* _resource_info;
 
     int64_t _buffered_bytes;
+    // Count the memory consumption of Rowset Reader and Tablet Reader in OlapScanner.
+    std::unique_ptr<MemTracker> _scanner_mem_tracker;
     EvalConjunctsFn _eval_conjuncts_fn;
-
-    bool _need_agg_finalize = true;
 
     // the max num of scan keys of this scan request.
     // it will set as BE's config `doris_max_scan_key_num`,
@@ -283,6 +300,10 @@ protected:
 
     RuntimeProfile::Counter* _rows_vec_cond_counter = nullptr;
     RuntimeProfile::Counter* _vec_cond_timer = nullptr;
+    RuntimeProfile::Counter* _short_cond_timer = nullptr;
+    RuntimeProfile::Counter* _first_read_timer = nullptr;
+    RuntimeProfile::Counter* _lazy_read_timer = nullptr;
+    RuntimeProfile::Counter* _output_col_timer = nullptr;
 
     RuntimeProfile::Counter* _stats_filtered_counter = nullptr;
     RuntimeProfile::Counter* _bf_filtered_counter = nullptr;
@@ -322,8 +343,9 @@ protected:
     RuntimeProfile::Counter* _scanner_wait_worker_timer = nullptr;
 
     RuntimeProfile::Counter* _olap_wait_batch_queue_timer = nullptr;
+
+    // for debugging or profiling, record any info as you want
+    RuntimeProfile::Counter* _general_debug_timer[GENERAL_DEBUG_COUNT] = {};
 };
 
 } // namespace doris
-
-#endif

@@ -20,11 +20,8 @@
 #include <sstream>
 
 #include "gen_cpp/Exprs_types.h"
-#include "runtime/datetime_value.h"
 #include "runtime/decimalv2_value.h"
-#include "runtime/runtime_state.h"
 #include "runtime/string_value.h"
-#include "util/debug_util.h"
 
 namespace doris {
 
@@ -39,10 +36,15 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::SMALLINT:
             return new EqSmallIntValPred(node);
         case TPrimitiveType::INT:
+        case TPrimitiveType::DECIMAL32:
+        case TPrimitiveType::DATEV2:
             return new EqIntValPred(node);
         case TPrimitiveType::BIGINT:
+        case TPrimitiveType::DECIMAL64:
+        case TPrimitiveType::DATETIMEV2:
             return new EqBigIntValPred(node);
         case TPrimitiveType::LARGEINT:
+        case TPrimitiveType::DECIMAL128:
             return new EqLargeIntValPred(node);
         case TPrimitiveType::FLOAT:
             return new EqFloatValPred(node);
@@ -58,6 +60,7 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::DECIMALV2:
             return new EqDecimalV2ValPred(node);
         default:
+            DCHECK(false) << "Invalid type: " << node.child_type;
             return nullptr;
         }
     }
@@ -70,10 +73,15 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::SMALLINT:
             return new NeSmallIntValPred(node);
         case TPrimitiveType::INT:
+        case TPrimitiveType::DECIMAL32:
+        case TPrimitiveType::DATEV2:
             return new NeIntValPred(node);
         case TPrimitiveType::BIGINT:
+        case TPrimitiveType::DECIMAL64:
+        case TPrimitiveType::DATETIMEV2:
             return new NeBigIntValPred(node);
         case TPrimitiveType::LARGEINT:
+        case TPrimitiveType::DECIMAL128:
             return new NeLargeIntValPred(node);
         case TPrimitiveType::FLOAT:
             return new NeFloatValPred(node);
@@ -89,6 +97,7 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::DECIMALV2:
             return new NeDecimalV2ValPred(node);
         default:
+            DCHECK(false) << "Invalid type!";
             return nullptr;
         }
     }
@@ -101,10 +110,15 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::SMALLINT:
             return new LtSmallIntValPred(node);
         case TPrimitiveType::INT:
+        case TPrimitiveType::DECIMAL32:
+        case TPrimitiveType::DATEV2:
             return new LtIntValPred(node);
         case TPrimitiveType::BIGINT:
+        case TPrimitiveType::DECIMAL64:
+        case TPrimitiveType::DATETIMEV2:
             return new LtBigIntValPred(node);
         case TPrimitiveType::LARGEINT:
+        case TPrimitiveType::DECIMAL128:
             return new LtLargeIntValPred(node);
         case TPrimitiveType::FLOAT:
             return new LtFloatValPred(node);
@@ -120,6 +134,7 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::DECIMALV2:
             return new LtDecimalV2ValPred(node);
         default:
+            DCHECK(false) << "Invalid type!";
             return nullptr;
         }
     }
@@ -132,10 +147,15 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::SMALLINT:
             return new LeSmallIntValPred(node);
         case TPrimitiveType::INT:
+        case TPrimitiveType::DECIMAL32:
+        case TPrimitiveType::DATEV2:
             return new LeIntValPred(node);
         case TPrimitiveType::BIGINT:
+        case TPrimitiveType::DECIMAL64:
+        case TPrimitiveType::DATETIMEV2:
             return new LeBigIntValPred(node);
         case TPrimitiveType::LARGEINT:
+        case TPrimitiveType::DECIMAL128:
             return new LeLargeIntValPred(node);
         case TPrimitiveType::FLOAT:
             return new LeFloatValPred(node);
@@ -151,6 +171,7 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::DECIMALV2:
             return new LeDecimalV2ValPred(node);
         default:
+            DCHECK(false) << "Invalid type!";
             return nullptr;
         }
     }
@@ -163,10 +184,15 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::SMALLINT:
             return new GtSmallIntValPred(node);
         case TPrimitiveType::INT:
+        case TPrimitiveType::DECIMAL32:
+        case TPrimitiveType::DATEV2:
             return new GtIntValPred(node);
         case TPrimitiveType::BIGINT:
+        case TPrimitiveType::DECIMAL64:
+        case TPrimitiveType::DATETIMEV2:
             return new GtBigIntValPred(node);
         case TPrimitiveType::LARGEINT:
+        case TPrimitiveType::DECIMAL128:
             return new GtLargeIntValPred(node);
         case TPrimitiveType::FLOAT:
             return new GtFloatValPred(node);
@@ -182,6 +208,7 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::DECIMALV2:
             return new GtDecimalV2ValPred(node);
         default:
+            DCHECK(false) << "Invalid type!";
             return nullptr;
         }
     }
@@ -194,10 +221,15 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::SMALLINT:
             return new GeSmallIntValPred(node);
         case TPrimitiveType::INT:
+        case TPrimitiveType::DECIMAL32:
+        case TPrimitiveType::DATEV2:
             return new GeIntValPred(node);
         case TPrimitiveType::BIGINT:
+        case TPrimitiveType::DECIMAL64:
+        case TPrimitiveType::DATETIMEV2:
             return new GeBigIntValPred(node);
         case TPrimitiveType::LARGEINT:
+        case TPrimitiveType::DECIMAL128:
             return new GeLargeIntValPred(node);
         case TPrimitiveType::FLOAT:
             return new GeFloatValPred(node);
@@ -213,6 +245,7 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::DECIMALV2:
             return new GeDecimalV2ValPred(node);
         default:
+            DCHECK(false) << "Invalid type!";
             return nullptr;
         }
     }
@@ -225,10 +258,15 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::SMALLINT:
             return new EqForNullSmallIntValPred(node);
         case TPrimitiveType::INT:
+        case TPrimitiveType::DECIMAL32:
+        case TPrimitiveType::DATEV2:
             return new EqForNullIntValPred(node);
         case TPrimitiveType::BIGINT:
+        case TPrimitiveType::DECIMAL64:
+        case TPrimitiveType::DATETIMEV2:
             return new EqForNullBigIntValPred(node);
         case TPrimitiveType::LARGEINT:
+        case TPrimitiveType::DECIMAL128:
             return new EqForNullLargeIntValPred(node);
         case TPrimitiveType::FLOAT:
             return new EqForNullFloatValPred(node);
@@ -244,6 +282,7 @@ Expr* BinaryPredicate::from_thrift(const TExprNode& node) {
         case TPrimitiveType::DECIMALV2:
             return new EqForNullDecimalV2ValPred(node);
         default:
+            DCHECK(false) << "Invalid type!";
             return nullptr;
         }
     }

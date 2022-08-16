@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/udf/udf.cpp
+// and modified by Doris
 
 #include "udf/udf.h"
 
@@ -23,6 +26,7 @@
 #include <sstream>
 
 #include "common/logging.h"
+#include "gen_cpp/types.pb.h"
 #include "olap/hll.h"
 #include "runtime/decimalv2_value.h"
 
@@ -45,12 +49,15 @@ public:
     FreePool(MemPool*) {}
 
     uint8_t* allocate(int byte_size) { return reinterpret_cast<uint8_t*>(malloc(byte_size)); }
+    uint8_t* aligned_allocate(int alignment, int byte_size) {
+        return reinterpret_cast<uint8_t*>(aligned_alloc(alignment, byte_size));
+    }
 
     uint8_t* reallocate(uint8_t* ptr, int byte_size) {
         return reinterpret_cast<uint8_t*>(realloc(ptr, byte_size));
     }
 
-    void free(uint8_t* ptr) { free(ptr); }
+    void free(uint8_t* ptr) { ::free(ptr); }
 };
 
 class RuntimeState {
@@ -131,6 +138,11 @@ void FunctionContextImpl::set_constant_args(const std::vector<doris_udf::AnyVal*
     _constant_args = constant_args;
 }
 
+void FunctionContextImpl::set_constant_cols(
+        const std::vector<doris::ColumnPtrWrapper*>& constant_cols) {
+    _constant_cols = constant_cols;
+}
+
 bool FunctionContextImpl::check_allocations_empty() {
     if (_allocations.empty() && _external_bytes_tracked == 0) {
         return true;
@@ -169,7 +181,7 @@ doris_udf::FunctionContext* FunctionContextImpl::create_context(
         const doris_udf::FunctionContext::TypeDesc& return_type,
         const std::vector<doris_udf::FunctionContext::TypeDesc>& arg_types, int varargs_buffer_size,
         bool debug) {
-    doris_udf::FunctionContext* ctx = new doris_udf::FunctionContext();
+    auto* ctx = new doris_udf::FunctionContext();
     ctx->_impl->_state = state;
     ctx->_impl->_pool = new FreePool(pool);
     ctx->_impl->_intermediate_type = intermediate_type;
@@ -187,6 +199,7 @@ FunctionContext* FunctionContextImpl::clone(MemPool* pool) {
             create_context(_state, pool, _intermediate_type, _return_type, _arg_types,
                            _varargs_buffer_size, _debug);
     new_context->_impl->_constant_args = _constant_args;
+    new_context->_impl->_constant_cols = _constant_cols;
     new_context->_impl->_fragment_local_fn_state = _fragment_local_fn_state;
     return new_context;
 }
@@ -196,11 +209,11 @@ FunctionContext* FunctionContextImpl::clone(MemPool* pool) {
 namespace doris_udf {
 static const int MAX_WARNINGS = 1000;
 
-FunctionContext* FunctionContext::create_test_context() {
+FunctionContext* FunctionContext::create_test_context(doris::MemPool* mem_pool = nullptr) {
     FunctionContext* context = new FunctionContext();
     context->impl()->_debug = true;
     context->impl()->_state = nullptr;
-    context->impl()->_pool = new doris::FreePool(nullptr);
+    context->impl()->_pool = new doris::FreePool(mem_pool);
     return context;
 }
 
@@ -252,6 +265,17 @@ const char* FunctionContext::error_msg() const {
 
 uint8_t* FunctionContext::allocate(int byte_size) {
     uint8_t* buffer = _impl->_pool->allocate(byte_size);
+    _impl->_allocations[buffer] = byte_size;
+
+    if (_impl->_debug) {
+        memset(buffer, 0xff, byte_size);
+    }
+
+    return buffer;
+}
+
+uint8_t* FunctionContext::aligned_allocate(int alignment, int byte_size) {
+    uint8_t* buffer = _impl->_pool->aligned_allocate(alignment, byte_size);
     _impl->_allocations[buffer] = byte_size;
 
     if (_impl->_debug) {
@@ -487,4 +511,59 @@ void HllVal::agg_merge(const HllVal& other) {
     }
 }
 
+bool FunctionContext::is_arg_constant(int i) const {
+    if (i < 0 || i >= _impl->_constant_args.size()) {
+        return false;
+    }
+    return _impl->_constant_args[i] != nullptr;
+}
+
+bool FunctionContext::is_col_constant(int i) const {
+    if (i < 0 || i >= _impl->_constant_cols.size()) {
+        return false;
+    }
+    return _impl->_constant_cols[i] != nullptr;
+}
+
+AnyVal* FunctionContext::get_constant_arg(int i) const {
+    if (i < 0 || i >= _impl->_constant_args.size()) {
+        return nullptr;
+    }
+    return _impl->_constant_args[i];
+}
+
+doris::ColumnPtrWrapper* FunctionContext::get_constant_col(int i) const {
+    if (i < 0 || i >= _impl->_constant_cols.size()) {
+        return nullptr;
+    }
+    return _impl->_constant_cols[i];
+}
+
+int FunctionContext::get_num_args() const {
+    return _impl->_arg_types.size();
+}
+
+int FunctionContext::get_num_constant_args() const {
+    return _impl->_constant_args.size();
+}
+
+const FunctionContext::TypeDesc& FunctionContext::get_return_type() const {
+    return _impl->_return_type;
+}
+
+void* FunctionContext::get_function_state(FunctionStateScope scope) const {
+    // assert(!_impl->_closed);
+    switch (scope) {
+    case THREAD_LOCAL:
+        return _impl->_thread_local_fn_state;
+    case FRAGMENT_LOCAL:
+        return _impl->_fragment_local_fn_state;
+    default:
+        // TODO: signal error somehow
+        return nullptr;
+    }
+}
+std::ostream& operator<<(std::ostream& os, const StringVal& string_val) {
+    return os << string_val.to_string();
+}
 } // namespace doris_udf

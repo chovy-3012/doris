@@ -28,17 +28,16 @@ import org.apache.doris.common.MetaNotFoundException;
 import org.apache.doris.persist.EditLog;
 import org.apache.doris.system.Backend;
 import org.apache.doris.system.SystemInfoService;
-import org.apache.doris.thrift.TDisk;
 import org.apache.doris.thrift.TStorageMedium;
 import org.apache.doris.thrift.TStorageType;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -77,9 +76,6 @@ public class CatalogTestUtil {
     public static long testTabletId2 = 18;
 
     public static long testStartVersion = 12;
-    public static long testStartVersionHash = 12312;
-    public static long testPartitionCurrentVersionHash = 12312;
-    public static long testPartitionNextVersionHash = 123123123;
     public static long testRollupIndexId2 = 13;
     public static String testRollupIndex2 = "newRollupIndex";
     public static String testRollupIndex3 = "newRollupIndex2";
@@ -98,33 +94,42 @@ public class CatalogTestUtil {
     public static String testEsTable1 = "partitionedEsTable1";
     public static long testEsTableId1 = 14;
 
-    public static Catalog createTestCatalog() throws InstantiationException, IllegalAccessException,
-            IllegalArgumentException, InvocationTargetException, NoSuchMethodException, SecurityException {
-        Constructor<Catalog> constructor = Catalog.class.getDeclaredConstructor();
+    public static Env createTestCatalog()
+            throws InstantiationException, IllegalAccessException, IllegalArgumentException, InvocationTargetException,
+            NoSuchMethodException, SecurityException {
+        Constructor<Env> constructor = Env.class.getDeclaredConstructor();
         constructor.setAccessible(true);
-        Catalog catalog = constructor.newInstance();
-        catalog.setEditLog(new EditLog("name"));
-        FakeCatalog.setCatalog(catalog);
+        Env env = constructor.newInstance();
+        env.setEditLog(new EditLog("name"));
+        FakeEnv.setEnv(env);
         Backend backend1 = createBackend(testBackendId1, "host1", 123, 124, 125);
         Backend backend2 = createBackend(testBackendId2, "host2", 123, 124, 125);
         Backend backend3 = createBackend(testBackendId3, "host3", 123, 124, 125);
+        DiskInfo diskInfo = new DiskInfo("/path/to/disk1/");
+        diskInfo.setAvailableCapacityB(2 << 40); // 1TB
+        diskInfo.setTotalCapacityB(2 << 40);
+        diskInfo.setDataUsedCapacityB(2 << 10);
         backend1.setOwnerClusterName(SystemInfoService.DEFAULT_CLUSTER);
+        backend1.setDisks(ImmutableMap.of("disk1", diskInfo));
         backend2.setOwnerClusterName(SystemInfoService.DEFAULT_CLUSTER);
+        backend2.setDisks(ImmutableMap.of("disk1", diskInfo));
         backend3.setOwnerClusterName(SystemInfoService.DEFAULT_CLUSTER);
-        Catalog.getCurrentSystemInfo().addBackend(backend1);
-        Catalog.getCurrentSystemInfo().addBackend(backend2);
-        Catalog.getCurrentSystemInfo().addBackend(backend3);
-        catalog.initDefaultCluster();
+        backend3.setDisks(ImmutableMap.of("disk1", diskInfo));
+        Env.getCurrentSystemInfo().addBackend(backend1);
+        Env.getCurrentSystemInfo().addBackend(backend2);
+        Env.getCurrentSystemInfo().addBackend(backend3);
+        env.initDefaultCluster();
+
         Database db = createSimpleDb(testDbId1, testTableId1, testPartitionId1, testIndexId1, testTabletId1,
-                testStartVersion, testStartVersionHash);
-        catalog.unprotectCreateDb(db);
-        return catalog;
+                testStartVersion);
+        env.unprotectCreateDb(db);
+        return env;
     }
 
-    public static boolean compareCatalog(Catalog masterCatalog, Catalog slaveCatalog) {
+    public static boolean compareCatalog(Env masterEnv, Env slaveEnv) {
         try {
-            Database masterDb = masterCatalog.getDbOrMetaException(testDb1);
-            Database slaveDb = slaveCatalog.getDbOrMetaException(testDb1);
+            Database masterDb = masterEnv.getInternalCatalog().getDbOrMetaException(testDb1);
+            Database slaveDb = slaveEnv.getInternalCatalog().getDbOrMetaException(testDb1);
             List<Table> tables = masterDb.getTables();
             for (Table table : tables) {
                 Table slaveTable = slaveDb.getTableOrMetaException(table.getId());
@@ -137,9 +142,7 @@ public class CatalogTestUtil {
                     return false;
                 }
                 if (masterPartition.getVisibleVersion() != slavePartition.getVisibleVersion()
-                        || masterPartition.getVisibleVersionHash() != slavePartition.getVisibleVersionHash()
-                        || masterPartition.getNextVersion() != slavePartition.getNextVersion()
-                        || masterPartition.getCommittedVersionHash() != slavePartition.getCommittedVersionHash()) {
+                        || masterPartition.getNextVersion() != slavePartition.getNextVersion()) {
                     return false;
                 }
                 List<MaterializedIndex> allMaterializedIndices = masterPartition.getMaterializedIndices(IndexExtState.ALL);
@@ -159,12 +162,8 @@ public class CatalogTestUtil {
                             Replica slaveReplica = slaveTablet.getReplicaById(masterReplica.getId());
                             if (slaveReplica.getBackendId() != masterReplica.getBackendId()
                                     || slaveReplica.getVersion() != masterReplica.getVersion()
-                                    || slaveReplica.getVersionHash() != masterReplica.getVersionHash()
                                     || slaveReplica.getLastFailedVersion() != masterReplica.getLastFailedVersion()
-                                    || slaveReplica.getLastFailedVersionHash() != masterReplica.getLastFailedVersionHash()
-                                    || slaveReplica.getLastSuccessVersion() != slaveReplica.getLastSuccessVersion()
-                                    || slaveReplica.getLastSuccessVersionHash() != slaveReplica
-                                    .getLastSuccessVersionHash()) {
+                                    || slaveReplica.getLastSuccessVersion() != slaveReplica.getLastSuccessVersion()) {
                                 return false;
                             }
                         }
@@ -178,17 +177,16 @@ public class CatalogTestUtil {
     }
 
     public static Database createSimpleDb(long dbId, long tableId, long partitionId, long indexId, long tabletId,
-            long version, long versionHash) {
-        Catalog.getCurrentInvertedIndex().clear();
+            long version) {
+        Env.getCurrentInvertedIndex().clear();
 
         // replica
-        long replicaId = 0;
-        Replica replica1 = new Replica(testReplicaId1, testBackendId1, version, versionHash, 0, 0L, 0L,
-                ReplicaState.NORMAL, -1, 0, 0, 0);
-        Replica replica2 = new Replica(testReplicaId2, testBackendId2, version, versionHash, 0, 0L, 0L,
-                ReplicaState.NORMAL, -1, 0, 0, 0);
-        Replica replica3 = new Replica(testReplicaId3, testBackendId3, version, versionHash, 0, 0L, 0L,
-                ReplicaState.NORMAL, -1, 0, 0, 0);
+        Replica replica1 = new Replica(testReplicaId1, testBackendId1, version, 0, 0L, 0L, 0L,
+                ReplicaState.NORMAL, -1, 0);
+        Replica replica2 = new Replica(testReplicaId2, testBackendId2, version, 0, 0L, 0L, 0L,
+                ReplicaState.NORMAL, -1, 0);
+        Replica replica3 = new Replica(testReplicaId3, testBackendId3, version, 0, 0L, 0L, 0L,
+                ReplicaState.NORMAL, -1, 0);
 
         // tablet
         Tablet tablet = new Tablet(tabletId);
@@ -201,13 +199,6 @@ public class CatalogTestUtil {
         tablet.addReplica(replica1);
         tablet.addReplica(replica2);
         tablet.addReplica(replica3);
-
-        // partition
-        RandomDistributionInfo distributionInfo = new RandomDistributionInfo(10);
-        Partition partition = new Partition(partitionId, testPartition1, index, distributionInfo);
-        partition.updateVisibleVersionAndVersionHash(testStartVersion, testStartVersionHash);
-        partition.setNextVersion(testStartVersion + 1);
-        partition.setNextVersionHash(testPartitionNextVersionHash, testPartitionCurrentVersionHash);
 
         // columns
         List<Column> columns = new ArrayList<Column>();
@@ -227,6 +218,11 @@ public class CatalogTestUtil {
         temp.setIsKey(true);
         keysColumn.add(temp);
 
+        HashDistributionInfo distributionInfo = new HashDistributionInfo(10, keysColumn);
+        Partition partition = new Partition(partitionId, testPartition1, index, distributionInfo);
+        partition.updateVisibleVersion(testStartVersion);
+        partition.setNextVersion(testStartVersion + 1);
+
         // table
         PartitionInfo partitionInfo = new SinglePartitionInfo();
         partitionInfo.setDataProperty(partitionId, DataProperty.DEFAULT_DATA_PROPERTY);
@@ -241,7 +237,7 @@ public class CatalogTestUtil {
         Database db = new Database(dbId, testDb1);
         db.createTable(table);
         db.setClusterName(SystemInfoService.DEFAULT_CLUSTER);
-        
+
         // add a es table to catalog
         try {
             createEsTable(db);
@@ -256,8 +252,8 @@ public class CatalogTestUtil {
     public static void createDupTable(Database db) {
 
         // replica
-        Replica replica = new Replica(testReplicaId4, testBackendId1, testStartVersion, testStartVersionHash, 0, 0L, 0L,
-                ReplicaState.NORMAL, -1, 0, 0, 0);
+        Replica replica = new Replica(testReplicaId4, testBackendId1, testStartVersion, 0, 0L, 0L, 0L,
+                ReplicaState.NORMAL, -1, 0);
 
         // tablet
         Tablet tablet = new Tablet(testTabletId2);
@@ -272,9 +268,8 @@ public class CatalogTestUtil {
         // partition
         RandomDistributionInfo distributionInfo = new RandomDistributionInfo(1);
         Partition partition = new Partition(testPartitionId2, testPartition2, index, distributionInfo);
-        partition.updateVisibleVersionAndVersionHash(testStartVersion, testStartVersionHash);
+        partition.updateVisibleVersion(testStartVersion);
         partition.setNextVersion(testStartVersion + 1);
-        partition.setNextVersionHash(testPartitionNextVersionHash, testPartitionCurrentVersionHash);
 
         // columns
         List<Column> columns = new ArrayList<Column>();
@@ -335,18 +330,6 @@ public class CatalogTestUtil {
     public static Backend createBackend(long id, String host, int heartPort, int bePort, int httpPort) {
         Backend backend = new Backend(id, host, heartPort);
         // backend.updateOnce(bePort, httpPort, 10000);
-        backend.setAlive(true);
-        return backend;
-    }
-
-    public static Backend createBackend(long id, String host, int heartPort, int bePort, int httpPort,
-            long totalCapacityB, long avaiLabelCapacityB) {
-        Backend backend = createBackend(id, host, heartPort, bePort, httpPort);
-        Map<String, TDisk> backendDisks = new HashMap<String, TDisk>();
-        String rootPath = "root_path";
-        TDisk disk = new TDisk(rootPath, totalCapacityB, avaiLabelCapacityB, true);
-        backendDisks.put(rootPath, disk);
-        backend.updateDisks(backendDisks);
         backend.setAlive(true);
         return backend;
     }

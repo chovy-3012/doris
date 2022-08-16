@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.update;
 
+import org.apache.doris.alter.SchemaChangeHandler;
 import org.apache.doris.analysis.Analyzer;
 import org.apache.doris.analysis.BinaryPredicate;
 import org.apache.doris.analysis.DescriptorTable;
@@ -30,13 +31,14 @@ import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.IdGenerator;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.VectorizedUtil;
 import org.apache.doris.planner.DataPartition;
 import org.apache.doris.planner.OlapScanNode;
 import org.apache.doris.planner.OlapTableSink;
+import org.apache.doris.planner.OriginalPlanner;
 import org.apache.doris.planner.PlanFragment;
 import org.apache.doris.planner.PlanFragmentId;
 import org.apache.doris.planner.PlanNodeId;
-import org.apache.doris.planner.Planner;
 import org.apache.doris.planner.ScanNode;
 
 import com.google.common.base.Preconditions;
@@ -46,13 +48,11 @@ import com.google.common.collect.Maps;
 import java.util.List;
 import java.util.Map;
 
-import static org.apache.doris.alter.SchemaChangeHandler.SHADOW_NAME_PRFIX;
 
+public class UpdatePlanner extends OriginalPlanner {
 
-public class UpdatePlanner extends Planner {
-
-    private final IdGenerator<PlanNodeId> nodeIdGenerator_ = PlanNodeId.createGenerator();
-    private final IdGenerator<PlanFragmentId> fragmentIdGenerator_ =
+    private final IdGenerator<PlanNodeId> nodeIdGenerator = PlanNodeId.createGenerator();
+    private final IdGenerator<PlanFragmentId> fragmentIdGenerator =
             PlanFragmentId.createGenerator();
 
     private long targetDBId;
@@ -65,6 +65,7 @@ public class UpdatePlanner extends Planner {
 
     public UpdatePlanner(long dbId, OlapTable targetTable, List<Expr> setExprs,
                          TupleDescriptor srcTupleDesc, Analyzer analyzer) {
+        super(analyzer);
         this.targetDBId = dbId;
         this.targetTable = targetTable;
         this.setExprs = setExprs;
@@ -79,22 +80,25 @@ public class UpdatePlanner extends Planner {
 
     public void plan(long txnId) throws UserException {
         // 1. gen scan node
-        OlapScanNode olapScanNode = new OlapScanNode(nodeIdGenerator_.getNextId(), srcTupleDesc, "OlapScanNode");
+        OlapScanNode olapScanNode = new OlapScanNode(nodeIdGenerator.getNextId(), srcTupleDesc, "OlapScanNode");
         /* BEGIN: Temporary code, this part of the code needs to be refactored */
         olapScanNode.closePreAggregation("This an update operation");
         olapScanNode.useBaseIndexId();
         /* END */
         olapScanNode.init(analyzer);
         olapScanNode.finalize(analyzer);
+        if (VectorizedUtil.isVectorized()) {
+            olapScanNode.convertToVectoriezd();
+        }
         scanNodeList.add(olapScanNode);
         // 2. gen olap table sink
-        OlapTableSink olapTableSink = new OlapTableSink(targetTable, computeTargetTupleDesc(), null);
+        OlapTableSink olapTableSink = new OlapTableSink(targetTable, computeTargetTupleDesc(), null, false);
         olapTableSink.init(analyzer.getContext().queryId(), txnId, targetDBId,
                 analyzer.getContext().getSessionVariable().queryTimeoutS,
-                analyzer.getContext().getSessionVariable().sendBatchParallelism);
+                analyzer.getContext().getSessionVariable().sendBatchParallelism, false);
         olapTableSink.complete();
         // 3. gen plan fragment
-        PlanFragment planFragment = new PlanFragment(fragmentIdGenerator_.getNextId(), olapScanNode,
+        PlanFragment planFragment = new PlanFragment(fragmentIdGenerator.getNextId(), olapScanNode,
                 DataPartition.RANDOM);
         planFragment.setSink(olapTableSink);
         planFragment.setOutputExprs(computeOutputExprs());
@@ -110,11 +114,7 @@ public class UpdatePlanner extends Planner {
             slotDesc.setIsMaterialized(true);
             slotDesc.setType(col.getType());
             slotDesc.setColumn(col);
-            if (col.isAllowNull()) {
-                slotDesc.setIsNullable(true);
-            } else {
-                slotDesc.setIsNullable(false);
-            }
+            slotDesc.setIsNullable(col.isAllowNull());
         }
         targetTupleDesc.computeStatAndMemLayout();
         return targetTupleDesc;
@@ -159,8 +159,8 @@ public class UpdatePlanner extends Planner {
         for (int i = 0; i < targetTable.getFullSchema().size(); i++) {
             Column column = targetTable.getFullSchema().get(i);
             // pay attention to case ignore of column name
-            String originColumnName = (column.getName().startsWith(SHADOW_NAME_PRFIX) ?
-                    column.getName().substring(SHADOW_NAME_PRFIX.length()) : column.getName())
+            String originColumnName = (column.getName().startsWith(SchemaChangeHandler.SHADOW_NAME_PRFIX)
+                    ? column.getName().substring(SchemaChangeHandler.SHADOW_NAME_PRFIX.length()) : column.getName())
                     .toLowerCase();
             Expr setExpr = columnNameToSetExpr.get(originColumnName);
             SlotDescriptor srcSlotDesc = columnNameToSrcSlotDesc.get(originColumnName);

@@ -20,8 +20,6 @@ package org.apache.doris.mysql.privilege;
 import org.apache.doris.analysis.ResourcePattern;
 import org.apache.doris.analysis.TablePattern;
 import org.apache.doris.analysis.UserIdentity;
-import org.apache.doris.catalog.Catalog;
-import org.apache.doris.common.FeMetaVersion;
 import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 
@@ -43,11 +41,11 @@ public class PaloRole implements Writable {
     public static String ADMIN_ROLE = "admin";
 
     public static PaloRole OPERATOR = new PaloRole(OPERATOR_ROLE,
-                                                   TablePattern.ALL, PrivBitSet.of(PaloPrivilege.NODE_PRIV, PaloPrivilege.ADMIN_PRIV),
-                                                   ResourcePattern.ALL, PrivBitSet.of(PaloPrivilege.NODE_PRIV, PaloPrivilege.ADMIN_PRIV));
+            TablePattern.ALL, PrivBitSet.of(PaloPrivilege.NODE_PRIV, PaloPrivilege.ADMIN_PRIV),
+            ResourcePattern.ALL, PrivBitSet.of(PaloPrivilege.NODE_PRIV, PaloPrivilege.ADMIN_PRIV));
     public static PaloRole ADMIN = new PaloRole(ADMIN_ROLE,
-                                                TablePattern.ALL, PrivBitSet.of(PaloPrivilege.ADMIN_PRIV),
-                                                ResourcePattern.ALL, PrivBitSet.of(PaloPrivilege.ADMIN_PRIV));
+            TablePattern.ALL, PrivBitSet.of(PaloPrivilege.ADMIN_PRIV),
+            ResourcePattern.ALL, PrivBitSet.of(PaloPrivilege.ADMIN_PRIV));
 
     private String roleName;
     private Map<TablePattern, PrivBitSet> tblPatternToPrivs = Maps.newConcurrentMap();
@@ -168,13 +166,11 @@ public class PaloRole implements Writable {
             PrivBitSet privs = PrivBitSet.read(in);
             tblPatternToPrivs.put(tblPattern, privs);
         }
-        if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_87) {
-            size = in.readInt();
-            for (int i = 0; i < size; i++) {
-                ResourcePattern resourcePattern = ResourcePattern.read(in);
-                PrivBitSet privs = PrivBitSet.read(in);
-                resourcePatternToPrivs.put(resourcePattern, privs);
-            }
+        size = in.readInt();
+        for (int i = 0; i < size; i++) {
+            ResourcePattern resourcePattern = ResourcePattern.read(in);
+            PrivBitSet privs = PrivBitSet.read(in);
+            resourcePatternToPrivs.put(resourcePattern, privs);
         }
         size = in.readInt();
         for (int i = 0; i < size; i++) {

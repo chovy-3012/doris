@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/data-sink.cc
+// and modified by Doris
 
 #include "exec/data_sink.h"
 
@@ -21,12 +24,8 @@
 #include <memory>
 #include <string>
 
-#include "common/logging.h"
-#include "exec/exec_node.h"
 #include "exec/tablet_sink.h"
-#include "exprs/expr.h"
 #include "gen_cpp/PaloInternalService_types.h"
-#include "runtime/data_spliter.h"
 #include "runtime/data_stream_sender.h"
 #include "runtime/export_sink.h"
 #include "runtime/memory_scratch_sink.h"
@@ -35,7 +34,12 @@
 #include "runtime/result_file_sink.h"
 #include "runtime/result_sink.h"
 #include "runtime/runtime_state.h"
-#include "util/logging.h"
+#include "vec/sink/vdata_stream_sender.h"
+#include "vec/sink/vmysql_table_sink.h"
+#include "vec/sink/vodbc_table_sink.h"
+#include "vec/sink/vresult_file_sink.h"
+#include "vec/sink/vresult_sink.h"
+#include "vec/sink/vtablet_sink.h"
 
 namespace doris {
 
@@ -57,6 +61,9 @@ Status DataSink::create_data_sink(ObjectPool* pool, const TDataSink& thrift_sink
                         : false;
         // TODO: figure out good buffer size based on size of output row
         if (is_vec) {
+            tmp_sink = new doris::vectorized::VDataStreamSender(
+                    pool, params.sender_id, row_desc, thrift_sink.stream_sink, params.destinations,
+                    16 * 1024, send_query_statistics_with_every_batch);
         } else {
             tmp_sink = new DataStreamSender(pool, params.sender_id, row_desc,
                                             thrift_sink.stream_sink, params.destinations, 16 * 1024,
@@ -73,6 +80,8 @@ Status DataSink::create_data_sink(ObjectPool* pool, const TDataSink& thrift_sink
 
         // TODO: figure out good buffer size based on size of output row
         if (is_vec) {
+            tmp_sink = new doris::vectorized::VResultSink(row_desc, output_exprs,
+                                                          thrift_sink.result_sink, 4096);
         } else {
             tmp_sink = new ResultSink(row_desc, output_exprs, thrift_sink.result_sink, 1024);
         }
@@ -83,13 +92,35 @@ Status DataSink::create_data_sink(ObjectPool* pool, const TDataSink& thrift_sink
         if (!thrift_sink.__isset.result_file_sink) {
             return Status::InternalError("Missing result file sink.");
         }
-        // Result file sink is not the top sink
-        if (params.__isset.destinations && params.destinations.size() > 0) {
-            tmp_sink = new ResultFileSink(row_desc, output_exprs, thrift_sink.result_file_sink,
-                                          params.destinations, pool, params.sender_id, desc_tbl);
+
+        // TODO: figure out good buffer size based on size of output row
+        if (is_vec) {
+            bool send_query_statistics_with_every_batch =
+                    params.__isset.send_query_statistics_with_every_batch
+                            ? params.send_query_statistics_with_every_batch
+                            : false;
+            // Result file sink is not the top sink
+            if (params.__isset.destinations && params.destinations.size() > 0) {
+                tmp_sink = new doris::vectorized::VResultFileSink(
+                        pool, params.sender_id, row_desc, thrift_sink.result_file_sink,
+                        params.destinations, 16 * 1024, send_query_statistics_with_every_batch,
+                        output_exprs, desc_tbl);
+            } else {
+                tmp_sink = new doris::vectorized::VResultFileSink(
+                        pool, row_desc, thrift_sink.result_file_sink, 16 * 1024,
+                        send_query_statistics_with_every_batch, output_exprs);
+            }
         } else {
-            tmp_sink = new ResultFileSink(row_desc, output_exprs, thrift_sink.result_file_sink);
+            // Result file sink is not the top sink
+            if (params.__isset.destinations && params.destinations.size() > 0) {
+                tmp_sink =
+                        new ResultFileSink(row_desc, output_exprs, thrift_sink.result_file_sink,
+                                           params.destinations, pool, params.sender_id, desc_tbl);
+            } else {
+                tmp_sink = new ResultFileSink(row_desc, output_exprs, thrift_sink.result_file_sink);
+            }
         }
+
         sink->reset(tmp_sink);
         break;
     }
@@ -107,10 +138,15 @@ Status DataSink::create_data_sink(ObjectPool* pool, const TDataSink& thrift_sink
         if (!thrift_sink.__isset.mysql_table_sink) {
             return Status::InternalError("Missing data buffer sink.");
         }
-
-        // TODO: figure out good buffer size based on size of output row
-        MysqlTableSink* mysql_tbl_sink = new MysqlTableSink(pool, row_desc, output_exprs);
-        sink->reset(mysql_tbl_sink);
+        if (is_vec) {
+            doris::vectorized::VMysqlTableSink* vmysql_tbl_sink =
+                    new doris::vectorized::VMysqlTableSink(pool, row_desc, output_exprs);
+            sink->reset(vmysql_tbl_sink);
+        } else {
+            // TODO: figure out good buffer size based on size of output row
+            MysqlTableSink* mysql_tbl_sink = new MysqlTableSink(pool, row_desc, output_exprs);
+            sink->reset(mysql_tbl_sink);
+        }
         break;
 #else
         return Status::InternalError(
@@ -121,19 +157,11 @@ Status DataSink::create_data_sink(ObjectPool* pool, const TDataSink& thrift_sink
         if (!thrift_sink.__isset.odbc_table_sink) {
             return Status::InternalError("Missing data odbc sink.");
         }
-        OdbcTableSink* odbc_tbl_sink = new OdbcTableSink(pool, row_desc, output_exprs);
-        sink->reset(odbc_tbl_sink);
-        break;
-    }
-    case TDataSinkType::DATA_SPLIT_SINK: {
-        if (!thrift_sink.__isset.split_sink) {
-            return Status::InternalError("Missing data split buffer sink.");
+        if (is_vec) {
+            sink->reset(new vectorized::VOdbcTableSink(pool, row_desc, output_exprs));
+        } else {
+            sink->reset(new OdbcTableSink(pool, row_desc, output_exprs));
         }
-
-        // TODO: figure out good buffer size based on size of output row
-        std::unique_ptr<DataSpliter> data_spliter(new DataSpliter(row_desc));
-        RETURN_IF_ERROR(DataSpliter::from_thrift(pool, thrift_sink.split_sink, data_spliter.get()));
-        sink->reset(data_spliter.release());
         break;
     }
 
@@ -149,7 +177,11 @@ Status DataSink::create_data_sink(ObjectPool* pool, const TDataSink& thrift_sink
     case TDataSinkType::OLAP_TABLE_SINK: {
         Status status;
         DCHECK(thrift_sink.__isset.olap_table_sink);
-        sink->reset(new stream_load::OlapTableSink(pool, row_desc, output_exprs, &status));
+        if (is_vec) {
+            sink->reset(new stream_load::VOlapTableSink(pool, row_desc, output_exprs, &status));
+        } else {
+            sink->reset(new stream_load::OlapTableSink(pool, row_desc, output_exprs, &status));
+        }
         RETURN_IF_ERROR(status);
         break;
     }
@@ -181,9 +213,6 @@ Status DataSink::init(const TDataSink& thrift_sink) {
 }
 
 Status DataSink::prepare(RuntimeState* state) {
-    _expr_mem_tracker =
-            MemTracker::CreateTracker(-1, _name + ":Expr:" + std::to_string(state->load_job_id()),
-                                      state->instance_mem_tracker());
     return Status::OK();
 }
 

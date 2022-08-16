@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/LiteralExpr.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
@@ -23,7 +26,6 @@ import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.NotImplementedException;
 
 import com.google.common.base.Preconditions;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -67,6 +69,9 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
                 literalExpr = new FloatLiteral(value);
                 break;
             case DECIMALV2:
+            case DECIMAL32:
+            case DECIMAL64:
+            case DECIMAL128:
                 literalExpr = new DecimalLiteral(value);
                 break;
             case CHAR:
@@ -74,9 +79,12 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
             case HLL:
             case STRING:
                 literalExpr = new StringLiteral(value);
+                literalExpr.setType(type);
                 break;
             case DATE:
             case DATETIME:
+            case DATEV2:
+            case DATETIMEV2:
                 literalExpr = new DateLiteral(value, type);
                 break;
             default:
@@ -137,6 +145,8 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
                 return LargeIntLiteral.createMinValue();
             case DATE:
             case DATETIME:
+            case DATEV2:
+            case DATETIMEV2:
                 return DateLiteral.createMinValue(type);
             default:
                 throw new AnalysisException("Invalid data type for creating infinity: " + type);
@@ -195,6 +205,11 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
         return buffer;
     }
 
+    @Override
+    public String toDigestImpl() {
+        return " ? ";
+    }
+
     // Swaps the sign of numeric literals.
     // Throws for non-numeric literals.
     public void swapSign() throws NotImplementedException {
@@ -212,7 +227,7 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
 
     public void readFields(DataInput in) throws IOException {
     }
-    
+
     @Override
     public boolean equals(Object obj) {
         if (this == obj) {
@@ -235,5 +250,9 @@ public abstract class LiteralExpr extends Expr implements Comparable<LiteralExpr
     public boolean isNullable() {
         return this instanceof NullLiteral;
     }
-}
 
+    @Override
+    public void finalizeImplForNereids() throws AnalysisException {
+
+    }
+}

@@ -25,7 +25,6 @@ import org.apache.doris.common.profile.ProfileTreeNode;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
 import org.apache.commons.lang3.tuple.Triple;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -46,10 +45,10 @@ import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
  * if you want to visit the attribute(such as queryID,defaultDb)
  * you can use profile.getInfoStrings("queryId")
  * All attributes can be seen from the above.
- * 
+ *
  * why the element in the finished profile array is not RuntimeProfile,
- * the purpose is let coordinator can destruct earlier(the fragment profile is in Coordinator) 
- * 
+ * the purpose is let coordinator can destruct earlier(the fragment profile is in Coordinator)
+ *
  */
 public class ProfileManager {
     private static final Logger LOG = LogManager.getLogger(ProfileManager.class);
@@ -67,6 +66,7 @@ public class ProfileManager {
     public static final String DEFAULT_DB = "Default Db";
     public static final String SQL_STATEMENT = "Sql Statement";
     public static final String IS_CACHED = "Is Cached";
+    public static final String TRACE_ID = "Trace ID";
 
     public enum ProfileType {
         QUERY,
@@ -75,7 +75,7 @@ public class ProfileManager {
 
     public static final ArrayList<String> PROFILE_HEADERS = new ArrayList(
             Arrays.asList(QUERY_ID, USER, DEFAULT_DB, SQL_STATEMENT, QUERY_TYPE,
-                    START_TIME, END_TIME, TOTAL_TIME, QUERY_STATE));
+                    START_TIME, END_TIME, TOTAL_TIME, QUERY_STATE, TRACE_ID));
 
     private class ProfileElement {
         public Map<String, String> infoStrings = Maps.newHashMap();
@@ -83,16 +83,16 @@ public class ProfileManager {
         public MultiProfileTreeBuilder builder = null;
         public String errMsg = "";
     }
-    
+
     // only protect queryIdDeque; queryIdToProfileMap is concurrent, no need to protect
-    private ReentrantReadWriteLock lock; 
+    private ReentrantReadWriteLock lock;
     private ReadLock readLock;
     private WriteLock writeLock;
 
     // record the order of profiles by queryId
     private Deque<String> queryIdDeque;
     private Map<String, ProfileElement> queryIdToProfileMap; // from QueryId to RuntimeProfile
-    
+
     public static ProfileManager getInstance() {
         if (INSTANCE == null) {
             synchronized (ProfileManager.class) {
@@ -103,15 +103,15 @@ public class ProfileManager {
         }
         return INSTANCE;
     }
-    
+
     private ProfileManager() {
-        lock = new ReentrantReadWriteLock(true); 
+        lock = new ReentrantReadWriteLock(true);
         readLock = lock.readLock();
         writeLock = lock.writeLock();
         queryIdDeque = new LinkedList<>();
         queryIdToProfileMap = new ConcurrentHashMap<>();
     }
-    
+
     public ProfileElement createElement(RuntimeProfile profile) {
         ProfileElement element = new ProfileElement();
         RuntimeProfile summaryProfile = profile.getChildList().get(0).first;
@@ -131,12 +131,12 @@ public class ProfileManager {
         element.builder = builder;
         return element;
     }
-    
+
     public void pushProfile(RuntimeProfile profile) {
         if (profile == null) {
             return;
         }
-        
+
         ProfileElement element = createElement(profile);
         String queryId = element.infoStrings.get(ProfileManager.QUERY_ID);
         // check when push in, which can ensure every element in the list has QUERY_ID column,
@@ -175,7 +175,7 @@ public class ProfileManager {
             while (reverse.hasNext()) {
                 String  queryId = (String) reverse.next();
                 ProfileElement profileElement = queryIdToProfileMap.get(queryId);
-                if (profileElement == null){
+                if (profileElement == null) {
                     continue;
                 }
                 Map<String, String> infoStrings = profileElement.infoStrings;
@@ -225,7 +225,8 @@ public class ProfileManager {
         return builder.getFragmentTreeRoot(executionId);
     }
 
-    public List<Triple<String, String, Long>> getFragmentInstanceList(String queryID, String executionId, String fragmentId)
+    public List<Triple<String, String, Long>> getFragmentInstanceList(String queryID,
+            String executionId, String fragmentId)
             throws AnalysisException {
         MultiProfileTreeBuilder builder;
         readLock.lock();
@@ -243,7 +244,8 @@ public class ProfileManager {
         return builder.getInstanceList(executionId, fragmentId);
     }
 
-    public ProfileTreeNode getInstanceProfileTree(String queryID, String executionId, String fragmentId, String instanceId)
+    public ProfileTreeNode getInstanceProfileTree(String queryID, String executionId,
+            String fragmentId, String instanceId)
             throws AnalysisException {
         MultiProfileTreeBuilder builder;
         readLock.lock();
@@ -268,11 +270,12 @@ public class ProfileManager {
         return builder.getSubTaskInfo();
     }
 
-    public List<ProfileTreeBuilder.FragmentInstances> getFragmentsAndInstances(String queryId) throws AnalysisException{
+    public List<ProfileTreeBuilder.FragmentInstances> getFragmentsAndInstances(String queryId)
+            throws AnalysisException {
         return getMultiProfileTreeBuilder(queryId).getFragmentInstances(queryId);
     }
 
-    private MultiProfileTreeBuilder getMultiProfileTreeBuilder(String jobId) throws AnalysisException{
+    private MultiProfileTreeBuilder getMultiProfileTreeBuilder(String jobId) throws AnalysisException {
         readLock.lock();
         try {
             ProfileElement element = queryIdToProfileMap.get(jobId);
@@ -281,6 +284,20 @@ public class ProfileManager {
                         + (element == null ? "not found" : element.errMsg));
             }
             return element.builder;
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    public String getQueryIdByTraceId(String traceId) {
+        readLock.lock();
+        try {
+            for (Map.Entry<String, ProfileElement> entry : queryIdToProfileMap.entrySet()) {
+                if (entry.getValue().infoStrings.getOrDefault(TRACE_ID, "").equals(traceId)) {
+                    return entry.getKey();
+                }
+            }
+            return "";
         } finally {
             readLock.unlock();
         }

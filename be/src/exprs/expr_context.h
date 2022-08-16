@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/expr-context.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_EXPR_CONTEXT_H
-#define DORIS_BE_SRC_QUERY_EXPRS_EXPR_CONTEXT_H
+#pragma once
 
 #include <memory>
 
@@ -25,7 +27,7 @@
 #include "exprs/expr_value.h"
 #include "exprs/slot_ref.h"
 #include "udf/udf.h"
-#include "udf/udf_internal.h" // for CollectionVal
+#include "vec/exec/format/parquet/vparquet_reader.h"
 
 #undef USING_DORIS_UDF
 #define USING_DORIS_UDF using namespace doris_udf
@@ -34,9 +36,13 @@ USING_DORIS_UDF;
 
 namespace doris {
 
+namespace vectorized {
+class VOlapScanNode;
+class ParquetReader;
+} // namespace vectorized
+
 class Expr;
 class MemPool;
-class MemTracker;
 class RuntimeState;
 class RowDescriptor;
 class TColumnValue;
@@ -52,9 +58,7 @@ public:
     ~ExprContext();
 
     /// Prepare expr tree for evaluation.
-    /// Allocations from this context will be counted against 'tracker'.
-    Status prepare(RuntimeState* state, const RowDescriptor& row_desc,
-                   const std::shared_ptr<MemTracker>& tracker);
+    Status prepare(RuntimeState* state, const RowDescriptor& row_desc);
 
     /// Must be called after calling Prepare(). Does not need to be called on clones.
     /// Idempotent (this allows exprs to be opened multiple times in subplans without
@@ -121,6 +125,8 @@ public:
     // TODO(zc):
     // ArrayVal GetArrayVal(TupleRow* row);
     DateTimeVal get_datetime_val(TupleRow* row);
+    DateV2Val get_datev2_val(TupleRow* row);
+    DateTimeV2Val get_datetimev2_val(TupleRow* row);
     DecimalV2Val get_decimalv2_val(TupleRow* row);
 
     /// Frees all local allocations made by fn_contexts_. This can be called when result
@@ -153,23 +159,21 @@ public:
 private:
     friend class Expr;
     friend class ScalarFnCall;
+    friend class RPCFn;
     friend class InPredicate;
     friend class RuntimePredicateWrapper;
     friend class BloomFilterPredicate;
     friend class OlapScanNode;
-    friend class EsScanNode;
     friend class EsPredicate;
+    friend class RowGroupReader;
+    friend class vectorized::ParquetReader;
+    friend class vectorized::VOlapScanNode;
 
     /// FunctionContexts for each registered expression. The FunctionContexts are created
     /// and owned by this ExprContext.
     std::vector<FunctionContext*> _fn_contexts;
 
-    /// Array access to fn_contexts_. Used by ScalarFnCall's codegen'd compute function
-    /// to access the correct FunctionContext.
-    /// TODO: revisit this
-    FunctionContext** _fn_contexts_ptr;
-
-    /// Pool backing fn_contexts_. Counts against the runtime state's UDF mem tracker.
+    /// Pool backing fn_contexts_.
     std::unique_ptr<MemPool> _pool;
 
     /// The expr tree this context is for.
@@ -189,7 +193,7 @@ private:
 
     /// Calls the appropriate Get*Val() function on 'e' and stores the result in result_.
     /// This is used by Exprs to call GetValue() on a child expr, rather than root_.
-    void* get_value(Expr* e, TupleRow* row);
+    void* get_value(Expr* e, TupleRow* row, int precision = 0, int scale = 0);
 };
 
 inline void* ExprContext::get_value(TupleRow* row) {
@@ -200,5 +204,3 @@ inline void* ExprContext::get_value(TupleRow* row) {
 }
 
 } // namespace doris
-
-#endif

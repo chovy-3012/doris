@@ -30,6 +30,38 @@ class S3Client;
 } // namespace Aws
 
 namespace doris {
+
+const static std::string S3_AK = "AWS_ACCESS_KEY";
+const static std::string S3_SK = "AWS_SECRET_KEY";
+const static std::string S3_ENDPOINT = "AWS_ENDPOINT";
+const static std::string S3_REGION = "AWS_REGION";
+const static std::string S3_MAX_CONN_SIZE = "AWS_MAX_CONN_SIZE";
+const static std::string S3_REQUEST_TIMEOUT_MS = "AWS_REQUEST_TIMEOUT_MS";
+const static std::string S3_CONN_TIMEOUT_MS = "AWS_CONN_TIMEOUT_MS";
+
+struct S3Conf {
+    std::string ak;
+    std::string sk;
+    std::string endpoint;
+    std::string region;
+    std::string bucket;
+    std::string prefix;
+    int max_connections = -1;
+    int request_timeout_ms = -1;
+    int connect_timeout_ms = -1;
+
+    std::string to_string() const;
+};
+
+inline std::string S3Conf::to_string() const {
+    std::stringstream ss;
+    ss << "ak: " << ak << ", sk: " << sk << ", endpoint: " << endpoint << ", region: " << region
+       << ", bucket: " << bucket << ", prefix: " << prefix
+       << ", max_connections: " << max_connections << ", request_timeout_ms: " << request_timeout_ms
+       << ", connect_timeout_ms: " << connect_timeout_ms;
+    return ss.str();
+}
+
 class ClientFactory {
 public:
     ~ClientFactory();
@@ -38,11 +70,16 @@ public:
 
     std::shared_ptr<Aws::S3::S3Client> create(const std::map<std::string, std::string>& prop);
 
+    std::shared_ptr<Aws::S3::S3Client> create(const S3Conf& s3_conf);
+
+    static bool is_s3_conf_valid(const std::map<std::string, std::string>& prop);
+
+    static bool is_s3_conf_valid(const S3Conf& s3_conf);
+
 private:
     ClientFactory();
 
     Aws::SDKOptions _aws_options;
 };
-std::unique_ptr<Aws::S3::S3Client> create_client(const std::map<std::string, std::string>& prop);
 
 } // end namespace doris

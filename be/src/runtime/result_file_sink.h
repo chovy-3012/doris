@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_RESULT_FILE_SINK_H
-#define DORIS_BE_RUNTIME_RESULT_FILE_SINK_H
+#pragma once
 
 #include "common/status.h"
 #include "gen_cpp/PaloInternalService_types.h"
@@ -34,14 +33,10 @@ class RuntimeProfile;
 class BufferControlBlock;
 class ExprContext;
 class ResultWriter;
-class MemTracker;
-class ResultFileOptions;
+struct ResultFileOptions;
 
 class ResultFileSink : public DataStreamSender {
 public:
-    // construct a buffer for the result need send to coordinator.
-    // row_desc used for convert RowBatch to TRowBatch
-    // buffer_size is the buffer size allocated to each query
     ResultFileSink(const RowDescriptor& row_desc, const std::vector<TExpr>& select_exprs,
                    const TResultFileSink& sink);
     ResultFileSink(const RowDescriptor& row_desc, const std::vector<TExpr>& select_exprs,
@@ -49,15 +44,16 @@ public:
                    const std::vector<TPlanFragmentDestination>& destinations, ObjectPool* pool,
                    int sender_id, DescriptorTbl& descs);
     virtual ~ResultFileSink();
-    virtual Status prepare(RuntimeState* state);
-    virtual Status open(RuntimeState* state);
+    virtual Status init(const TDataSink& thrift_sink) override;
+    virtual Status prepare(RuntimeState* state) override;
+    virtual Status open(RuntimeState* state) override;
     // send data in 'batch' to this backend stream mgr
     // Blocks until all rows in batch are placed in the buffer
-    virtual Status send(RuntimeState* state, RowBatch* batch);
+    virtual Status send(RuntimeState* state, RowBatch* batch) override;
     // Flush all buffered data and close all existing channels to destination
     // hosts. Further send() calls are illegal after calling close().
-    virtual Status close(RuntimeState* state, Status exec_status);
-    virtual RuntimeProfile* profile() { return _profile; }
+    virtual Status close(RuntimeState* state, Status exec_status) override;
+    virtual RuntimeProfile* profile() override { return _profile; }
 
     void set_query_statistics(std::shared_ptr<QueryStatistics> statistics) override;
 
@@ -77,7 +73,8 @@ private:
     RowBatch* _output_batch = nullptr;
     int _buf_size = 1024; // Allocated from _pool
     bool _is_top_sink = true;
+    std::string _header;
+    std::string _header_type;
 };
 
 } // namespace doris
-#endif

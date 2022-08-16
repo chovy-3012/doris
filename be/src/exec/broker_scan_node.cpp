@@ -21,16 +21,19 @@
 #include <sstream>
 
 #include "common/object_pool.h"
-#include "exec/broker_scanner.h"
 #include "exec/json_scanner.h"
 #include "exec/orc_scanner.h"
 #include "exec/parquet_scanner.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
-#include "runtime/dpp_sink_internal.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
 #include "util/runtime_profile.h"
+#include "util/thread.h"
+#include "vec/exec/vbroker_scanner.h"
+#include "vec/exec/vjson_scanner.h"
+#include "vec/exec/vorc_scanner.h"
+#include "vec/exec/vparquet_scanner.h"
 
 namespace doris {
 
@@ -60,22 +63,19 @@ Status BrokerScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
 Status BrokerScanNode::prepare(RuntimeState* state) {
     VLOG_QUERY << "BrokerScanNode prepare";
     RETURN_IF_ERROR(ScanNode::prepare(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     // get tuple desc
     _runtime_state = state;
     _tuple_desc = state->desc_tbl().get_tuple_descriptor(_tuple_id);
     if (_tuple_desc == nullptr) {
-        std::stringstream ss;
-        ss << "Failed to get tuple descriptor, _tuple_id=" << _tuple_id;
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Failed to get tuple descriptor, _tuple_id={}", _tuple_id);
     }
 
     // Initialize slots map
     for (auto slot : _tuple_desc->slots()) {
         auto pair = _slots_map.emplace(slot->col_name(), slot);
         if (!pair.second) {
-            std::stringstream ss;
-            ss << "Failed to insert slot, col_name=" << slot->col_name();
-            return Status::InternalError(ss.str());
+            return Status::InternalError("Failed to insert slot, col_name={}", slot->col_name());
         }
     }
 
@@ -88,7 +88,7 @@ Status BrokerScanNode::prepare(RuntimeState* state) {
 Status BrokerScanNode::open(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::open(state));
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::OPEN));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_CANCELLED(state);
 
     RETURN_IF_ERROR(start_scanners());
@@ -107,6 +107,7 @@ Status BrokerScanNode::start_scanners() {
 
 Status BrokerScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     // check if CANCELLED.
     if (state->is_cancelled()) {
         std::unique_lock<std::mutex> l(_batch_queue_lock);
@@ -190,7 +191,6 @@ Status BrokerScanNode::close(RuntimeState* state) {
     if (is_closed()) {
         return Status::OK();
     }
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::CLOSE));
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     _scan_finished.store(true);
     _queue_writer_cond.notify_all();
@@ -220,25 +220,56 @@ std::unique_ptr<BaseScanner> BrokerScanNode::create_scanner(const TBrokerScanRan
     BaseScanner* scan = nullptr;
     switch (scan_range.ranges[0].format_type) {
     case TFileFormatType::FORMAT_PARQUET:
-        scan = new ParquetScanner(_runtime_state, runtime_profile(), scan_range.params,
-                                  scan_range.ranges, scan_range.broker_addresses,
-                                  _pre_filter_texprs, counter);
+        if (_vectorized) {
+            scan = new vectorized::VParquetScanner(
+                    _runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
+                    scan_range.broker_addresses, _pre_filter_texprs, counter);
+        } else {
+            scan = new ParquetScanner(_runtime_state, runtime_profile(), scan_range.params,
+                                      scan_range.ranges, scan_range.broker_addresses,
+                                      _pre_filter_texprs, counter);
+        }
         break;
     case TFileFormatType::FORMAT_ORC:
-        scan = new ORCScanner(_runtime_state, runtime_profile(), scan_range.params,
-                              scan_range.ranges, scan_range.broker_addresses,
-                              _pre_filter_texprs, counter);
+        if (_vectorized) {
+            scan = new vectorized::VORCScanner(_runtime_state, runtime_profile(), scan_range.params,
+                                               scan_range.ranges, scan_range.broker_addresses,
+                                               _pre_filter_texprs, counter);
+        } else {
+            scan = new ORCScanner(_runtime_state, runtime_profile(), scan_range.params,
+                                  scan_range.ranges, scan_range.broker_addresses,
+                                  _pre_filter_texprs, counter);
+        }
         break;
     case TFileFormatType::FORMAT_JSON:
-        scan = new JsonScanner(_runtime_state, runtime_profile(), scan_range.params,
-                               scan_range.ranges, scan_range.broker_addresses,
-                               _pre_filter_texprs, counter);
+        if (_vectorized) {
+            if (config::enable_simdjson_reader) {
+                scan = new vectorized::VJsonScanner<vectorized::VSIMDJsonReader>(
+                        _runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
+                        scan_range.broker_addresses, _pre_filter_texprs, counter);
+            } else {
+                scan = new vectorized::VJsonScanner<vectorized::VJsonReader>(
+                        _runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
+                        scan_range.broker_addresses, _pre_filter_texprs, counter);
+            }
+        } else {
+            scan = new JsonScanner(_runtime_state, runtime_profile(), scan_range.params,
+                                   scan_range.ranges, scan_range.broker_addresses,
+                                   _pre_filter_texprs, counter);
+        }
         break;
     default:
-        scan = new BrokerScanner(_runtime_state, runtime_profile(), scan_range.params,
-                                 scan_range.ranges, scan_range.broker_addresses,
-                                 _pre_filter_texprs, counter);
+        if (_vectorized) {
+            scan = new vectorized::VBrokerScanner(
+                    _runtime_state, runtime_profile(), scan_range.params, scan_range.ranges,
+                    scan_range.broker_addresses, _pre_filter_texprs, counter);
+        } else {
+            scan = new BrokerScanner(_runtime_state, runtime_profile(), scan_range.params,
+                                     scan_range.ranges, scan_range.broker_addresses,
+                                     _pre_filter_texprs, counter);
+        }
     }
+    scan->reg_conjunct_ctxs(_tuple_id, _conjunct_ctxs);
     std::unique_ptr<BaseScanner> scanner(scan);
     return scanner;
 }
@@ -247,14 +278,14 @@ Status BrokerScanNode::scanner_scan(const TBrokerScanRange& scan_range,
                                     const std::vector<ExprContext*>& conjunct_ctxs,
                                     ScannerCounter* counter) {
     //create scanner object and open
+    Thread::set_self_name("broker_scanner");
     std::unique_ptr<BaseScanner> scanner = create_scanner(scan_range, counter);
     RETURN_IF_ERROR(scanner->open());
     bool scanner_eof = false;
 
     while (!scanner_eof) {
         // Fill one row batch
-        std::shared_ptr<RowBatch> row_batch(
-                new RowBatch(row_desc(), _runtime_state->batch_size(), mem_tracker().get()));
+        std::shared_ptr<RowBatch> row_batch(new RowBatch(row_desc(), _runtime_state->batch_size()));
 
         // create new tuple buffer for row_batch
         MemPool* tuple_pool = row_batch->tuple_data_pool();
@@ -273,7 +304,7 @@ Status BrokerScanNode::scanner_scan(const TBrokerScanRange& scan_range,
             }
 
             // This row batch has been filled up, and break this
-            if (row_batch->is_full()) {
+            if (row_batch->is_full() || row_batch->is_full_uncommitted()) {
                 break;
             }
 
@@ -284,8 +315,16 @@ Status BrokerScanNode::scanner_scan(const TBrokerScanRange& scan_range,
             memset(tuple, 0, _tuple_desc->num_null_bytes());
 
             // Get from scanner
-            RETURN_IF_ERROR(scanner->get_next(tuple, tuple_pool, &scanner_eof));
+            bool tuple_fill = false;
+            RETURN_IF_ERROR(scanner->get_next(tuple, tuple_pool, &scanner_eof, &tuple_fill));
             if (scanner_eof) {
+                continue;
+            }
+
+            // if read row succeed, but fill dest tuple fail, we need to increase # of uncommitted rows,
+            // once reach the capacity of row batch, will transfer the row batch to next operator to release memory
+            if (!tuple_fill) {
+                row_batch->increase_uncommitted_rows();
                 continue;
             }
 
@@ -310,7 +349,10 @@ Status BrokerScanNode::scanner_scan(const TBrokerScanRange& scan_range,
                    // 1. too many batches in queue, or
                    // 2. at least one batch in queue and memory exceed limit.
                    (_batch_queue.size() >= _max_buffered_batches ||
-                    (mem_tracker()->AnyLimitExceeded(MemLimit::HARD) && !_batch_queue.empty()))) {
+                    (thread_context()
+                             ->_thread_mem_tracker_mgr->limiter_mem_tracker()
+                             ->any_limit_exceeded() &&
+                     !_batch_queue.empty()))) {
                 _queue_writer_cond.wait_for(l, std::chrono::seconds(1));
             }
             // Process already set failed, so we just return OK
@@ -328,7 +370,7 @@ Status BrokerScanNode::scanner_scan(const TBrokerScanRange& scan_range,
             // Queue size Must be smaller than _max_buffered_batches
             _batch_queue.push_back(row_batch);
 
-            // Notify reader to
+            // Notify reader to process
             _queue_reader_cond.notify_one();
         }
     }
@@ -337,6 +379,8 @@ Status BrokerScanNode::scanner_scan(const TBrokerScanRange& scan_range,
 }
 
 void BrokerScanNode::scanner_worker(int start_idx, int length) {
+    SCOPED_ATTACH_TASK(_runtime_state);
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     // Clone expr context
     std::vector<ExprContext*> scanner_expr_ctxs;
     auto status = Expr::clone_if_not_exists(_conjunct_ctxs, _runtime_state, &scanner_expr_ctxs);

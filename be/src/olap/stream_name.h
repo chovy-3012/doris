@@ -15,17 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_OLAP_COLUMN_FILE_STREAM_NAME_H
-#define DORIS_BE_SRC_OLAP_COLUMN_FILE_STREAM_NAME_H
+#pragma once
 
 #include <gen_cpp/column_data_file.pb.h>
 
 namespace doris {
 
-// 定义流的名字，是流的唯一标识符
-// 实现比较函数，将流在文件中的顺序进行约定：
-// 1. 首先排列Index流：Index流按Column unique Id排序
-// 2. 再排列非Index流：首先按照column unique id，再按kind排序
+// Define the name of the stream, which is a unique identifier for the stream.
+// Implement the comparison function to agree on the order of streams in the file:
+//  1. First arrange the index stream: the Index stream is sorted by column unique id.
+//  2. Rearrange non-index streams: first by column unique id, then by kind.
 class StreamName {
 public:
     StreamName(uint32_t unique_column_id, StreamInfoMessage::Kind kind);
@@ -42,5 +41,3 @@ private:
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_OLAP_COLUMN_FILE_STREAM_NAME_H

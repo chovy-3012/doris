@@ -23,7 +23,6 @@
 #include "olap/decimal12.h"
 #include "olap/uint24.h"
 #include "runtime/mem_pool.h"
-#include "runtime/mem_tracker.h"
 
 namespace doris {
 
@@ -39,8 +38,7 @@ void test_min() {
     static const size_t kValSize = sizeof(CppType) + 1; // '1' represent the leading bool flag.
     char buf[64];
 
-    std::shared_ptr<MemTracker> tracker(new MemTracker(-1));
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
+    std::unique_ptr<MemPool> mem_pool(new MemPool());
     ObjectPool agg_object_pool;
     const AggregateInfo* agg = get_aggregate_info(OLAP_FIELD_AGGREGATION_MIN, field_type);
 
@@ -50,7 +48,7 @@ void test_min() {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->init(&dst, val_buf, true, mem_pool.get(), &agg_object_pool);
-        ASSERT_TRUE(*(bool*)(buf));
+        EXPECT_TRUE(*(bool*)(buf));
     }
     // 100
     {
@@ -59,9 +57,9 @@ void test_min() {
         CppType val = 100;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(100, val);
+        EXPECT_EQ(100, val);
     }
     // 200
     {
@@ -70,9 +68,9 @@ void test_min() {
         CppType val = 200;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(100, val);
+        EXPECT_EQ(100, val);
     }
     // 50
     {
@@ -81,26 +79,26 @@ void test_min() {
         CppType val = 50;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(50, val);
+        EXPECT_EQ(50, val);
     }
     // null
     {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         CppType val;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(50, val);
+        EXPECT_EQ(50, val);
     }
     agg->finalize(&dst, mem_pool.get());
-    ASSERT_FALSE(*(bool*)(buf));
+    EXPECT_FALSE(*(bool*)(buf));
     CppType val;
     memcpy(&val, buf + 1, sizeof(CppType));
-    ASSERT_EQ(50, val);
+    EXPECT_EQ(50, val);
 }
 
 TEST_F(AggregateFuncTest, min) {
@@ -115,8 +113,7 @@ void test_max() {
 
     char buf[64];
 
-    std::shared_ptr<MemTracker> tracker(new MemTracker(-1));
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
+    std::unique_ptr<MemPool> mem_pool(new MemPool());
     ObjectPool agg_object_pool;
     const AggregateInfo* agg = get_aggregate_info(OLAP_FIELD_AGGREGATION_MAX, field_type);
 
@@ -126,7 +123,7 @@ void test_max() {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->init(&dst, val_buf, true, mem_pool.get(), &agg_object_pool);
-        ASSERT_TRUE(*(bool*)(buf));
+        EXPECT_TRUE(*(bool*)(buf));
     }
     // 100
     {
@@ -135,9 +132,9 @@ void test_max() {
         CppType val = 100;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(100, val);
+        EXPECT_EQ(100, val);
     }
     // 200
     {
@@ -146,9 +143,9 @@ void test_max() {
         CppType val = 200;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(200, val);
+        EXPECT_EQ(200, val);
     }
     // 50
     {
@@ -157,25 +154,25 @@ void test_max() {
         CppType val = 50;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(200, val);
+        EXPECT_EQ(200, val);
     }
     // null
     {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         CppType val;
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(200, val);
+        EXPECT_EQ(200, val);
     }
     agg->finalize(&dst, mem_pool.get());
-    ASSERT_FALSE(*(bool*)(buf));
+    EXPECT_FALSE(*(bool*)(buf));
     CppType val;
     memcpy(&val, buf + 1, sizeof(CppType));
-    ASSERT_EQ(200, val);
+    EXPECT_EQ(200, val);
 }
 
 TEST_F(AggregateFuncTest, max) {
@@ -191,8 +188,7 @@ void test_sum() {
     char buf[64];
     RowCursorCell dst(buf);
 
-    std::shared_ptr<MemTracker> tracker(new MemTracker(-1));
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
+    std::unique_ptr<MemPool> mem_pool(new MemPool());
     ObjectPool agg_object_pool;
     const AggregateInfo* agg = get_aggregate_info(OLAP_FIELD_AGGREGATION_SUM, field_type);
 
@@ -201,7 +197,7 @@ void test_sum() {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->init(&dst, val_buf, true, mem_pool.get(), &agg_object_pool);
-        ASSERT_TRUE(*(bool*)(buf));
+        EXPECT_TRUE(*(bool*)(buf));
     }
     // 100
     {
@@ -210,9 +206,9 @@ void test_sum() {
         CppType val = 100;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(100, val);
+        EXPECT_EQ(100, val);
     }
     // 200
     {
@@ -221,9 +217,9 @@ void test_sum() {
         CppType val = 200;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(300, val);
+        EXPECT_EQ(300, val);
     }
     // 50
     {
@@ -232,25 +228,25 @@ void test_sum() {
         CppType val = 50;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(350, val);
+        EXPECT_EQ(350, val);
     }
     // null
     {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         CppType val;
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(350, val);
+        EXPECT_EQ(350, val);
     }
     agg->finalize(&dst, mem_pool.get());
-    ASSERT_FALSE(*(bool*)(buf));
+    EXPECT_FALSE(*(bool*)(buf));
     CppType val;
     memcpy(&val, buf + 1, sizeof(CppType));
-    ASSERT_EQ(350, val);
+    EXPECT_EQ(350, val);
 }
 
 TEST_F(AggregateFuncTest, sum) {
@@ -266,8 +262,7 @@ void test_replace() {
     char buf[64];
     RowCursorCell dst(buf);
 
-    std::shared_ptr<MemTracker> tracker(new MemTracker(-1));
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
+    std::unique_ptr<MemPool> mem_pool(new MemPool());
     ObjectPool agg_object_pool;
     const AggregateInfo* agg = get_aggregate_info(OLAP_FIELD_AGGREGATION_REPLACE, field_type);
 
@@ -276,7 +271,7 @@ void test_replace() {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->init(&dst, val_buf, true, mem_pool.get(), &agg_object_pool);
-        ASSERT_TRUE(*(bool*)(buf));
+        EXPECT_TRUE(*(bool*)(buf));
     }
     // 100
     {
@@ -285,16 +280,16 @@ void test_replace() {
         CppType val = 100;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(100, val);
+        EXPECT_EQ(100, val);
     }
     // null
     {
         char val_buf[kValSize];
         *(bool*)val_buf = true;
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_TRUE(*(bool*)(buf));
+        EXPECT_TRUE(*(bool*)(buf));
     }
     // 50
     {
@@ -303,15 +298,15 @@ void test_replace() {
         CppType val = 50;
         memcpy(val_buf + 1, &val, sizeof(CppType));
         agg->update(&dst, val_buf, mem_pool.get());
-        ASSERT_FALSE(*(bool*)(buf));
+        EXPECT_FALSE(*(bool*)(buf));
         memcpy(&val, buf + 1, sizeof(CppType));
-        ASSERT_EQ(50, val);
+        EXPECT_EQ(50, val);
     }
     agg->finalize(&dst, mem_pool.get());
-    ASSERT_FALSE(*(bool*)(buf));
+    EXPECT_FALSE(*(bool*)(buf));
     CppType val;
     memcpy(&val, buf + 1, sizeof(CppType));
-    ASSERT_EQ(50, val);
+    EXPECT_EQ(50, val);
 }
 
 template <FieldType field_type>
@@ -325,8 +320,7 @@ void test_replace_string() {
     dst_slice->data = nullptr;
     dst_slice->size = 0;
 
-    std::shared_ptr<MemTracker> tracker(new MemTracker(-1));
-    std::unique_ptr<MemPool> mem_pool(new MemPool(tracker.get()));
+    std::unique_ptr<MemPool> mem_pool(new MemPool());
     ObjectPool agg_object_pool;
     const AggregateInfo* agg = get_aggregate_info(OLAP_FIELD_AGGREGATION_REPLACE, field_type);
 
@@ -337,7 +331,7 @@ void test_replace_string() {
     {
         src_cell.set_null();
         agg->init(&dst_cell, (const char*)src_slice, true, mem_pool.get(), &agg_object_pool);
-        ASSERT_TRUE(dst_cell.is_null());
+        EXPECT_TRUE(dst_cell.is_null());
     }
     // "12345"
     {
@@ -345,9 +339,9 @@ void test_replace_string() {
         src_slice->data = (char*)"1234567890";
         src_slice->size = 10;
         agg->update(&dst_cell, src_cell, mem_pool.get());
-        ASSERT_FALSE(dst_cell.is_null());
-        ASSERT_EQ(10, dst_slice->size);
-        ASSERT_STREQ("1234567890", dst_slice->to_string().c_str());
+        EXPECT_FALSE(dst_cell.is_null());
+        EXPECT_EQ(10, dst_slice->size);
+        EXPECT_STREQ("1234567890", dst_slice->to_string().c_str());
     }
     // abc
     {
@@ -355,15 +349,15 @@ void test_replace_string() {
         src_slice->data = (char*)"abc";
         src_slice->size = 3;
         agg->update(&dst_cell, src_cell, mem_pool.get());
-        ASSERT_FALSE(dst_cell.is_null());
-        ASSERT_EQ(3, dst_slice->size);
-        ASSERT_STREQ("abc", dst_slice->to_string().c_str());
+        EXPECT_FALSE(dst_cell.is_null());
+        EXPECT_EQ(3, dst_slice->size);
+        EXPECT_STREQ("abc", dst_slice->to_string().c_str());
     }
     // null
     {
         src_cell.set_null();
         agg->update(&dst_cell, src_cell, mem_pool.get());
-        ASSERT_TRUE(dst_cell.is_null());
+        EXPECT_TRUE(dst_cell.is_null());
     }
     // "12345"
     {
@@ -371,15 +365,15 @@ void test_replace_string() {
         src_slice->data = (char*)"12345";
         src_slice->size = 5;
         agg->update(&dst_cell, src_cell, mem_pool.get());
-        ASSERT_FALSE(dst_cell.is_null());
-        ASSERT_EQ(5, dst_slice->size);
-        ASSERT_STREQ("12345", dst_slice->to_string().c_str());
+        EXPECT_FALSE(dst_cell.is_null());
+        EXPECT_EQ(5, dst_slice->size);
+        EXPECT_STREQ("12345", dst_slice->to_string().c_str());
     }
 
     agg->finalize(&dst_cell, mem_pool.get());
-    ASSERT_FALSE(dst_cell.is_null());
-    ASSERT_EQ(5, dst_slice->size);
-    ASSERT_STREQ("12345", dst_slice->to_string().c_str());
+    EXPECT_FALSE(dst_cell.is_null());
+    EXPECT_EQ(5, dst_slice->size);
+    EXPECT_STREQ("12345", dst_slice->to_string().c_str());
 }
 
 TEST_F(AggregateFuncTest, replace) {
@@ -390,8 +384,3 @@ TEST_F(AggregateFuncTest, replace) {
 }
 
 } // namespace doris
-
-int main(int argc, char** argv) {
-    testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

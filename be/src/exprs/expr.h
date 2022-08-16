@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/expr.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_EXPR_H
-#define DORIS_BE_SRC_QUERY_EXPRS_EXPR_H
+#pragma once
 
 #include <memory>
 #include <string>
@@ -25,15 +27,16 @@
 #include "common/status.h"
 #include "exprs/expr_value.h"
 #include "gen_cpp/Opcodes_types.h"
-#include "runtime/datetime_value.h"
-#include "runtime/decimalv2_value.h"
 #include "runtime/descriptors.h"
+#include "runtime/large_int_value.h"
 #include "runtime/string_value.h"
 #include "runtime/string_value.hpp"
 #include "runtime/tuple.h"
 #include "runtime/tuple_row.h"
-#include "runtime/types.h"
 #include "udf/udf.h"
+#include "util/string_parser.hpp"
+#include "vec/data_types/data_type_decimal.h"
+#include "vec/io/io_helper.h"
 
 #undef USING_DORIS_UDF
 #define USING_DORIS_UDF using namespace doris_udf
@@ -50,21 +53,16 @@ class RuntimeState;
 class TColumnValue;
 class TExpr;
 class TExprNode;
-class SetVar;
 class TupleIsNullPredicate;
-class VectorizedRowBatch;
 class Literal;
 class MemTracker;
-class UserFunctionCacheEntry;
+struct UserFunctionCacheEntry;
 
 // This is the superclass of all expr evaluation nodes.
 class Expr {
 public:
     // typedef for compute functions.
     typedef void* (*ComputeFn)(Expr*, TupleRow*);
-
-    // typdef for vectorize compute functions.
-    typedef bool (*VectorComputeFn)(Expr*, VectorizedRowBatch*);
 
     // Empty virtual destructor
     virtual ~Expr();
@@ -77,10 +75,6 @@ public:
     // valid as long as 'row' doesn't change.
     // TODO: stop having the result cached in this Expr object
     void* get_value(TupleRow* row) { return nullptr; }
-
-    // Vectorize Evalute expr and return result column index.
-    // Result cached in batch and valid as long as batch.
-    bool evaluate(VectorizedRowBatch* batch);
 
     bool is_null_scalar_function(std::string& str) {
         // name and function_name both are required
@@ -111,7 +105,13 @@ public:
     // virtual ArrayVal GetArrayVal(ExprContext* context, TupleRow*);
     virtual DateTimeVal get_datetime_val(ExprContext* context, TupleRow*);
     virtual DecimalV2Val get_decimalv2_val(ExprContext* context, TupleRow*);
+    virtual DateV2Val get_datev2_val(ExprContext* context, TupleRow*);
+    virtual DateTimeV2Val get_datetimev2_val(ExprContext* context, TupleRow*);
     virtual CollectionVal get_array_val(ExprContext* context, TupleRow*);
+
+    virtual Decimal32Val get_decimal32_val(ExprContext* context, TupleRow*);
+    virtual Decimal64Val get_decimal64_val(ExprContext* context, TupleRow*);
+    virtual Decimal128Val get_decimal128_val(ExprContext* context, TupleRow*);
 
     // Get the number of digits after the decimal that should be displayed for this
     // value. Returns -1 if no scale has been specified (currently the scale is only set for
@@ -179,29 +179,26 @@ public:
     /// tuple row descriptor of the input tuple row. On failure, 'expr' is set to nullptr and
     /// the expr tree (if created) will be closed. Error status will be returned too.
     static Status create(const TExpr& texpr, const RowDescriptor& row_desc, RuntimeState* state,
-                         ObjectPool* pool, Expr** expr, const std::shared_ptr<MemTracker>& tracker);
+                         ObjectPool* pool, Expr** expr);
 
     /// Create a new ScalarExpr based on thrift Expr 'texpr'. The newly created ScalarExpr
     /// is stored in ObjectPool 'state->obj_pool()' and returned in 'expr'. 'row_desc' is
     /// the tuple row descriptor of the input tuple row. Returns error status on failure.
     static Status create(const TExpr& texpr, const RowDescriptor& row_desc, RuntimeState* state,
-                         Expr** expr, const std::shared_ptr<MemTracker>& tracker);
+                         Expr** expr);
 
     /// Convenience functions creating multiple ScalarExpr.
     static Status create(const std::vector<TExpr>& texprs, const RowDescriptor& row_desc,
-                         RuntimeState* state, ObjectPool* pool, std::vector<Expr*>* exprs,
-                         const std::shared_ptr<MemTracker>& tracker);
+                         RuntimeState* state, ObjectPool* pool, std::vector<Expr*>* exprs);
 
     /// Convenience functions creating multiple ScalarExpr.
     static Status create(const std::vector<TExpr>& texprs, const RowDescriptor& row_desc,
-                         RuntimeState* state, std::vector<Expr*>* exprs,
-                         const std::shared_ptr<MemTracker>& tracker);
+                         RuntimeState* state, std::vector<Expr*>* exprs);
 
     /// Convenience function for preparing multiple expr trees.
     /// Allocations from 'ctxs' will be counted against 'tracker'.
     static Status prepare(const std::vector<ExprContext*>& ctxs, RuntimeState* state,
-                          const RowDescriptor& row_desc,
-                          const std::shared_ptr<MemTracker>& tracker);
+                          const RowDescriptor& row_desc);
 
     /// Convenience function for opening multiple expr trees.
     static Status open(const std::vector<ExprContext*>& ctxs, RuntimeState* state);
@@ -263,6 +260,7 @@ public:
     };
 
     static Expr* copy(ObjectPool* pool, Expr* old_expr);
+    int get_fn_context_index() { return _fn_context_index; }
 
 protected:
     friend class AggFnEvaluator;
@@ -377,9 +375,6 @@ protected:
     // get_const_val().
     std::shared_ptr<AnyVal> _constant_val;
 
-    // function to evaluate vectorize expr; typically set in prepare()
-    VectorComputeFn _vector_compute_fn;
-
     /// Simple debug string that provides no expr subclass-specific information
     std::string debug_string(const std::string& expr_name) const {
         std::stringstream out;
@@ -461,17 +456,146 @@ private:
     int _fn_ctx_idx_end = 0;
 };
 
-inline bool Expr::evaluate(VectorizedRowBatch* batch) {
-    DCHECK(_type.type != INVALID_TYPE);
-
-    if (_is_slotref) {
-        // return SlotRef::vector_compute_fn(this, batch);
-        return false;
+template <PrimitiveType T>
+Status create_texpr_literal_node(const void* data, TExprNode* node, int precision = 0,
+                                 int scale = 0) {
+    if constexpr (T == TYPE_BOOLEAN) {
+        auto origin_value = reinterpret_cast<const bool*>(data);
+        TBoolLiteral boolLiteral;
+        (*node).__set_node_type(TExprNodeType::BOOL_LITERAL);
+        boolLiteral.__set_value(*origin_value);
+        (*node).__set_bool_literal(boolLiteral);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_BOOLEAN));
+    } else if constexpr (T == TYPE_TINYINT) {
+        auto origin_value = reinterpret_cast<const int8_t*>(data);
+        (*node).__set_node_type(TExprNodeType::INT_LITERAL);
+        TIntLiteral intLiteral;
+        intLiteral.__set_value(*origin_value);
+        (*node).__set_int_literal(intLiteral);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_TINYINT));
+    } else if constexpr (T == TYPE_SMALLINT) {
+        auto origin_value = reinterpret_cast<const int16_t*>(data);
+        (*node).__set_node_type(TExprNodeType::INT_LITERAL);
+        TIntLiteral intLiteral;
+        intLiteral.__set_value(*origin_value);
+        (*node).__set_int_literal(intLiteral);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_SMALLINT));
+    } else if constexpr (T == TYPE_INT) {
+        auto origin_value = reinterpret_cast<const int32_t*>(data);
+        (*node).__set_node_type(TExprNodeType::INT_LITERAL);
+        TIntLiteral intLiteral;
+        intLiteral.__set_value(*origin_value);
+        (*node).__set_int_literal(intLiteral);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_INT));
+    } else if constexpr (T == TYPE_BIGINT) {
+        auto origin_value = reinterpret_cast<const int64_t*>(data);
+        (*node).__set_node_type(TExprNodeType::INT_LITERAL);
+        TIntLiteral intLiteral;
+        intLiteral.__set_value(*origin_value);
+        (*node).__set_int_literal(intLiteral);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_BIGINT));
+    } else if constexpr (T == TYPE_LARGEINT) {
+        auto origin_value = reinterpret_cast<const int128_t*>(data);
+        (*node).__set_node_type(TExprNodeType::LARGE_INT_LITERAL);
+        TLargeIntLiteral large_int_literal;
+        large_int_literal.__set_value(LargeIntValue::to_string(*origin_value));
+        (*node).__set_large_int_literal(large_int_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_LARGEINT));
+    } else if constexpr ((T == TYPE_DATE) || (T == TYPE_DATETIME) || (T == TYPE_TIME)) {
+        auto origin_value = reinterpret_cast<const doris::DateTimeValue*>(data);
+        TDateLiteral date_literal;
+        char convert_buffer[30];
+        origin_value->to_string(convert_buffer);
+        date_literal.__set_value(convert_buffer);
+        (*node).__set_date_literal(date_literal);
+        (*node).__set_node_type(TExprNodeType::DATE_LITERAL);
+        if (origin_value->type() == TimeType::TIME_DATE) {
+            (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DATE));
+        } else if (origin_value->type() == TimeType::TIME_DATETIME) {
+            (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DATETIME));
+        } else if (origin_value->type() == TimeType::TIME_TIME) {
+            (*node).__set_type(create_type_desc(PrimitiveType::TYPE_TIME));
+        }
+    } else if constexpr (T == TYPE_DATEV2) {
+        auto origin_value = reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateV2ValueType>*>(data);
+        TDateLiteral date_literal;
+        char convert_buffer[30];
+        origin_value->to_string(convert_buffer);
+        date_literal.__set_value(convert_buffer);
+        (*node).__set_date_literal(date_literal);
+        (*node).__set_node_type(TExprNodeType::DATE_LITERAL);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DATEV2));
+    } else if constexpr (T == TYPE_DATETIMEV2) {
+        auto origin_value = reinterpret_cast<
+                const doris::vectorized::DateV2Value<doris::vectorized::DateTimeV2ValueType>*>(
+                data);
+        TDateLiteral date_literal;
+        char convert_buffer[30];
+        origin_value->to_string(convert_buffer);
+        date_literal.__set_value(convert_buffer);
+        (*node).__set_date_literal(date_literal);
+        (*node).__set_node_type(TExprNodeType::DATE_LITERAL);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DATETIMEV2));
+    } else if constexpr (T == TYPE_DECIMALV2) {
+        auto origin_value = reinterpret_cast<const DecimalV2Value*>(data);
+        (*node).__set_node_type(TExprNodeType::DECIMAL_LITERAL);
+        TDecimalLiteral decimal_literal;
+        decimal_literal.__set_value(origin_value->to_string());
+        (*node).__set_decimal_literal(decimal_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DECIMALV2, precision, scale));
+    } else if constexpr (T == TYPE_DECIMAL32) {
+        auto origin_value = reinterpret_cast<const int32_t*>(data);
+        (*node).__set_node_type(TExprNodeType::DECIMAL_LITERAL);
+        TDecimalLiteral decimal_literal;
+        std::stringstream ss;
+        vectorized::write_text<int32_t>(*origin_value, scale, ss);
+        decimal_literal.__set_value(ss.str());
+        (*node).__set_decimal_literal(decimal_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DECIMAL32, precision, scale));
+    } else if constexpr (T == TYPE_DECIMAL64) {
+        auto origin_value = reinterpret_cast<const int64_t*>(data);
+        (*node).__set_node_type(TExprNodeType::DECIMAL_LITERAL);
+        TDecimalLiteral decimal_literal;
+        std::stringstream ss;
+        vectorized::write_text<int64_t>(*origin_value, scale, ss);
+        decimal_literal.__set_value(ss.str());
+        (*node).__set_decimal_literal(decimal_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DECIMAL64, precision, scale));
+    } else if constexpr (T == TYPE_DECIMAL128) {
+        auto origin_value = reinterpret_cast<const int128_t*>(data);
+        (*node).__set_node_type(TExprNodeType::DECIMAL_LITERAL);
+        TDecimalLiteral decimal_literal;
+        std::stringstream ss;
+        vectorized::write_text<int128_t>(*origin_value, scale, ss);
+        decimal_literal.__set_value(ss.str());
+        (*node).__set_decimal_literal(decimal_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DECIMAL128, precision, scale));
+    } else if constexpr (T == TYPE_FLOAT) {
+        auto origin_value = reinterpret_cast<const float*>(data);
+        (*node).__set_node_type(TExprNodeType::FLOAT_LITERAL);
+        TFloatLiteral float_literal;
+        float_literal.__set_value(*origin_value);
+        (*node).__set_float_literal(float_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_FLOAT));
+    } else if constexpr (T == TYPE_DOUBLE) {
+        auto origin_value = reinterpret_cast<const double*>(data);
+        (*node).__set_node_type(TExprNodeType::FLOAT_LITERAL);
+        TFloatLiteral float_literal;
+        float_literal.__set_value(*origin_value);
+        (*node).__set_float_literal(float_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_DOUBLE));
+    } else if constexpr ((T == TYPE_STRING) || (T == TYPE_CHAR) || (T == TYPE_VARCHAR)) {
+        auto origin_value = reinterpret_cast<const StringValue*>(data);
+        (*node).__set_node_type(TExprNodeType::STRING_LITERAL);
+        TStringLiteral string_literal;
+        string_literal.__set_value(origin_value->to_string());
+        (*node).__set_string_literal(string_literal);
+        (*node).__set_type(create_type_desc(PrimitiveType::TYPE_STRING));
     } else {
-        return _vector_compute_fn(this, batch);
+        return Status::InvalidArgument("Invalid argument type!");
     }
+    return Status::OK();
 }
 
 } // namespace doris
-
-#endif

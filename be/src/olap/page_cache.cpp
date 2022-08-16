@@ -17,32 +17,42 @@
 
 #include "olap/page_cache.h"
 
+#include "runtime/thread_context.h"
+
 namespace doris {
 
 StoragePageCache* StoragePageCache::_s_instance = nullptr;
 
-void StoragePageCache::create_global_cache(size_t capacity, int32_t index_cache_percentage) {
+void StoragePageCache::create_global_cache(size_t capacity, int32_t index_cache_percentage,
+                                           uint32_t num_shards) {
     DCHECK(_s_instance == nullptr);
-    static StoragePageCache instance(capacity, index_cache_percentage);
+    static StoragePageCache instance(capacity, index_cache_percentage, num_shards);
     _s_instance = &instance;
 }
 
-StoragePageCache::StoragePageCache(size_t capacity, int32_t index_cache_percentage)
-        : _index_cache_percentage(index_cache_percentage),
-          _mem_tracker(MemTracker::CreateTracker(capacity, "StoragePageCache", nullptr, true, true, MemTrackerLevel::OVERVIEW)) {
+StoragePageCache::StoragePageCache(size_t capacity, int32_t index_cache_percentage,
+                                   uint32_t num_shards)
+        : _index_cache_percentage(index_cache_percentage) {
     if (index_cache_percentage == 0) {
-        _data_page_cache = std::unique_ptr<Cache>(new_lru_cache("DataPageCache", capacity, _mem_tracker));
+        _data_page_cache = std::unique_ptr<Cache>(
+                new_lru_cache("DataPageCache", capacity, LRUCacheType::SIZE, num_shards));
     } else if (index_cache_percentage == 100) {
-        _index_page_cache = std::unique_ptr<Cache>(new_lru_cache("IndexPageCache", capacity, _mem_tracker));
+        _index_page_cache = std::unique_ptr<Cache>(
+                new_lru_cache("IndexPageCache", capacity, LRUCacheType::SIZE, num_shards));
     } else if (index_cache_percentage > 0 && index_cache_percentage < 100) {
-        _data_page_cache = std::unique_ptr<Cache>(new_lru_cache("DataPageCache", capacity * (100 - index_cache_percentage) / 100, _mem_tracker));
-        _index_page_cache = std::unique_ptr<Cache>(new_lru_cache("IndexPageCache", capacity * index_cache_percentage / 100, _mem_tracker));
+        _data_page_cache = std::unique_ptr<Cache>(
+                new_lru_cache("DataPageCache", capacity * (100 - index_cache_percentage) / 100,
+                              LRUCacheType::SIZE, num_shards));
+        _index_page_cache = std::unique_ptr<Cache>(
+                new_lru_cache("IndexPageCache", capacity * index_cache_percentage / 100,
+                              LRUCacheType::SIZE, num_shards));
     } else {
         CHECK(false) << "invalid index page cache percentage";
     }
 }
 
-bool StoragePageCache::lookup(const CacheKey& key, PageCacheHandle* handle, segment_v2::PageTypePB page_type) {
+bool StoragePageCache::lookup(const CacheKey& key, PageCacheHandle* handle,
+                              segment_v2::PageTypePB page_type) {
     auto cache = _get_page_cache(page_type);
     auto lru_handle = cache->lookup(key.encode());
     if (lru_handle == nullptr) {

@@ -18,9 +18,9 @@
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.AggregateType;
-import org.apache.doris.catalog.ArrayType;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
+import org.apache.doris.catalog.DistributionInfo;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.Index;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.PrimitiveType;
@@ -32,6 +32,8 @@ import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.PrintableMap;
+import org.apache.doris.common.util.PropertyAnalyzer;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.external.elasticsearch.EsUtil;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
@@ -39,7 +41,6 @@ import org.apache.doris.qe.ConnectContext;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -47,6 +48,7 @@ import org.apache.logging.log4j.Logger;
 import java.io.DataInput;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -88,10 +90,9 @@ public class CreateTableStmt extends DdlStmt {
         engineNames.add("broker");
         engineNames.add("elasticsearch");
         engineNames.add("hive");
+        engineNames.add("iceberg");
+        engineNames.add("hudi");
     }
-
-    // for backup. set to -1 for normal use
-    private int tableSignature;
 
     public CreateTableStmt() {
         // for persist
@@ -163,13 +164,32 @@ public class CreateTableStmt extends DdlStmt {
         this.ifNotExists = ifNotExists;
         this.comment = Strings.nullToEmpty(comment);
 
-        this.tableSignature = -1;
         this.rollupAlterClauseList = rollupAlterClauseList == null ? new ArrayList<>() : rollupAlterClauseList;
     }
 
-    public void addColumnDef(ColumnDef columnDef) { columnDefs.add(columnDef); }
+    // This is for iceberg/hudi table, which has no column schema
+    public CreateTableStmt(boolean ifNotExists,
+                           boolean isExternal,
+                           TableName tableName,
+                           String engineName,
+                           Map<String, String> properties,
+                           String comment) {
+        this.ifNotExists = ifNotExists;
+        this.isExternal = isExternal;
+        this.tableName = tableName;
+        this.engineName = engineName;
+        this.properties = properties;
+        this.columnDefs = Lists.newArrayList();
+        this.comment = Strings.nullToEmpty(comment);
+    }
 
-    public void setIfNotExists(boolean ifNotExists) { this.ifNotExists = ifNotExists; }
+    public void addColumnDef(ColumnDef columnDef) {
+        columnDefs.add(columnDef);
+    }
+
+    public void setIfNotExists(boolean ifNotExists) {
+        this.ifNotExists = ifNotExists;
+    }
 
     public boolean isSetIfNotExists() {
         return ifNotExists;
@@ -223,16 +243,8 @@ public class CreateTableStmt extends DdlStmt {
         return tableName.getDb();
     }
 
-    public void setTableSignature(int tableSignature) {
-        this.tableSignature = tableSignature;
-    }
-
-    public int getTableSignature() {
-        return tableSignature;
-    }
-
     public void setTableName(String newTableName) {
-        tableName = new TableName(tableName.getDb(), newTableName);
+        tableName = new TableName(tableName.getCtl(), tableName.getDb(), newTableName);
     }
 
     public String getComment() {
@@ -252,8 +264,10 @@ public class CreateTableStmt extends DdlStmt {
         super.analyze(analyzer);
         tableName.analyze(analyzer);
         FeNameFormat.checkTableName(tableName.getTbl());
+        // disallow external catalog
+        Util.prohibitExternalCatalog(tableName.getCtl(), this.getClass().getSimpleName());
 
-        if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), tableName.getDb(),
+        if (!Env.getCurrentEnv().getAuth().checkTblPriv(ConnectContext.get(), tableName.getDb(),
                 tableName.getTbl(), PrivPredicate.CREATE)) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_SPECIFIC_ACCESS_DENIED_ERROR, "CREATE");
         }
@@ -264,6 +278,14 @@ public class CreateTableStmt extends DdlStmt {
         if (engineName.equals("hive") && !Config.enable_spark_load) {
             throw new AnalysisException("Spark Load from hive table is coming soon");
         }
+
+        // `analyzeUniqueKeyMergeOnWrite` would modify `properties`, which will be used later,
+        // so we just clone a properties map here.
+        boolean enableUniqueKeyMergeOnWrite = false;
+        if (properties != null) {
+            enableUniqueKeyMergeOnWrite = PropertyAnalyzer.analyzeUniqueKeyMergeOnWrite(new HashMap<>(properties));
+        }
+
         // analyze key desc
         if (engineName.equalsIgnoreCase("olap")) {
             // olap table
@@ -279,7 +301,8 @@ public class CreateTableStmt extends DdlStmt {
                 }
                 if (hasAggregate) {
                     for (ColumnDef columnDef : columnDefs) {
-                        if (columnDef.getAggregateType() == null) {
+                        if (columnDef.getAggregateType() == null
+                                && !columnDef.getType().isScalarType(PrimitiveType.STRING)) {
                             keysColumnNames.add(columnDef.getName());
                         }
                     }
@@ -298,6 +321,9 @@ public class CreateTableStmt extends DdlStmt {
                         if (columnDef.getType().isFloatingPointType()) {
                             break;
                         }
+                        if (columnDef.getType().getPrimitiveType() == PrimitiveType.STRING) {
+                            break;
+                        }
                         if (columnDef.getType().getPrimitiveType() == PrimitiveType.VARCHAR) {
                             keysColumnNames.add(columnDef.getName());
                             break;
@@ -307,8 +333,8 @@ public class CreateTableStmt extends DdlStmt {
                     // The OLAP table must has at least one short key and the float and double should not be short key.
                     // So the float and double could not be the first column in OLAP table.
                     if (keysColumnNames.isEmpty()) {
-                        throw new AnalysisException("The olap table first column could not be float or double,"
-                                + " use decimal instead.");
+                        throw new AnalysisException("The olap table first column could not be float, double, string"
+                                + " use decimal or varchar instead.");
                     }
                     keysDesc = new KeysDesc(KeysType.DUP_KEYS, keysColumnNames);
                 }
@@ -321,6 +347,9 @@ public class CreateTableStmt extends DdlStmt {
             if (keysDesc.getKeysType() != KeysType.AGG_KEYS) {
                 AggregateType type = AggregateType.REPLACE;
                 if (keysDesc.getKeysType() == KeysType.DUP_KEYS) {
+                    type = AggregateType.NONE;
+                }
+                if (keysDesc.getKeysType() == KeysType.UNIQUE_KEYS && enableUniqueKeyMergeOnWrite) {
                     type = AggregateType.NONE;
                 }
                 for (int i = keysDesc.keysColumnSize(); i < columnDefs.size(); ++i) {
@@ -339,42 +368,40 @@ public class CreateTableStmt extends DdlStmt {
         }
 
         // analyze column def
-        if (columnDefs == null || columnDefs.isEmpty()) {
+        if (!(engineName.equals("iceberg") || engineName.equals("hudi") || engineName.equals("elasticsearch"))
+                && (columnDefs == null || columnDefs.isEmpty())) {
             ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLE_MUST_HAVE_COLUMNS);
         }
         // add a hidden column as delete flag for unique table
         if (Config.enable_batch_delete_by_default
                 && keysDesc != null
                 && keysDesc.getKeysType() == KeysType.UNIQUE_KEYS) {
-            columnDefs.add(ColumnDef.newDeleteSignColumnDef(AggregateType.REPLACE));
+            // TODO(zhangchen): Disable the delete sign column for primary key temporary, will replace
+            // with a better solution later.
+            if (!enableUniqueKeyMergeOnWrite) {
+                columnDefs.add(ColumnDef.newDeleteSignColumnDef(AggregateType.REPLACE));
+            }
         }
-        boolean hasHll = false;
-        boolean hasBitmap = false;
+        boolean hasObjectStored = false;
+        String objectStoredColumn = "";
         Set<String> columnSet = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
         for (ColumnDef columnDef : columnDefs) {
             columnDef.analyze(engineName.equals("olap"));
 
             if (columnDef.getType().isArrayType()) {
-                ArrayType tp = (ArrayType) columnDef.getType();
-                if (!tp.getItemType().getPrimitiveType().isIntegerType() &&
-                        !tp.getItemType().getPrimitiveType().isCharFamily()) {
-                    throw new AnalysisException("Array column just support INT/VARCHAR sub-type");
-                }
                 if (columnDef.getAggregateType() != null && columnDef.getAggregateType() != AggregateType.NONE) {
-                    throw new AnalysisException("Array column can't support aggregation " + columnDef.getAggregateType());
+                    throw new AnalysisException("Array column can't support aggregation "
+                            + columnDef.getAggregateType());
                 }
                 if (columnDef.isKey()) {
-                    throw new AnalysisException("Array can only be used in the non-key column of" +
-                            " the duplicate table at present.");
+                    throw new AnalysisException("Array can only be used in the non-key column of"
+                            + " the duplicate table at present.");
                 }
             }
 
-            if (columnDef.getType().isHllType()) {
-                hasHll = true;
-            }
-
-            if (columnDef.getAggregateType() == AggregateType.BITMAP_UNION) {
-                hasBitmap = columnDef.getType().isBitmapType();
+            if (columnDef.getType().isObjectStored()) {
+                hasObjectStored = true;
+                objectStoredColumn = columnDef.getName();
             }
 
             if (!columnSet.add(columnDef.getName())) {
@@ -382,12 +409,8 @@ public class CreateTableStmt extends DdlStmt {
             }
         }
 
-        if (hasHll && keysDesc.getKeysType() != KeysType.AGG_KEYS) {
-            throw new AnalysisException("HLL must be used in AGG_KEYS");
-        }
-
-        if (hasBitmap && keysDesc.getKeysType() != KeysType.AGG_KEYS) {
-            throw new AnalysisException("BITMAP_UNION must be used in AGG_KEYS");
+        if (hasObjectStored && keysDesc.getKeysType() != KeysType.AGG_KEYS) {
+            throw new AnalysisException("column:" + objectStoredColumn + " must be used in AGG_KEYS.");
         }
 
         if (engineName.equals("olap")) {
@@ -396,7 +419,8 @@ public class CreateTableStmt extends DdlStmt {
                 if (partitionDesc instanceof ListPartitionDesc || partitionDesc instanceof RangePartitionDesc) {
                     partitionDesc.analyze(columnDefs, properties);
                 } else {
-                    throw new AnalysisException("Currently only support range and list partition with engine type olap");
+                    throw new AnalysisException("Currently only support range"
+                            + " and list partition with engine type olap");
                 }
 
             }
@@ -405,7 +429,21 @@ public class CreateTableStmt extends DdlStmt {
             if (distributionDesc == null) {
                 throw new AnalysisException("Create olap table should contain distribution desc");
             }
-            distributionDesc.analyze(columnSet);
+            distributionDesc.analyze(columnSet, columnDefs);
+            if (distributionDesc.type == DistributionInfo.DistributionInfoType.RANDOM) {
+                if (keysDesc.getKeysType() == KeysType.UNIQUE_KEYS) {
+                    throw new AnalysisException("Create unique keys table should not contain random distribution desc");
+                } else if (keysDesc.getKeysType() == KeysType.AGG_KEYS) {
+                    for (ColumnDef columnDef : columnDefs) {
+                        if (columnDef.getAggregateType() == AggregateType.REPLACE
+                                || columnDef.getAggregateType() == AggregateType.REPLACE_IF_NOT_NULL) {
+                            throw new AnalysisException("Create aggregate keys table with value columns of which"
+                                + " aggregate type is " + columnDef.getAggregateType() + " should not contain random"
+                                + " distribution desc");
+                        }
+                    }
+                }
+            }
         } else if (engineName.equalsIgnoreCase("elasticsearch")) {
             EsUtil.analyzePartitionAndDistributionDesc(partitionDesc, distributionDesc);
         } else {
@@ -473,7 +511,8 @@ public class CreateTableStmt extends DdlStmt {
         }
 
         if (engineName.equals("mysql") || engineName.equals("odbc") || engineName.equals("broker")
-                || engineName.equals("elasticsearch") || engineName.equals("hive")) {
+                || engineName.equals("elasticsearch") || engineName.equals("hive")
+                || engineName.equals("iceberg") || engineName.equals("hudi")) {
             if (!isExternal) {
                 // this is for compatibility
                 isExternal = true;
@@ -527,7 +566,7 @@ public class CreateTableStmt extends DdlStmt {
         if (partitionDesc != null) {
             sb.append("\n").append(partitionDesc.toSql());
         }
-        
+
         if (distributionDesc != null) {
             sb.append("\n").append(distributionDesc.toSql());
         }

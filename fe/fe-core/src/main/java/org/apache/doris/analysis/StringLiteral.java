@@ -14,10 +14,14 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/StringLiteral.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
 import org.apache.doris.catalog.PrimitiveType;
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.DdlException;
@@ -29,10 +33,9 @@ import org.apache.doris.thrift.TExprNode;
 import org.apache.doris.thrift.TExprNodeType;
 import org.apache.doris.thrift.TStringLiteral;
 
+import com.google.common.base.Preconditions;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
-import com.google.common.base.Preconditions;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -173,11 +176,14 @@ public class StringLiteral extends LiteralExpr {
     public LiteralExpr convertToDate(Type targetType) throws AnalysisException {
         LiteralExpr newLiteral = null;
         try {
-            newLiteral = new DateLiteral(value, targetType);
+            newLiteral = new DateLiteral(value, ScalarType.getDefaultDateType(targetType));
         } catch (AnalysisException e) {
             if (targetType.isScalarType(PrimitiveType.DATETIME)) {
-                newLiteral = new DateLiteral(value, Type.DATE);
-                newLiteral.setType(Type.DATETIME);
+                newLiteral = new DateLiteral(value, ScalarType.getDefaultDateType(Type.DATE));
+                newLiteral.setType(ScalarType.getDefaultDateType(Type.DATETIME));
+            } else if (targetType.isScalarType(PrimitiveType.DATETIMEV2)) {
+                newLiteral = new DateLiteral(value, Type.DATEV2);
+                newLiteral.setType(targetType);
             } else {
                 throw e;
             }
@@ -204,7 +210,8 @@ public class StringLiteral extends LiteralExpr {
                 case LARGEINT:
                     if (VariableVarConverters.hasConverter(beConverted)) {
                         try {
-                            return new LargeIntLiteral(String.valueOf(VariableVarConverters.encode(beConverted, value)));
+                            return new LargeIntLiteral(String.valueOf(
+                                    VariableVarConverters.encode(beConverted, value)));
                         } catch (DdlException e) {
                             throw new AnalysisException(e.getMessage());
                         }
@@ -219,6 +226,9 @@ public class StringLiteral extends LiteralExpr {
                     }
                     break;
                 case DECIMALV2:
+                case DECIMAL32:
+                case DECIMAL64:
+                case DECIMAL128:
                     return new DecimalLiteral(value);
                 default:
                     break;
@@ -252,7 +262,7 @@ public class StringLiteral extends LiteralExpr {
         super.readFields(in);
         value = Text.readString(in);
     }
-    
+
     public static StringLiteral read(DataInput in) throws IOException {
         StringLiteral literal = new StringLiteral();
         literal.readFields(in);

@@ -17,8 +17,6 @@
 
 package org.apache.doris.common.profile;
 
-import lombok.Getter;
-import lombok.Setter;
 import org.apache.doris.common.Pair;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.Counter;
@@ -28,10 +26,14 @@ import org.apache.doris.thrift.TUnit;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import lombok.Getter;
+import lombok.Setter;
 import org.apache.commons.lang3.tuple.ImmutableTriple;
 import org.apache.commons.lang3.tuple.Triple;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
+import java.util.ArrayList;
 import java.util.Formatter;
 import java.util.List;
 import java.util.Map;
@@ -48,9 +50,12 @@ import java.util.regex.Pattern;
  * Each runtime profile of a query should be built once and be read every where.
  */
 public class ProfileTreeBuilder {
+    private static final Logger LOG = LogManager.getLogger(ProfileTreeBuilder.class);
 
     private static final String PROFILE_NAME_DATA_STREAM_SENDER = "DataStreamSender";
+    private static final String PROFILE_NAME_VDATA_STREAM_SENDER = "VDataStreamSender";
     private static final String PROFILE_NAME_DATA_BUFFER_SENDER = "DataBufferSender";
+    private static final String PROFILE_NAME_VDATA_BUFFER_SENDER = "VDataBufferSender";
     private static final String PROFILE_NAME_OLAP_TABLE_SINK = "OlapTableSink";
     private static final String PROFILE_NAME_BLOCK_MGR = "BlockMgr";
     private static final String PROFILE_NAME_BUFFER_POOL = "Buffer pool";
@@ -89,7 +94,8 @@ public class ProfileTreeBuilder {
     private static final Pattern FRAGMENT_ID_PATTERN;
 
     // Match string like:
-    // Instance e0f7390f5363419e-b416a2a7999608b6 (host=TNetworkAddress(hostname:192.168.1.1, port:9060)):(Active: 1s858ms, % non-child: 0.02%)
+    // Instance e0f7390f5363419e-b416a2a7999608b6
+    //   (host=TNetworkAddress(hostname:192.168.1.1, port:9060)):(Active: 1s858ms, % non-child: 0.02%)
     // Extract "e0f7390f5363419e-b416a2a7999608b6", "192.168.1.1", "9060"
     private static final String INSTANCE_PATTERN_STR = "^Instance (.*) \\(.*hostname:(.*), port:([0-9]+).*";
     private static final Pattern INSTANCE_PATTERN;
@@ -207,6 +213,8 @@ public class ProfileTreeBuilder {
         for (Pair<RuntimeProfile, Boolean> pair : instanceChildren) {
             RuntimeProfile profile = pair.first;
             if (profile.getName().startsWith(PROFILE_NAME_DATA_STREAM_SENDER)
+                    || profile.getName().startsWith(PROFILE_NAME_VDATA_STREAM_SENDER)
+                    || profile.getName().startsWith(PROFILE_NAME_VDATA_BUFFER_SENDER)
                     || profile.getName().startsWith(PROFILE_NAME_DATA_BUFFER_SENDER)
                     || profile.getName().startsWith(PROFILE_NAME_OLAP_TABLE_SINK)) {
                 senderNode = buildTreeNode(profile, null, fragmentId, instanceId);
@@ -223,6 +231,12 @@ public class ProfileTreeBuilder {
             }
         }
         if (senderNode == null || execNode == null) {
+            // TODO(cmy): This shouldn't happen, but there are sporadic errors. So I add a log to observe this error.
+            // Issue: https://github.com/apache/doris/issues/10095
+            StringBuilder sb = new StringBuilder();
+            instanceProfile.prettyPrint(sb, "");
+            LOG.warn("Invalid instance profile, sender is null: {}, execNode is null: {}, instance profile: {}",
+                    (senderNode == null), (execNode == null), sb.toString());
             throw new UserException("Invalid instance profile, without sender or exec node: " + instanceProfile);
         }
         senderNode.addChild(execNode);
@@ -246,7 +260,8 @@ public class ProfileTreeBuilder {
         String extractName;
         String extractId;
         if ((!m.find() && finalSenderName == null) || m.groupCount() != 2) {
-            // DataStreamBuffer name like: "DataBufferSender (dst_fragment_instance_id=d95356f9219b4831-986b4602b41683ca):"
+            // DataStreamBuffer name like:
+            // "DataBufferSender (dst_fragment_instance_id=d95356f9219b4831-986b4602b41683ca):"
             // So it has no id.
             // Other profile should has id like:
             // EXCHANGE_NODE (id=3):(Active: 103.899ms, % non-child: 2.27%)
@@ -263,6 +278,14 @@ public class ProfileTreeBuilder {
         try (Formatter fmt = new Formatter()) {
             node.setNonChild(fmt.format("%.2f", profile.getLocalTimePercent()).toString());
         }
+
+        if (!profile.getInfoStrings().isEmpty()) {
+            ArrayList<String> infoStrings = new ArrayList<String>();
+            for (Map.Entry<String, String> entry : profile.getInfoStrings().entrySet()) {
+                infoStrings.add(entry.getKey() +  ": " + entry.getValue());
+            }
+            node.setInfoStrings(infoStrings);
+        }
         CounterNode rootCounterNode = new CounterNode();
         buildCounterNode(profile, RuntimeProfile.ROOT_COUNTER, rootCounterNode);
         node.setCounterNode(rootCounterNode);
@@ -272,8 +295,8 @@ public class ProfileTreeBuilder {
             node.setParentNode(root);
         }
 
-        if ((node.name.equals(PROFILE_NAME_EXCHANGE_NODE) ||
-            node.name.equals(PROFILE_NAME_VEXCHANGE_NODE)) && instanceId == null) {
+        if ((node.name.equals(PROFILE_NAME_EXCHANGE_NODE)
+                || node.name.equals(PROFILE_NAME_VEXCHANGE_NODE)) && instanceId == null) {
             exchangeNodes.add(node);
         }
 
@@ -297,6 +320,8 @@ public class ProfileTreeBuilder {
             return PROFILE_NAME_DATA_BUFFER_SENDER;
         } else if (name.startsWith(PROFILE_NAME_OLAP_TABLE_SINK)) {
             return PROFILE_NAME_OLAP_TABLE_SINK;
+        } else if (name.startsWith(PROFILE_NAME_VDATA_BUFFER_SENDER)) {
+            return PROFILE_NAME_VDATA_BUFFER_SENDER;
         } else {
             return null;
         }
@@ -316,7 +341,8 @@ public class ProfileTreeBuilder {
             if (root != null) {
                 root.addChild(counterNode);
             }
-            counterNode.setCounter(childCounterName, RuntimeProfile.printCounter(counter.getValue(), counter.getType()));
+            counterNode.setCounter(childCounterName,
+                    RuntimeProfile.printCounter(counter.getValue(), counter.getType()));
             buildCounterNode(profile, childCounterName, counterNode);
         }
         return;

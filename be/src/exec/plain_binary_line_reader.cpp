@@ -18,20 +18,17 @@
 #include "exec/plain_binary_line_reader.h"
 
 #include "common/status.h"
-#include "exec/file_reader.h"
+#include "io/file_reader.h"
 
 namespace doris {
 
-PlainBinaryLineReader::PlainBinaryLineReader(FileReader* file_reader)
-        : _file_reader(file_reader) {
-}
+PlainBinaryLineReader::PlainBinaryLineReader(FileReader* file_reader) : _file_reader(file_reader) {}
 
 PlainBinaryLineReader::~PlainBinaryLineReader() {
     close();
 }
 
-void PlainBinaryLineReader::close() {
-}
+void PlainBinaryLineReader::close() {}
 
 Status PlainBinaryLineReader::read_line(const uint8_t** ptr, size_t* size, bool* eof) {
     std::unique_ptr<uint8_t[]> file_buf;

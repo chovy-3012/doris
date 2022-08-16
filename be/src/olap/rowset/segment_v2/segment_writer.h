@@ -25,19 +25,28 @@
 #include "common/status.h" // Status
 #include "gen_cpp/segment_v2.pb.h"
 #include "gutil/macros.h"
+#include "olap/tablet_schema.h"
+#include "vec/core/block.h"
+#include "vec/olap/olap_data_convertor.h"
 
 namespace doris {
 
+// TODO(lingbin): Should be a conf that can be dynamically adjusted, or a member in the context
+const uint32_t MAX_SEGMENT_SIZE = static_cast<uint32_t>(OLAP_MAX_COLUMN_SEGMENT_FILE_SIZE *
+                                                        OLAP_COLUMN_FILE_SEGMENT_SIZE_SCALE);
+class DataDir;
 class MemTracker;
 class RowBlock;
 class RowCursor;
 class TabletSchema;
 class TabletColumn;
 class ShortKeyIndexBuilder;
+class PrimaryKeyIndexBuilder;
+class KeyCoder;
 
-namespace fs {
-class WritableBlock;
-}
+namespace io {
+class FileWriter;
+} // namespace io
 
 namespace segment_v2 {
 
@@ -48,12 +57,14 @@ extern const uint32_t k_segment_magic_length;
 
 struct SegmentWriterOptions {
     uint32_t num_rows_per_block = 1024;
+    bool enable_unique_key_merge_on_write = false;
 };
 
 class SegmentWriter {
 public:
-    explicit SegmentWriter(fs::WritableBlock* block, uint32_t segment_id,
-                           const TabletSchema* tablet_schema, const SegmentWriterOptions& opts, std::shared_ptr<MemTracker> parent = nullptr);
+    explicit SegmentWriter(io::FileWriter* file_writer, uint32_t segment_id,
+                           TabletSchemaSPtr tablet_schema, DataDir* data_dir,
+                           uint32_t max_row_per_segment, const SegmentWriterOptions& opts);
     ~SegmentWriter();
 
     Status init(uint32_t write_mbytes_per_sec);
@@ -61,13 +72,20 @@ public:
     template <typename RowType>
     Status append_row(const RowType& row);
 
+    Status append_block(const vectorized::Block* block, size_t row_pos, size_t num_rows);
+
+    int64_t max_row_to_add(size_t row_avg_size_in_bytes);
+
     uint64_t estimate_segment_size();
 
-    uint32_t num_rows_written() { return _row_count; }
+    uint32_t num_rows_written() const { return _row_count; }
 
     Status finalize(uint64_t* segment_file_size, uint64_t* index_size);
 
-    static void init_column_meta(ColumnMetaPB* meta, uint32_t* column_id, const TabletColumn& column);
+    static void init_column_meta(ColumnMetaPB* meta, uint32_t* column_id,
+                                 const TabletColumn& column, TabletSchemaSPtr tablet_schema);
+    Slice min_encoded_key();
+    Slice max_encoded_key();
 
 private:
     DISALLOW_COPY_AND_ASSIGN(SegmentWriter);
@@ -77,22 +95,35 @@ private:
     Status _write_bitmap_index();
     Status _write_bloom_filter_index();
     Status _write_short_key_index();
+    Status _write_primary_key_index();
     Status _write_footer();
     Status _write_raw_data(const std::vector<Slice>& slices);
+    std::string _encode_keys(const std::vector<vectorized::IOlapColumnDataAccessor*>& key_columns,
+                             size_t pos, bool null_first = true);
 
 private:
     uint32_t _segment_id;
-    const TabletSchema* _tablet_schema;
+    TabletSchemaSPtr _tablet_schema;
+    DataDir* _data_dir;
+    uint32_t _max_row_per_segment;
     SegmentWriterOptions _opts;
 
     // Not owned. owned by RowsetWriter
-    fs::WritableBlock* _wblock;
+    io::FileWriter* _file_writer;
 
     SegmentFooterPB _footer;
-    std::unique_ptr<ShortKeyIndexBuilder> _index_builder;
+    size_t _num_key_columns;
+    std::unique_ptr<ShortKeyIndexBuilder> _short_key_index_builder;
+    std::unique_ptr<PrimaryKeyIndexBuilder> _primary_key_index_builder;
     std::vector<std::unique_ptr<ColumnWriter>> _column_writers;
-    std::shared_ptr<MemTracker> _mem_tracker;
+    std::unique_ptr<MemTracker> _mem_tracker;
     uint32_t _row_count = 0;
+
+    vectorized::OlapBlockDataConvertor _olap_data_convertor;
+    // used for building short key index or primary key index during vectorized write.
+    std::vector<const KeyCoder*> _key_coders;
+    std::vector<uint16_t> _key_index_size;
+    size_t _short_key_row_pos = 0;
 };
 
 } // namespace segment_v2

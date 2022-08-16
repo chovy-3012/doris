@@ -14,15 +14,15 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exec/hash-table.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_QUERY_EXEC_HASH_TABLE_H
-#define DORIS_BE_SRC_QUERY_EXEC_HASH_TABLE_H
+#pragma once
 
 #include <vector>
 
-#include "codegen/doris_ir.h"
-#include "common/logging.h"
-#include "common/object_pool.h"
+#include "common/status.h"
 #include "util/hash_util.hpp"
 
 namespace doris {
@@ -34,8 +34,6 @@ class Tuple;
 class TupleRow;
 class MemTracker;
 class RuntimeState;
-
-using std::vector;
 
 // Hash table implementation designed for hash aggregation and hash joins.  This is not
 // templatized and is tailored to the usage pattern for aggregation and joins.  The
@@ -73,6 +71,7 @@ using std::vector;
 // all the rows and then calls scan to find them.  Aggregation interleaves find() and
 // inserts().  We can want to optimize joins more heavily for inserts() (in particular
 // growing).
+
 class HashTable {
 private:
     struct Node;
@@ -91,8 +90,7 @@ public:
     //  - initial_seed: Initial seed value to use when computing hashes for rows
     HashTable(const std::vector<ExprContext*>& build_exprs,
               const std::vector<ExprContext*>& probe_exprs, int num_build_tuples, bool stores_nulls,
-              const std::vector<bool>& finds_nulls, int32_t initial_seed,
-              const std::shared_ptr<MemTracker>& mem_tracker, int64_t num_buckets);
+              const std::vector<bool>& finds_nulls, int32_t initial_seed, int64_t num_buckets);
 
     ~HashTable();
 
@@ -101,23 +99,43 @@ public:
 
     // Insert row into the hash table.  Row will be evaluated over _build_expr_ctxs
     // This will grow the hash table if necessary
-    void IR_ALWAYS_INLINE insert(TupleRow* row) {
+    Status insert(TupleRow* row) {
         if (_num_filled_buckets > _num_buckets_till_resize) {
-            // TODO: next prime instead of double?
-            resize_buckets(_num_buckets * 2);
+            RETURN_IF_ERROR(resize_buckets(_num_buckets * 2));
         }
 
         insert_impl(row);
+        return Status::OK();
     }
 
+    void insert_without_check(TupleRow* row) { insert_impl(row); }
+
     // Insert row into the hash table. if the row is already exist will not insert
-    void IR_ALWAYS_INLINE insert_unique(TupleRow* row) {
+    Status insert_unique(TupleRow* row) {
         if (find(row, false) == end()) {
-            insert(row);
+            return insert(row);
+        }
+        return Status::OK();
+    }
+
+    void insert_unique_without_check(TupleRow* row) {
+        if (find(row, false) == end()) {
+            insert_without_check(row);
         }
     }
 
-    bool IR_ALWAYS_INLINE emplace_key(TupleRow* row, TupleRow** key_addr);
+    Status resize_buckets_ahead(int64_t estimate_buckets) {
+        if (_num_filled_buckets + estimate_buckets > _num_buckets_till_resize) {
+            int64_t new_bucket_size = _num_buckets * 2;
+            while (new_bucket_size <= _num_filled_buckets + estimate_buckets) {
+                new_bucket_size = new_bucket_size * 2;
+            }
+            return resize_buckets(new_bucket_size);
+        }
+        return Status::OK();
+    }
+
+    bool emplace_key(TupleRow* row, TupleRow** key_addr);
 
     // Returns the start iterator for all rows that match 'probe_row'.  'probe_row' is
     // evaluated with _probe_expr_ctxs.  The iterator can be iterated until HashTable::end()
@@ -128,24 +146,21 @@ public:
     // Advancing the returned iterator will go to the next matching row.  The matching
     // rows are evaluated lazily (i.e. computed as the Iterator is moved).
     // Returns HashTable::end() if there is no match.
-    Iterator IR_ALWAYS_INLINE find(TupleRow* probe_row, bool probe = true);
+    Iterator find(TupleRow* probe_row, bool probe = true);
 
     // Returns number of elements in the hash table
-    int64_t size() { return _num_nodes; }
+    int64_t size() const { return _num_nodes; }
 
     // Returns the number of buckets
-    int64_t num_buckets() { return _buckets.size(); }
+    int64_t num_buckets() const { return _buckets.size(); }
 
     // Returns the number of filled buckets
-    int64_t num_filled_buckets() { return _num_filled_buckets; }
+    int64_t num_filled_buckets() const { return _num_filled_buckets; }
 
     // Check the hash table should be shrink
     bool should_be_shrink(int64_t valid_row) {
         return valid_row < MAX_BUCKET_OCCUPANCY_FRACTION * (_buckets.size() / 2.0);
     }
-
-    // true if any of the MemTrackers was exceeded
-    bool exceeded_limit() const { return _exceeded_limit; }
 
     // Returns the load factor (the number of non-empty buckets)
     float load_factor() { return _num_filled_buckets / static_cast<float>(_buckets.size()); }
@@ -179,7 +194,9 @@ public:
     // just the build row addresses.
     std::string debug_string(bool skip_empty, const RowDescriptor* build_desc);
 
-    inline std::pair<int64_t, int64_t> minmax_node();
+    std::pair<int64_t, int64_t> minmax_node();
+
+    MemTracker* mem_tracker() { return _mem_tracker.get(); }
 
     // Load factor that will trigger growing the hash table on insert.  This is
     // defined as the number of non-empty buckets / total_buckets
@@ -194,7 +211,51 @@ public:
         // from a Find, this will lazily evaluate that bucket, only returning
         // TupleRows that match the current scan row.
         template <bool check_match>
-        void IR_ALWAYS_INLINE next();
+        void next() {
+            if (_bucket_idx == -1) {
+                return;
+            }
+
+            // TODO: this should prefetch the next tuplerow
+            Node* node = _node;
+
+            // Iterator is not from a full table scan, evaluate equality now.  Only the current
+            // bucket needs to be scanned. '_expr_values_buffer' contains the results
+            // for the current probe row.
+            if (check_match) {
+                // TODO: this should prefetch the next node
+                Node* next_node = node->_next;
+
+                while (next_node != nullptr) {
+                    node = next_node;
+
+                    if (node->_hash == _scan_hash && _table->equals(node->data())) {
+                        _node = next_node;
+                        return;
+                    }
+
+                    next_node = node->_next;
+                }
+
+                *this = _table->end();
+            } else {
+                // Move onto the next chained node
+                if (node->_next != nullptr) {
+                    _node = node->_next;
+                    return;
+                }
+
+                // Move onto the next bucket
+                Bucket* bucket = _table->next_bucket(&_bucket_idx);
+
+                if (bucket == nullptr) {
+                    _bucket_idx = -1;
+                    _node = nullptr;
+                } else {
+                    _node = bucket->_node;
+                }
+            }
+        }
 
         // Returns the current row or nullptr if at end.
         TupleRow* get_row() {
@@ -225,11 +286,11 @@ public:
             return _node->matched;
         }
 
-        bool operator==(const Iterator& rhs) {
+        bool operator==(const Iterator& rhs) const {
             return _bucket_idx == rhs._bucket_idx && _node == rhs._node;
         }
 
-        bool operator!=(const Iterator& rhs) {
+        bool operator!=(const Iterator& rhs) const {
             return _bucket_idx != rhs._bucket_idx || _node != rhs._node;
         }
 
@@ -300,10 +361,10 @@ private:
     Bucket* next_bucket(int64_t* bucket_idx);
 
     // Resize the hash table to 'num_buckets'
-    void resize_buckets(int64_t num_buckets);
+    Status resize_buckets(int64_t num_buckets);
 
     // Insert row into the hash table
-    void IR_ALWAYS_INLINE insert_impl(TupleRow* row);
+    void insert_impl(TupleRow* row);
 
     // Chains the node at 'node_idx' to 'bucket'.  Nodes in a bucket are chained
     // as a linked list; this places the new node at the beginning of the list.
@@ -323,16 +384,16 @@ private:
     // cross compiled because we need to be able to differentiate between EvalBuildRow
     // and EvalProbeRow by name and the _build_expr_ctxs/_probe_expr_ctxs are baked into
     // the codegen'd function.
-    bool IR_NO_INLINE eval_build_row(TupleRow* row) { return eval_row(row, _build_expr_ctxs); }
+    bool eval_build_row(TupleRow* row) { return eval_row(row, _build_expr_ctxs); }
 
     // Evaluate 'row' over _probe_expr_ctxs caching the results in '_expr_values_buffer'
     // This will be replaced by codegen.
-    bool IR_NO_INLINE eval_probe_row(TupleRow* row) { return eval_row(row, _probe_expr_ctxs); }
+    bool eval_probe_row(TupleRow* row) { return eval_row(row, _probe_expr_ctxs); }
 
     // Compute the hash of the values in _expr_values_buffer.
     // This will be replaced by codegen.  We don't want this inlined for replacing
     // with codegen'd functions so the function name does not change.
-    uint32_t IR_NO_INLINE hash_current_row() {
+    uint32_t hash_current_row() {
         if (_var_result_begin == -1) {
             // This handles NULLs implicitly since a constant seed value was put
             // into results buffer for nulls.
@@ -388,12 +449,7 @@ private:
     // total capacity
     int64_t _total_capacity;
 
-    bool _exceeded_limit; // true if any of _mem_trackers[].limit_exceeded()
-
-    std::shared_ptr<MemTracker> _mem_tracker;
-    // Set to true if the hash table exceeds the memory limit. If this is set,
-    // subsequent calls to Insert() will be ignored.
-    bool _mem_limit_exceeded;
+    std::unique_ptr<MemTracker> _mem_tracker;
 
     std::vector<Bucket> _buckets;
 
@@ -427,5 +483,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

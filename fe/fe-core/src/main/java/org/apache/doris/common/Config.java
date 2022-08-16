@@ -18,7 +18,6 @@
 package org.apache.doris.common;
 
 import org.apache.doris.PaloFe;
-import org.apache.doris.http.HttpServer;
 
 public class Config extends ConfigBase {
 
@@ -157,7 +156,8 @@ public class Config extends ConfigBase {
     public static int history_job_keep_max_second = 7 * 24 * 3600; // 7 days
 
     /**
-     * the transaction will be cleaned after transaction_clean_interval_second seconds if the transaction is visible or aborted
+     * the transaction will be cleaned after transaction_clean_interval_second seconds
+     * if the transaction is visible or aborted
      * we should make this interval as short as possible and each clean cycle as soon as possible
      */
     @ConfField
@@ -188,10 +188,10 @@ public class Config extends ConfigBase {
     /**
      * Edit log type.
      * BDB: write log to bdbje
-     * LOCAL: deprecated.
+     * LOCAL: use local file to save edit log, only used for unit test
      */
     @ConfField
-    public static String edit_log_type = "BDB";
+    public static String edit_log_type = "bdb";
 
     /**
      * bdbje port
@@ -327,22 +327,6 @@ public class Config extends ConfigBase {
      */
     @ConfField public static int http_port = 8030;
 
-    /*
-     * Netty http param
-     */
-    @ConfField public static int http_max_line_length = HttpServer.DEFAULT_MAX_LINE_LENGTH;
-
-    @ConfField public static int http_max_header_size = HttpServer.DEFAULT_MAX_HEADER_SIZE;
-
-    @ConfField public static int http_max_chunk_size = HttpServer.DEFAULT_MAX_CHUNK_SIZE;
-
-    /**
-     * The backlog_num for netty http server
-     * When you enlarge this backlog_num, you should enlarge the value in
-     * the linux /proc/sys/net/core/somaxconn file at the same time
-     */
-    @ConfField public static int http_backlog_num = 1024;
-
     /**
      * Jetty container default configuration
      * Jetty's thread architecture model is very simple, divided into three thread pools:
@@ -352,18 +336,38 @@ public class Config extends ConfigBase {
      * and one thread can handle the read and write of many sockets, so the number of thread pools is small.
      *
      * For most projects, only 1-2 acceptors threads are needed, and 2 to 4 selectors threads are sufficient.
-     * Workers are obstructive business logic, often have more database operations, and require a large number of threads. T
-     * he specific number depends on the proportion of QPS and IO events of the application. The higher the QPS,
-     * the more threads are required, the higher the proportion of IO,
-     * the more threads waiting, and the more total threads required.
+     * Workers are obstructive business logic, often have more database operations, and require a large number of
+     * threads. The specific number depends on the proportion of QPS and IO events of the application. The higher the
+     * QPS, the more threads are required, the higher the proportion of IO, the more threads waiting, and the more
+     * total threads required.
      */
     @ConfField public static int jetty_server_acceptors = 2;
     @ConfField public static int jetty_server_selectors = 4;
     @ConfField public static int jetty_server_workers = 0;
+
     /**
-     * jetty Maximum number of bytes in put or post method,default:100MB
+     * Configure the default minimum and maximum number of threads for jetty.
+     * The default minimum and maximum number of threads for jetty is 10 and the maximum is 200.
+     * If this is relatively small in a high-concurrency import scenario,
+     * users can adjust it according to their own conditions.
+     */
+    @ConfField public static int jetty_threadPool_minThreads = 20;
+    @ConfField public static int jetty_threadPool_maxThreads = 400;
+
+    /**
+     * Jetty maximum number of bytes in put or post method,default:100MB
      */
     @ConfField public static int jetty_server_max_http_post_size = 100 * 1024 * 1024;
+
+    /**
+     * http header size configuration parameter, the default value is 10K
+     */
+    @ConfField public static int jetty_server_max_http_header_size = 10240;
+
+    /**
+     * Mini load disabled by default
+     */
+    @ConfField public static boolean disable_mini_load = true;
 
     /**
      * The backlog_num for mysql nio server
@@ -544,6 +548,10 @@ public class Config extends ConfigBase {
     public static int broker_load_default_timeout_second = 14400; // 4 hour
 
     /**
+     * Broker rpc timeout
+     */
+    @ConfField public static int broker_timeout_ms = 10000; // 10s
+    /**
      * Default non-streaming mini load timeout
      */
     @Deprecated
@@ -561,6 +569,12 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true, masterOnly = true)
     public static int stream_load_default_timeout_second = 600; // 600s
+
+    /**
+     * Default stream load pre-commit status timeout
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static int stream_load_default_precommit_timeout_second = 3600; // 3600s
 
     /**
      * Max load timeout applicable to all type of load except for stream load
@@ -701,10 +715,22 @@ public class Config extends ConfigBase {
     public static int max_stream_load_record_size = 5000;
 
     /**
+     * Default max number of recent iceberg database table creation record that can be stored in memory.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static int max_iceberg_table_creation_record_size = 2000;
+
+    /**
      * Whether to disable show stream load and clear stream load records in memory.
      */
     @ConfField(mutable = true, masterOnly = true)
     public static boolean disable_show_stream_load = false;
+
+    /**
+     * Whether to enable to write single replica for stream load and broker load.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_single_replica_load = false;
 
     /**
      * maximum concurrent running txn num including prepare, commit txns under a single db
@@ -714,7 +740,8 @@ public class Config extends ConfigBase {
     public static int max_running_txn_num_per_db = 100;
 
     /**
-     * This configuration is just for compatible with old version, this config has been replaced by async_loading_load_task_pool_size,
+     * This configuration is just for compatible with old version,
+     * this config has been replaced by async_loading_load_task_pool_size,
      * it will be removed in the future.
      */
     @ConfField(mutable = false, masterOnly = true)
@@ -841,12 +868,15 @@ public class Config extends ConfigBase {
     // Configurations for consistency check
     /**
      * Consistency checker will run from *consistency_check_start_time* to *consistency_check_end_time*.
-     * Default is from 23:00 to 04:00
+     * If start time == end time, the checker will stop scheduling.
+     * And default is disabled.
+     * TODO(cmy): Disable by default because current checksum logic has some bugs.
+     * And it will also bring some overhead.
      */
     @ConfField(mutable = true, masterOnly = true)
     public static String consistency_check_start_time = "23";
     @ConfField(mutable = true, masterOnly = true)
-    public static String consistency_check_end_time = "4";
+    public static String consistency_check_end_time = "23";
     /**
      * Default timeout of a single consistency check task. Set long enough to fit your tablet size.
      */
@@ -987,7 +1017,7 @@ public class Config extends ConfigBase {
 
     // update interval of tablet stat
     // All frontends will get tablet stat from all backends at each interval
-    @ConfField public static int tablet_stat_update_interval_second = 300;  // 5 min
+    @ConfField public static int tablet_stat_update_interval_second = 60;  // 1 min
 
     /**
      * if set to false, auth check will be disable, in case some goes wrong with the new privilege system.
@@ -1028,15 +1058,6 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static boolean enable_local_replica_selection_fallback = false;
 
-
-    /**
-     * The timeout of executing async remote fragment.
-     * In normal case, the async remote fragment will be executed in a short time. If system are under high load
-     * condition，try to set this timeout longer.
-     */
-    @ConfField(mutable = true)
-    public static long remote_fragment_exec_timeout_ms = 5000; // 5 sec
-
     /**
      * The number of query retries.
      * A query may retry if we encounter RPC exception and no result has been sent to user.
@@ -1062,7 +1083,8 @@ public class Config extends ConfigBase {
     public static boolean disable_load_job = false;
 
     /*
-     * One master daemon thread will update database used data quota for db txn manager every db_used_data_quota_update_interval_secs
+     * One master daemon thread will update database used data quota for db txn manager
+     * every db_used_data_quota_update_interval_secs
      */
     @ConfField(mutable = false, masterOnly = true)
     public static int db_used_data_quota_update_interval_secs = 300;
@@ -1079,6 +1101,12 @@ public class Config extends ConfigBase {
      */
     @ConfField
     public static long es_state_sync_interval_second = 10;
+
+    /**
+     * fe will create iceberg table every iceberg_table_creation_interval_second
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static long iceberg_table_creation_interval_second = 10;
 
     /**
      * the factor of delay time before deciding to repair tablet.
@@ -1114,6 +1142,12 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true, masterOnly = true)
     public static boolean disable_balance = false;
+
+    /**
+     * if set to true, TabletScheduler will not do disk balance.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean disable_disk_balance = false;
 
     // if the number of scheduled tablets in TabletScheduler exceed max_scheduling_tablets
     // skip checking.
@@ -1259,19 +1293,7 @@ public class Config extends ConfigBase {
      * If set to true, Doris will check if the compiled and running versions of Java are compatible
      */
     @ConfField
-    public static boolean check_java_version = false;
-
-    /**
-     * control materialized view
-     */
-    @ConfField(mutable = true, masterOnly = true)
-    public static boolean enable_materialized_view = true;
-
-    /**
-     * enable create sync job
-     */
-    @ConfField(mutable = true, masterOnly = true)
-    public static boolean enable_create_sync_job = false;
+    public static boolean check_java_version = true;
 
     /**
      * it can't auto-resume routine load job as long as one of the backends is down
@@ -1285,11 +1307,6 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, masterOnly = true)
     public static int period_of_auto_resume_min = 5;
 
-    /*
-     * If set to true, Doris will support complex type
-     */
-    @ConfField
-    public static boolean enable_complex_type_support = false;
     /**
      * If set to true, the backend will be automatically dropped after finishing decommission.
      * If set to false, the backend will not be dropped and remaining in DECOMMISSION state.
@@ -1425,23 +1442,6 @@ public class Config extends ConfigBase {
     public static String http_api_extra_base_path = "";
 
     /**
-     * Whether to support the creation of alpha rowset tables.
-     * The default is false and should only be used in emergency situations,
-     * this config should be remove in some future version
-     */
-    @ConfField
-    public static boolean enable_alpha_rowset = false;
-
-    /**
-     * This config is used to solve fe heartbeat response read_timeout problem,
-     * When config is set to be true, master will get fe heartbeat response by thrift protocol
-     * instead of http protocol. In order to maintain compatibility with the old version,
-     * the default is false, and the configuration cannot be changed to true until all fe are upgraded.
-     */
-    @ConfField(mutable = true, masterOnly = true)
-    public static boolean enable_fe_heartbeat_by_thrift = false;
-
-    /**
      * If set to true, FE will be started in BDBJE debug mode
      */
     @ConfField
@@ -1499,7 +1499,8 @@ public class Config extends ConfigBase {
     public static int default_max_query_instances = -1;
 
     /*
-     * One master daemon thread will update global partition in memory info every partition_in_memory_update_interval_secs
+     * One master daemon thread will update global partition in memory
+     * info every partition_in_memory_update_interval_secs
      */
     @ConfField(mutable = false, masterOnly = true)
     public static int partition_in_memory_update_interval_secs = 300;
@@ -1544,4 +1545,197 @@ public class Config extends ConfigBase {
      */
     @ConfField(mutable = true, masterOnly = true)
     public static boolean disable_tablet_scheduler = false;
+
+    /*
+     * When doing clone or repair tablet task, there may be replica is REDUNDANT state, which
+     * should be dropped later. But there are be loading task on these replicas, so the default strategy
+     * is to wait until the loading task finished before dropping them.
+     * But the default strategy may takes very long time to handle these redundant replicas.
+     * So we can set this config to true to not wait any loading task.
+     * Set this config to true may cause loading task failed, but will
+     * speed up the process of tablet balance and repair.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_force_drop_redundant_replica = false;
+
+    /*
+     * auto set the slowest compaction replica's status to bad
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean repair_slow_replica = false;
+
+    /*
+     * The relocation of a colocation group may involve a large number of tablets moving within the cluster.
+     * Therefore, we should use a more conservative strategy to avoid relocation
+     * of colocation groups as much as possible.
+     * Reloaction usually occurs after a BE node goes offline or goes down.
+     * This parameter is used to delay the determination of BE node unavailability.
+     * The default is 30 minutes, i.e., if a BE node recovers within 30 minutes, relocation of the colocation group
+     * will not be triggered.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static long colocate_group_relocate_delay_second = 1800; // 30 min
+
+    /*
+     * If set to true, when creating table, Doris will allow to locate replicas of a tablet
+     * on same host. And also the tablet repair and balance will be disabled.
+     * This is only for local test, so that we can deploy multi BE on same host and create table
+     * with multi replicas.
+     * DO NOT use it for production env.
+     */
+    @ConfField
+    public static boolean allow_replica_on_same_host = false;
+
+    /**
+     *  The version count threshold used to judge whether replica compaction is too slow
+     */
+    @ConfField(mutable = true)
+    public static int min_version_count_indicate_replica_compaction_too_slow = 200;
+
+    /**
+     * The valid ratio threshold of the difference between the version count of the slowest replica and the fastest
+     * replica. If repair_slow_replica is set to true, it is used to determine whether to repair the slowest replica
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static double valid_version_count_delta_ratio_between_replicas = 0.5;
+
+    /**
+     * The data size threshold used to judge whether replica is too large
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static long min_bytes_indicate_replica_too_large = 2 * 1024 * 1024 * 1024L;
+
+    /**
+     * If set to TRUE, the column definitions of iceberg table and the doris table must be consistent
+     * If set to FALSE, Doris only creates columns of supported data types.
+     * Default is true.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean iceberg_table_creation_strict_mode = true;
+
+    // statistics
+    /*
+     * the max unfinished statistics job number
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static int cbo_max_statistics_job_num = 20;
+    /*
+     * the max timeout of a statistics task
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static int max_cbo_statistics_task_timeout_sec = 300;
+    /*
+     * the concurrency of statistics task
+     */
+    // TODO change it to mutable true
+    @ConfField(mutable = false, masterOnly = true)
+    public static int cbo_concurrency_statistics_task_num = 1;
+    /*
+     * default sample percentage
+     * The value from 0 ~ 100. The 100 means no sampling and fetch all data.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static int cbo_default_sample_percentage = 10;
+
+    /**
+     * If this configuration is enabled, you should also specify the trace_export_url.
+     */
+    @ConfField(mutable = false, masterOnly = false)
+    public static boolean enable_tracing = false;
+
+    /**
+     * Current support for exporting traces:
+     *   zipkin: Export traces directly to zipkin, which is used to enable the tracing feature quickly.
+     *   collector: The collector can be used to receive and process traces and support export to a variety of
+     *     third-party systems.
+     * If this configuration is enabled, you should also specify the enable_tracing=true and trace_export_url.
+     */
+    @ConfField(mutable = false, masterOnly = false)
+    public static String trace_exporter = "zipkin";
+
+    /**
+     * The endpoint to export spans to.
+     * export to zipkin like: http://127.0.0.1:9411/api/v2/spans
+     * export to collector like: http://127.0.0.1:4318/v1/traces
+     */
+    @ConfField(mutable = false, masterOnly = false)
+    public static String trace_export_url = "http://127.0.0.1:9411/api/v2/spans";
+
+    /**
+     * If set to TRUE, the compaction slower replica will be skipped when select get queryable replicas
+     * Default is true.
+     */
+    @ConfField(mutable = true)
+    public static boolean skip_compaction_slower_replica = true;
+
+    /**
+     * Enable quantile_state type column
+     * Default is false.
+     * */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_quantile_state_type = false;
+
+    @ConfField
+    public static boolean enable_vectorized_load = false;
+
+    @ConfField(mutable = false, masterOnly = true)
+    public static int backend_rpc_timeout_ms = 60000; // 1 min
+
+    /**
+     * Temp config for multi catalog feature.
+     * Should be removed when this feature is ready.
+     */
+    @ConfField(mutable = false, masterOnly = true)
+    public static boolean enable_multi_catalog = false; // 1 min
+
+    @ConfField(mutable = true, masterOnly = false)
+    public static long file_scan_node_split_size = 256 * 1024 * 1024; // 256mb
+
+    @ConfField(mutable = true, masterOnly = false)
+    public static long file_scan_node_split_num = 128;
+
+    /*
+     * If set to TRUE, the precision of decimal will be broaden to [1, 38].
+     * Decimalv3 of storage layer needs to be enabled first.
+     */
+    @ConfField
+    public static boolean enable_decimalv3 = false;
+
+    /**
+     * If set to TRUE, FE will:
+     * 1. divide BE into high load and low load(no mid load) to force triggering tablet scheduling;
+     * 2. ignore whether the cluster can be more balanced during tablet scheduling;
+     *
+     * It's used to test the reliability in single replica case when tablet scheduling are frequent.
+     * Default is false.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean be_rebalancer_fuzzy_test = false;
+
+    /**
+     * If set to TRUE, FE will convert date/datetime to datev2/datetimev2(0) automatically.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_date_conversion = false;
+
+    @ConfField(mutable = false, masterOnly = true)
+    public static boolean enable_multi_tags = false;
+
+    /**
+     * If set to TRUE, FE will convert DecimalV2 to DecimalV3 automatically.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_decimal_conversion = false;
+
+    /**
+     * List of S3 API compatible object storage systems.
+     */
+    @ConfField
+    public static String s3_compatible_object_storages = "s3,oss,cos,bos";
+
+    /**
+     * Support complex data type ARRAY.
+     */
+    @ConfField(mutable = true, masterOnly = true)
+    public static boolean enable_array_type = false;
 }

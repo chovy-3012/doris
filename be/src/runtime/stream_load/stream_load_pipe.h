@@ -21,28 +21,28 @@
 #include <deque>
 #include <mutex>
 
-#include "exec/file_reader.h"
+#include "gen_cpp/internal_service.pb.h"
+#include "io/file_reader.h"
 #include "runtime/message_body_sink.h"
 #include "util/bit_util.h"
 #include "util/byte_buffer.h"
-#include "gen_cpp/internal_service.pb.h"
 
 namespace doris {
 
+const size_t kMaxPipeBufferedBytes = 4 * 1024 * 1024;
 // StreamLoadPipe use to transfer data from producer to consumer
 // Data in pip is stored in chunks.
 class StreamLoadPipe : public MessageBodySink, public FileReader {
 public:
-    StreamLoadPipe(size_t max_buffered_bytes = 1024 * 1024, size_t min_chunk_size = 64 * 1024,
-                   int64_t total_length = -1, bool use_proto = false)
+    StreamLoadPipe(size_t max_buffered_bytes = kMaxPipeBufferedBytes,
+                   size_t min_chunk_size = 64 * 1024, int64_t total_length = -1,
+                   bool use_proto = false)
             : _buffered_bytes(0),
               _proto_buffered_bytes(0),
               _max_buffered_bytes(max_buffered_bytes),
               _min_chunk_size(min_chunk_size),
               _total_length(total_length),
-              _use_proto(use_proto),
-              _finished(false),
-              _cancelled(false) {}
+              _use_proto(use_proto) {}
     virtual ~StreamLoadPipe() {}
 
     Status open() override { return Status::OK(); }
@@ -91,9 +91,7 @@ public:
     // Otherwise, this should be a stream load task that needs to read the specified amount of data.
     Status read_one_message(std::unique_ptr<uint8_t[]>* data, int64_t* length) override {
         if (_total_length < -1) {
-            std::stringstream ss;
-            ss << "invalid, _total_length is: " << _total_length;
-            return Status::InternalError(ss.str());
+            return Status::InternalError("invalid, _total_length is: {}", _total_length);
         } else if (_total_length == 0) {
             // no data
             *length = 0;
@@ -123,7 +121,7 @@ public:
             }
             // cancelled
             if (_cancelled) {
-                return Status::InternalError("cancelled: " + _cancelled_reason);
+                return Status::InternalError("cancelled: {}", _cancelled_reason);
             }
             // finished
             if (_buf_queue.empty()) {
@@ -148,7 +146,7 @@ public:
         return Status::OK();
     }
 
-    Status readat(int64_t position, int64_t nbytes, int64_t* bytes_read, void* out) {
+    Status readat(int64_t position, int64_t nbytes, int64_t* bytes_read, void* out) override {
         return Status::InternalError("Not implemented");
     }
 
@@ -198,7 +196,7 @@ private:
         }
         // cancelled
         if (_cancelled) {
-            return Status::InternalError("cancelled: " + _cancelled_reason);
+            return Status::InternalError("cancelled: {}", _cancelled_reason);
         }
         // finished
         if (_buf_queue.empty()) {
@@ -238,7 +236,7 @@ private:
                 }
             }
             if (_cancelled) {
-                return Status::InternalError("cancelled: " + _cancelled_reason);
+                return Status::InternalError("cancelled: {}", _cancelled_reason);
             }
             _buf_queue.push_back(buf);
             if (_use_proto) {
@@ -269,10 +267,6 @@ private:
     std::deque<ByteBufferPtr> _buf_queue;
     std::condition_variable _put_cond;
     std::condition_variable _get_cond;
-
-    bool _finished;
-    bool _cancelled;
-    std::string _cancelled_reason = "";
 
     ByteBufferPtr _write_buf;
 };

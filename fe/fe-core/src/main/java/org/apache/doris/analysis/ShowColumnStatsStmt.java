@@ -21,22 +21,26 @@ import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.UserException;
+import org.apache.doris.common.util.Util;
 import org.apache.doris.qe.ShowResultSetMetaData;
 import org.apache.doris.statistics.ColumnStats;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+
+import java.util.List;
 
 public class ShowColumnStatsStmt extends ShowStmt {
 
     private static final ImmutableList<String> TITLE_NAMES =
             new ImmutableList.Builder<String>()
                     .add("column_name")
-                    .add(ColumnStats.NDV)
-                    .add(ColumnStats.AVG_SIZE)
-                    .add(ColumnStats.MAX_SIZE)
-                    .add(ColumnStats.NUM_NULLS)
-                    .add(ColumnStats.MIN_VALUE)
-                    .add(ColumnStats.MAX_VALUE)
+                    .add(ColumnStats.NDV.getValue())
+                    .add(ColumnStats.AVG_SIZE.getValue())
+                    .add(ColumnStats.MAX_SIZE.getValue())
+                    .add(ColumnStats.NUM_NULLS.getValue())
+                    .add(ColumnStats.MIN_VALUE.getValue())
+                    .add(ColumnStats.MAX_VALUE.getValue())
                     .build();
 
     private TableName tableName;
@@ -53,6 +57,8 @@ public class ShowColumnStatsStmt extends ShowStmt {
     public void analyze(Analyzer analyzer) throws AnalysisException, UserException {
         super.analyze(analyzer);
         tableName.analyze(analyzer);
+        // disallow external catalog
+        Util.prohibitExternalCatalog(tableName.getCtl(), this.getClass().getSimpleName());
     }
 
     @Override
@@ -63,5 +69,10 @@ public class ShowColumnStatsStmt extends ShowStmt {
             builder.addColumn(new Column(title, ScalarType.createVarchar(30)));
         }
         return builder.build();
+    }
+
+    public List<String> getPartitionNames() {
+        // TODO(WZT): partition statistics
+        return Lists.newArrayList();
     }
 }

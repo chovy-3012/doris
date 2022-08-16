@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/fe/src/main/java/org/apache/impala/ColumnDef.java
+// and modified by Doris
 
 package org.apache.doris.analysis;
 
@@ -23,10 +26,10 @@ import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.Config;
 import org.apache.doris.common.FeNameFormat;
 
 import com.google.common.base.Preconditions;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -45,11 +48,11 @@ public class ColumnDef {
      *     k1 INT NOT NULL DEFAULT "10"
      *     k1 INT NULL
      *     k1 INT NULL DEFAULT NULL
-     *     
+     *
      * ColumnnDef will be transformed to Column in Analysis phase, and in Column, default value is a String.
-     * No matter does the user set the default value as NULL explicitly, or not set default value,
-     * the default value in Column will be "null", so that Doris can not distinguish between "not set" and "set as null".
-     * 
+     * No matter does the user set the default value as NULL explicitly, or not set default value, the default value
+     * in Column will be "null", so that Doris can not distinguish between "not set" and "set as null".
+     *
      * But this is OK because Column has another attribute "isAllowNull".
      * If the column is not allowed to be null, and user does not set the default value,
      * even if default value saved in Column is null, the "null" value can not be loaded into this column,
@@ -58,12 +61,31 @@ public class ColumnDef {
     public static class DefaultValue {
         public boolean isSet;
         public String value;
+        // used for column which defaultValue is an expression.
+        public DefaultValueExprDef defaultValueExprDef;
 
         public DefaultValue(boolean isSet, String value) {
             this.isSet = isSet;
             this.value = value;
+            this.defaultValueExprDef = null;
         }
 
+        /**
+         * used for column which defaultValue is an expression.
+         * @param isSet is Set DefaultValue
+         * @param value default value
+         * @param exprName default value expression
+         */
+        public DefaultValue(boolean isSet, String value, String exprName) {
+            this.isSet = isSet;
+            this.value = value;
+            this.defaultValueExprDef = new DefaultValueExprDef(exprName);
+        }
+
+        // default "CURRENT_TIMESTAMP", only for DATETIME type
+        public static String CURRENT_TIMESTAMP = "CURRENT_TIMESTAMP";
+        public static String NOW = "now";
+        public static DefaultValue CURRENT_TIMESTAMP_DEFAULT_VALUE = new DefaultValue(true, CURRENT_TIMESTAMP, NOW);
         // no default value
         public static DefaultValue NOT_SET = new DefaultValue(false, null);
         // default null
@@ -91,6 +113,7 @@ public class ColumnDef {
         this.comment = "";
         this.defaultValue = DefaultValue.NOT_SET;
     }
+
     public ColumnDef(String name, TypeDef typeDef, boolean isKey, AggregateType aggregateType,
                      boolean isAllowNull, DefaultValue defaultValue, String comment) {
         this(name, typeDef, isKey, aggregateType, isAllowNull, defaultValue, comment, true);
@@ -124,19 +147,50 @@ public class ColumnDef {
     }
 
     public static ColumnDef newSequenceColumnDef(Type type, AggregateType aggregateType) {
-        return new ColumnDef(Column.SEQUENCE_COL, new TypeDef(type), false, aggregateType, true, DefaultValue.NULL_DEFAULT_VALUE,
+        return new ColumnDef(Column.SEQUENCE_COL, new TypeDef(type), false,
+                aggregateType, true, DefaultValue.NULL_DEFAULT_VALUE,
                 "sequence column hidden column", false);
     }
 
-    public boolean isAllowNull() { return isAllowNull; }
-    public String getDefaultValue() { return defaultValue.value; }
-    public String getName() { return name; }
-    public AggregateType getAggregateType() { return aggregateType; }
-    public void setAggregateType(AggregateType aggregateType) { this.aggregateType = aggregateType; }
-    public boolean isKey() { return isKey; }
-    public void setIsKey(boolean isKey) { this.isKey = isKey; }
-    public TypeDef getTypeDef() { return typeDef; }
-    public Type getType() { return typeDef.getType(); }
+    public boolean isAllowNull() {
+        return isAllowNull;
+    }
+
+    public String getDefaultValue() {
+        return defaultValue.value;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public AggregateType getAggregateType() {
+        return aggregateType;
+    }
+
+    public void setAggregateType(AggregateType aggregateType) {
+        this.aggregateType = aggregateType;
+    }
+
+    public boolean isKey() {
+        return isKey;
+    }
+
+    public void setIsKey(boolean isKey) {
+        this.isKey = isKey;
+    }
+
+    public TypeDef getTypeDef() {
+        return typeDef;
+    }
+
+    public Type getType() {
+        return typeDef.getType();
+    }
+
+    public String getComment() {
+        return comment;
+    }
 
     public boolean isVisible() {
         return visible;
@@ -160,6 +214,11 @@ public class ColumnDef {
         typeDef.analyze(null);
 
         Type type = typeDef.getType();
+
+        if (!Config.enable_quantile_state_type && type.isQuantileStateType()) {
+            throw new AnalysisException("quantile_state is disabled"
+                    + "Set config 'enable_quantile_state_type' = 'true' to enable this column type.");
+        }
 
         // disable Bitmap Hll type in keys, values without aggregate function.
         if (type.isBitmapType() || type.isHllType()) {
@@ -211,7 +270,10 @@ public class ColumnDef {
                 throw new AnalysisException("Array type column default value only support null");
             }
         }
-
+        if (isKey() && type.getPrimitiveType() == PrimitiveType.STRING && isOlap) {
+            throw new AnalysisException("String Type should not be used in key column[" + getName()
+                    + "].");
+        }
         if (type.getPrimitiveType() == PrimitiveType.MAP) {
             if (defaultValue.isSet && defaultValue != DefaultValue.NULL_DEFAULT_VALUE) {
                 throw new AnalysisException("Map type column default value just support null");
@@ -238,11 +300,13 @@ public class ColumnDef {
         }
 
         if (defaultValue.isSet && defaultValue.value != null) {
-            validateDefaultValue(type, defaultValue.value);
+            validateDefaultValue(type, defaultValue.value, defaultValue.defaultValueExprDef);
         }
     }
 
-    public static void validateDefaultValue(Type type, String defaultValue) throws AnalysisException {
+    @SuppressWarnings("checkstyle:Indentation")
+    public static void validateDefaultValue(Type type, String defaultValue, DefaultValueExprDef defaultValueExprDef)
+            throws AnalysisException {
         Preconditions.checkNotNull(defaultValue);
         Preconditions.checkArgument(type.isScalarType());
         ScalarType scalarType = (ScalarType) type;
@@ -255,26 +319,42 @@ public class ColumnDef {
             case SMALLINT:
             case INT:
             case BIGINT:
-                IntLiteral intLiteral = new IntLiteral(defaultValue, type);
+                new IntLiteral(defaultValue, type);
                 break;
             case LARGEINT:
-                LargeIntLiteral largeIntLiteral = new LargeIntLiteral(defaultValue);
+                new LargeIntLiteral(defaultValue);
                 break;
             case FLOAT:
                 FloatLiteral floatLiteral = new FloatLiteral(defaultValue);
                 if (floatLiteral.getType().equals(Type.DOUBLE)) {
                     throw new AnalysisException("Default value will loose precision: " + defaultValue);
                 }
+                break;
             case DOUBLE:
-                FloatLiteral doubleLiteral = new FloatLiteral(defaultValue);
+                new FloatLiteral(defaultValue);
                 break;
             case DECIMALV2:
+            case DECIMAL32:
+            case DECIMAL64:
+            case DECIMAL128:
                 DecimalLiteral decimalLiteral = new DecimalLiteral(defaultValue);
                 decimalLiteral.checkPrecisionAndScale(scalarType.getScalarPrecision(), scalarType.getScalarScale());
                 break;
             case DATE:
+            case DATEV2:
+                new DateLiteral(defaultValue, ScalarType.getDefaultDateType(type));
+                break;
             case DATETIME:
-                DateLiteral dateLiteral = new DateLiteral(defaultValue, type);
+            case DATETIMEV2:
+                if (defaultValueExprDef == null) {
+                    new DateLiteral(defaultValue, ScalarType.getDefaultDateType(type));
+                } else {
+                    if (defaultValueExprDef.getExprName().equals(DefaultValue.NOW)) {
+                        break;
+                    } else {
+                        throw new AnalysisException("date literal [" + defaultValue + "] is invalid");
+                    }
+                }
                 break;
             case CHAR:
             case VARCHAR:
@@ -285,15 +365,12 @@ public class ColumnDef {
                 }
                 break;
             case BITMAP:
-                break;
             case ARRAY:
-                break;
             case MAP:
-                break;
             case STRUCT:
                 break;
             case BOOLEAN:
-                BoolLiteral boolLiteral = new BoolLiteral(defaultValue);
+                new BoolLiteral(defaultValue);
                 break;
             default:
                 throw new AnalysisException("Unsupported type: " + type);
@@ -326,9 +403,11 @@ public class ColumnDef {
 
     public Column toColumn() {
         return new Column(name, typeDef.getType(), isKey, aggregateType, isAllowNull, defaultValue.value, comment,
-                visible);
+                visible, defaultValue.defaultValueExprDef, Column.COLUMN_UNIQUE_ID_INIT_VALUE);
     }
 
     @Override
-    public String toString() { return toSql(); }
+    public String toString() {
+        return toSql();
+    }
 }

@@ -27,7 +27,6 @@
 #include "gen_cpp/HeartbeatService.h"
 #include "gen_cpp/Status_types.h"
 #include "olap/storage_engine.h"
-#include "olap/utils.h"
 #include "runtime/heartbeat_flags.h"
 #include "service/backend_options.h"
 #include "util/debug_util.h"
@@ -38,7 +37,7 @@ using std::fstream;
 using std::nothrow;
 using std::string;
 using std::vector;
-using apache::thrift::transport::TProcessor;
+using apache::thrift::TProcessor;
 
 namespace doris {
 
@@ -104,7 +103,7 @@ Status HeartbeatServer::_heartbeat(const TMasterInfo& master_info) {
         }
     } else {
         if (_master_info->cluster_id != master_info.cluster_id) {
-            OLAP_LOG_WARNING("invalid cluster id: %d. ignore.", master_info.cluster_id);
+            LOG(WARNING) << "invalid cluster id: " << master_info.cluster_id << ". ignore.";
             return Status::InternalError("invalid cluster id. ignore.");
         }
     }
@@ -170,12 +169,12 @@ Status HeartbeatServer::_heartbeat(const TMasterInfo& master_info) {
     return Status::OK();
 }
 
-AgentStatus create_heartbeat_server(ExecEnv* exec_env, uint32_t server_port,
-                                    ThriftServer** thrift_server, uint32_t worker_thread_num,
-                                    TMasterInfo* local_master_info) {
+Status create_heartbeat_server(ExecEnv* exec_env, uint32_t server_port,
+                               ThriftServer** thrift_server, uint32_t worker_thread_num,
+                               TMasterInfo* local_master_info) {
     HeartbeatServer* heartbeat_server = new (nothrow) HeartbeatServer(local_master_info);
     if (heartbeat_server == nullptr) {
-        return DORIS_ERROR;
+        return Status::InternalError("Get heartbeat server failed");
     }
 
     heartbeat_server->init_cluster_id();
@@ -185,6 +184,6 @@ AgentStatus create_heartbeat_server(ExecEnv* exec_env, uint32_t server_port,
     string server_name("heartbeat");
     *thrift_server =
             new ThriftServer(server_name, server_processor, server_port, worker_thread_num);
-    return DORIS_SUCCESS;
+    return Status::OK();
 }
 } // namespace doris

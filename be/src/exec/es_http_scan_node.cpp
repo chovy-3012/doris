@@ -27,7 +27,6 @@
 #include "exec/es/es_scroll_query.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
-#include "runtime/dpp_sink_internal.h"
 #include "runtime/row_batch.h"
 #include "runtime/runtime_state.h"
 #include "service/backend_options.h"
@@ -67,13 +66,15 @@ Status EsHttpScanNode::init(const TPlanNode& tnode, RuntimeState* state) {
 Status EsHttpScanNode::prepare(RuntimeState* state) {
     VLOG_QUERY << "EsHttpScanNode prepare";
     RETURN_IF_ERROR(ScanNode::prepare(state));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
+
+    _scanner_profile.reset(new RuntimeProfile("EsHttpScanNode"));
+    runtime_profile()->add_child(_scanner_profile.get(), true, nullptr);
 
     _runtime_state = state;
     _tuple_desc = state->desc_tbl().get_tuple_descriptor(_tuple_id);
     if (_tuple_desc == nullptr) {
-        std::stringstream ss;
-        ss << "Failed to get tuple descriptor, _tuple_id=" << _tuple_id;
-        return Status::InternalError(ss.str());
+        return Status::InternalError("Failed to get tuple descriptor, _tuple_id={}", _tuple_id);
     }
 
     // set up column name vector for ESScrollQueryBuilder
@@ -92,14 +93,20 @@ Status EsHttpScanNode::prepare(RuntimeState* state) {
 // build predicate
 Status EsHttpScanNode::build_conjuncts_list() {
     Status status = Status::OK();
+    _conjunct_to_predicate.resize(_conjunct_ctxs.size());
+
     for (int i = 0; i < _conjunct_ctxs.size(); ++i) {
         EsPredicate* predicate = _pool->add(new EsPredicate(_conjunct_ctxs[i], _tuple_desc, _pool));
         predicate->set_field_context(_fields_context);
         status = predicate->build_disjuncts_list();
         if (status.ok()) {
-            _predicates.push_back(predicate);
+            _conjunct_to_predicate[i] = _predicate_to_conjunct.size();
             _predicate_to_conjunct.push_back(i);
+
+            _predicates.push_back(predicate);
         } else {
+            _conjunct_to_predicate[i] = -1;
+
             VLOG_CRITICAL << status.get_error_msg();
             status = predicate->get_es_query_status();
             if (!status.ok()) {
@@ -115,7 +122,7 @@ Status EsHttpScanNode::build_conjuncts_list() {
 Status EsHttpScanNode::open(RuntimeState* state) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     RETURN_IF_ERROR(ExecNode::open(state));
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::OPEN));
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     RETURN_IF_CANCELLED(state);
 
     // if conjunct is constant, compute direct and set eos = true
@@ -133,6 +140,7 @@ Status EsHttpScanNode::open(RuntimeState* state) {
     // remove those predicates which ES cannot support
     std::vector<bool> list;
     BooleanQueryBuilder::validate(_predicates, &list);
+
     DCHECK(list.size() == _predicate_to_conjunct.size());
     for (int i = list.size() - 1; i >= 0; i--) {
         if (!list[i]) {
@@ -147,6 +155,11 @@ Status EsHttpScanNode::open(RuntimeState* state) {
         _conjunct_ctxs[conjunct_index]->close(_runtime_state);
         _conjunct_ctxs.erase(_conjunct_ctxs.begin() + conjunct_index);
     }
+
+    auto checker = [&](int index) {
+        return _conjunct_to_predicate[index] != -1 && list[_conjunct_to_predicate[index]];
+    };
+    _peel_pushed_vconjunct(state, checker);
 
     RETURN_IF_ERROR(start_scanners());
 
@@ -182,6 +195,7 @@ Status EsHttpScanNode::collect_scanners_status() {
 
 Status EsHttpScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
     SCOPED_TIMER(_runtime_profile->total_time_counter());
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     if (state->is_cancelled()) {
         std::unique_lock<std::mutex> l(_batch_queue_lock);
         if (update_status(Status::Cancelled("Cancelled"))) {
@@ -268,7 +282,6 @@ Status EsHttpScanNode::close(RuntimeState* state) {
     if (is_closed()) {
         return Status::OK();
     }
-    RETURN_IF_ERROR(exec_debug_action(TExecNodePhase::CLOSE));
     SCOPED_TIMER(_runtime_profile->total_time_counter());
     _scan_finished.store(true);
     _queue_writer_cond.notify_all();
@@ -307,8 +320,7 @@ Status EsHttpScanNode::scanner_scan(std::unique_ptr<EsHttpScanner> scanner,
 
     while (!scanner_eof) {
         // Fill one row batch
-        std::shared_ptr<RowBatch> row_batch(
-                new RowBatch(row_desc(), _runtime_state->batch_size(), mem_tracker().get()));
+        std::shared_ptr<RowBatch> row_batch(new RowBatch(row_desc(), _runtime_state->batch_size()));
 
         // create new tuple buffer for row_batch
         MemPool* tuple_pool = row_batch->tuple_data_pool();
@@ -378,7 +390,7 @@ Status EsHttpScanNode::scanner_scan(std::unique_ptr<EsHttpScanner> scanner,
             // Queue size Must be smaller than _max_buffered_batches
             _batch_queue.push_back(row_batch);
 
-            // Notify reader to
+            // Notify reader to process
             _queue_reader_cond.notify_one();
         }
     }
@@ -406,6 +418,8 @@ static std::string get_host_port(const std::vector<TNetworkAddress>& es_hosts) {
 }
 
 void EsHttpScanNode::scanner_worker(int start_idx, int length, std::promise<Status>& p_status) {
+    SCOPED_ATTACH_TASK(_runtime_state);
+    SCOPED_CONSUME_MEM_TRACKER(mem_tracker());
     // Clone expr context
     std::vector<ExprContext*> scanner_expr_ctxs;
     DCHECK(start_idx < length);
@@ -437,10 +451,17 @@ void EsHttpScanNode::scanner_worker(int start_idx, int length, std::promise<Stat
             properties, _column_names, _predicates, _docvalue_context, &doc_value_mode);
 
     // start scanner to scan
-    std::unique_ptr<EsHttpScanner> scanner(
-            new EsHttpScanner(_runtime_state, runtime_profile(), _tuple_id, properties,
-                              scanner_expr_ctxs, &counter, doc_value_mode));
-    status = scanner_scan(std::move(scanner), scanner_expr_ctxs, &counter);
+    if (!_vectorized) {
+        std::unique_ptr<EsHttpScanner> scanner(
+                new EsHttpScanner(_runtime_state, runtime_profile(), _tuple_id, properties,
+                                  scanner_expr_ctxs, &counter, doc_value_mode));
+        status = scanner_scan(std::move(scanner), scanner_expr_ctxs, &counter);
+    } else {
+        std::unique_ptr<vectorized::VEsHttpScanner> scanner(new vectorized::VEsHttpScanner(
+                _runtime_state, runtime_profile(), _tuple_id, properties, scanner_expr_ctxs,
+                &counter, doc_value_mode));
+        status = scanner_scan(std::move(scanner));
+    }
     if (!status.ok()) {
         LOG(WARNING) << "Scanner[" << start_idx
                      << "] process failed. status=" << status.get_error_msg();

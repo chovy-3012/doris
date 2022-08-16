@@ -21,8 +21,7 @@
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <filesystem>
-// #include <gutil/strings/substitute.h>
-// #include <gutil/strings/join.h>
+#include <random>
 
 #include "olap/storage_engine.h"
 #include "runtime/exec_env.h"
@@ -139,9 +138,7 @@ Status TmpFileMgr::get_file(const DeviceId& device_id, const TUniqueId& query_id
     DCHECK_GE(device_id, 0);
     DCHECK_LT(device_id, _tmp_dirs.size());
     if (is_blacklisted(device_id)) {
-        std::stringstream error_msg;
-        error_msg << "path is blacklist. path: " << _tmp_dirs[device_id].path();
-        return Status::InternalError(error_msg.str());
+        return Status::InternalError("path is blacklist. path: {}", _tmp_dirs[device_id].path());
     }
 
     // Generate the full file path.
@@ -160,6 +157,14 @@ string TmpFileMgr::get_tmp_dir_path(DeviceId device_id) const {
     DCHECK_GE(device_id, 0);
     DCHECK_LT(device_id, _tmp_dirs.size());
     return _tmp_dirs[device_id].path();
+}
+
+std::string TmpFileMgr::get_tmp_dir_path() {
+    std::vector<DeviceId> devices = active_tmp_devices();
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(devices.begin(), devices.end(), g);
+    return get_tmp_dir_path(devices.front());
 }
 
 void TmpFileMgr::blacklist_device(DeviceId device_id) {
@@ -217,9 +222,7 @@ Status TmpFileMgr::File::allocate_space(int64_t write_size, int64_t* offset) {
     Status status;
     if (_mgr->is_blacklisted(_device_id)) {
         _blacklisted = true;
-        std::stringstream error_msg;
-        error_msg << "path is blacklist. path: " << _path;
-        return Status::InternalError(error_msg.str());
+        return Status::InternalError("path is blacklist. path: {}", _path);
     }
     if (_current_size == 0) {
         // First call to AllocateSpace. Create the file.
@@ -244,15 +247,6 @@ Status TmpFileMgr::File::allocate_space(int64_t write_size, int64_t* offset) {
 void TmpFileMgr::File::report_io_error(const std::string& error_msg) {
     LOG(ERROR) << "Error for temporary file '" << _path << "': " << error_msg;
 }
-
-#if 0
-void TmpFileMgr::File::report_io_error(const ErrorMsg& msg) {
-    LOG(ERROR) << "Error for temporary file '" << _path << "': " << msg.msg();
-    // IMPALA-2305: avoid blacklisting to prevent test failures.
-    // blacklisted_ = true;
-    // mgr_->BlacklistDevice(device_id_);
-}
-#endif
 
 Status TmpFileMgr::File::remove() {
     if (_current_size > 0) {

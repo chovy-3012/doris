@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_SRC_QUERY_EXPRS_HYBRID_SET_H
-#define DORIS_BE_SRC_QUERY_EXPRS_HYBRID_SET_H
+#pragma once
 
 #include <parallel_hashmap/phmap.h>
 
@@ -24,10 +23,13 @@
 
 #include "common/object_pool.h"
 #include "common/status.h"
+#include "exprs/expr.h"
 #include "runtime/datetime_value.h"
 #include "runtime/decimalv2_value.h"
+#include "runtime/large_int_value.h"
 #include "runtime/primitive_type.h"
 #include "runtime/string_value.h"
+#include "vec/exprs/vliteral.h"
 
 namespace doris {
 
@@ -45,6 +47,12 @@ public:
     virtual bool find(void* data) = 0;
     // use in vectorize execute engine
     virtual bool find(void* data, size_t) = 0;
+
+    virtual Status to_vexpr_list(doris::ObjectPool* pool,
+                                 std::vector<doris::vectorized::VExpr*>* vexpr_list, int precision,
+                                 int scale) = 0;
+
+    virtual bool is_date_v2() { return false; }
     class IteratorBase {
     public:
         IteratorBase() {}
@@ -57,36 +65,56 @@ public:
     virtual IteratorBase* begin() = 0;
 };
 
-template <class T>
+template <PrimitiveType T, bool is_vec = false>
 class HybridSet : public HybridSetBase {
 public:
+    using CppType = std::conditional_t<is_vec, typename VecPrimitiveTypeTraits<T>::CppType,
+                                       typename PrimitiveTypeTraits<T>::CppType>;
+
     HybridSet() = default;
 
     ~HybridSet() override = default;
 
+    bool is_date_v2() override { return T == TYPE_DATEV2; }
+
+    Status to_vexpr_list(doris::ObjectPool* pool,
+                         std::vector<doris::vectorized::VExpr*>* vexpr_list, int precision,
+                         int scale) override {
+        HybridSetBase::IteratorBase* it = begin();
+        DCHECK(it != nullptr);
+        while (it->has_next()) {
+            TExprNode node;
+            const void* v = it->get_value();
+            create_texpr_literal_node<T>(v, &node, precision, scale);
+            vexpr_list->push_back(pool->add(new doris::vectorized::VLiteral(node)));
+            it->next();
+        }
+        return Status::OK();
+    };
+
     void insert(const void* data) override {
         if (data == nullptr) return;
 
-        if (sizeof(T) >= 16) {
-            // for largeint, it will core dump with no memcpy
-            T value;
-            memcpy(&value, data, sizeof(T));
+        if constexpr (sizeof(CppType) >= 16) {
+            // for large int, it will core dump with no memcpy
+            CppType value;
+            memcpy(&value, data, sizeof(CppType));
             _set.insert(value);
         } else {
-            _set.insert(*reinterpret_cast<const T*>(data));
+            _set.insert(*reinterpret_cast<const CppType*>(data));
         }
     }
     void insert(void* data, size_t) override { insert(data); }
 
     void insert(HybridSetBase* set) override {
-        HybridSet<T>* hybrid_set = reinterpret_cast<HybridSet<T>*>(set);
+        HybridSet<T, is_vec>* hybrid_set = reinterpret_cast<HybridSet<T, is_vec>*>(set);
         _set.insert(hybrid_set->_set.begin(), hybrid_set->_set.end());
     }
 
     int size() override { return _set.size(); }
 
     bool find(void* data) override {
-        auto it = _set.find(*reinterpret_cast<T*>(data));
+        auto it = _set.find(*reinterpret_cast<CppType*>(data));
         return !(it == _set.end());
     }
 
@@ -99,9 +127,9 @@ public:
                  typename phmap::flat_hash_set<_iT>::iterator end)
                 : _begin(begin), _end(end) {}
         ~Iterator() override = default;
-        virtual bool has_next() const { return !(_begin == _end); }
-        virtual const void* get_value() { return _begin.operator->(); }
-        virtual void next() { ++_begin; }
+        virtual bool has_next() const override { return !(_begin == _end); }
+        virtual const void* get_value() override { return _begin.operator->(); }
+        virtual void next() override { ++_begin; }
 
     private:
         typename phmap::flat_hash_set<_iT>::iterator _begin;
@@ -109,11 +137,11 @@ public:
     };
 
     IteratorBase* begin() override {
-        return _pool.add(new (std::nothrow) Iterator<T>(_set.begin(), _set.end()));
+        return _pool.add(new (std::nothrow) Iterator<CppType>(_set.begin(), _set.end()));
     }
 
 private:
-    phmap::flat_hash_set<T> _set;
+    phmap::flat_hash_set<CppType> _set;
     ObjectPool _pool;
 };
 
@@ -122,6 +150,21 @@ public:
     StringValueSet() = default;
 
     ~StringValueSet() override = default;
+
+    Status to_vexpr_list(doris::ObjectPool* pool,
+                         std::vector<doris::vectorized::VExpr*>* vexpr_list, int precision,
+                         int scale) override {
+        HybridSetBase::IteratorBase* it = begin();
+        DCHECK(it != nullptr);
+        while (it->has_next()) {
+            TExprNode node;
+            const void* v = it->get_value();
+            create_texpr_literal_node<TYPE_STRING>(v, &node);
+            vexpr_list->push_back(pool->add(new doris::vectorized::VLiteral(node)));
+            it->next();
+        }
+        return Status::OK();
+    };
 
     void insert(const void* data) override {
         if (data == nullptr) return;
@@ -162,13 +205,13 @@ public:
                  phmap::flat_hash_set<std::string>::iterator end)
                 : _begin(begin), _end(end) {}
         ~Iterator() override = default;
-        virtual bool has_next() const { return !(_begin == _end); }
-        virtual const void* get_value() {
+        virtual bool has_next() const override { return !(_begin == _end); }
+        virtual const void* get_value() override {
             _value.ptr = const_cast<char*>(_begin->data());
             _value.len = _begin->length();
             return &_value;
         }
-        virtual void next() { ++_begin; }
+        virtual void next() override { ++_begin; }
 
     private:
         typename phmap::flat_hash_set<std::string>::iterator _begin;
@@ -186,5 +229,3 @@ private:
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_QUERY_EXPRS_HYBRID_SET_H

@@ -22,8 +22,8 @@ option java_package = "org.apache.doris.proto";
 
 import "data.proto";
 import "descriptors.proto";
-import "status.proto";
 import "types.proto";
+import "olap_file.proto";
 
 option cc_generic_services = true;
 
@@ -45,6 +45,9 @@ message PTransmitDataParams {
     optional PQueryStatistics query_statistics = 8;
 
     optional PBlock block = 9;
+    // transfer the RowBatch to the Controller Attachment
+    optional bool transfer_by_attachment = 10 [default = false];
+    optional PUniqueId query_id = 11;
 };
 
 message PTransmitDataResult {
@@ -59,6 +62,9 @@ message PTabletWithPartition {
 message PTabletInfo {
     required int64 tablet_id = 1;
     required int32 schema_hash = 2;
+    // Delta Writer will write data to local disk and then check if there are new raw values not in global dict
+    // if appears, then it should add the column name to this vector
+    repeated string invalid_dict_cols = 3; 
 }
 
 // open a tablet writer
@@ -69,9 +75,12 @@ message PTabletWriterOpenRequest {
     required POlapTableSchemaParam schema = 4;
     repeated PTabletWithPartition tablets = 5;
     required int32 num_senders = 6;
-    required bool need_gen_rollup = 7;
+    required bool need_gen_rollup = 7;  //Deprecated, not used since alter job v2
     optional int64 load_mem_limit = 8;
     optional int64 load_channel_timeout_s = 9;
+    optional bool is_high_priority = 10 [default = false];
+    optional string sender_ip = 11 [default = ""];
+    optional bool is_vectorized = 12 [default = false];
 };
 
 message PTabletWriterOpenResult {
@@ -96,7 +105,57 @@ message PTabletWriterAddBatchRequest {
     repeated int64 partition_ids = 8;
     // the backend which send this request
     optional int64 backend_id = 9 [default = -1];
+    // transfer the RowBatch to the Controller Attachment
+    optional bool transfer_by_attachment = 10 [default = false];
+    optional bool is_high_priority = 11 [default = false];
+    optional bool write_single_replica = 12 [default = false];
+    map<int64, PSlaveTabletNodes> slave_tablet_nodes = 13;
 };
+
+message PTabletWriterAddBlockRequest {
+    required PUniqueId id = 1;
+    required int64 index_id = 2;
+    required int32 sender_id = 3;
+
+    // If this is the last batch from this sender
+    optional bool eos = 4;
+
+    optional int64 packet_seq = 5;
+    repeated int64 tablet_ids = 6;
+    // unset if and only if when eos is true
+    optional PBlock block = 7;
+    // only valid when eos is true
+    // valid partition ids that would write in this writer
+    repeated int64 partition_ids = 8;
+    // the backend which send this request
+    optional int64 backend_id = 9 [default = -1];
+    // transfer the vectorized::Block to the Controller Attachment
+    optional bool transfer_by_attachment = 10 [default = false];
+    optional bool is_high_priority = 11 [default = false];
+    optional bool write_single_replica = 12 [default = false];
+    map<int64, PSlaveTabletNodes> slave_tablet_nodes = 13;
+};
+
+message PSlaveTabletNodes {
+    repeated PNodeInfo slave_nodes = 1;
+}
+
+message PNodeInfo {
+    optional int64 id = 1;
+    optional int64 option = 2;
+    optional string host = 3;
+    // used to transfer data between nodes
+    optional int32 async_internal_port = 4;
+}
+
+message PSuccessSlaveTabletNodeIds {
+    repeated int64 slave_node_ids = 1;
+}
+
+message PTabletError {
+    optional int64 tablet_id = 1;
+    optional string msg = 2;
+}
 
 message PTabletWriterAddBatchResult {
     required PStatus status = 1;
@@ -104,6 +163,18 @@ message PTabletWriterAddBatchResult {
     optional int64 execution_time_us = 3;
     optional int64 wait_lock_time_us = 4;
     optional int64 wait_execution_time_us = 5;
+    repeated PTabletError tablet_errors = 6;
+    map<int64, PSuccessSlaveTabletNodeIds> success_slave_tablet_node_ids = 7;
+};
+
+message PTabletWriterAddBlockResult {
+    required PStatus status = 1;
+    repeated PTabletInfo tablet_vec = 2;
+    optional int64 execution_time_us = 3;
+    optional int64 wait_lock_time_us = 4;
+    optional int64 wait_execution_time_us = 5;
+    repeated PTabletError tablet_errors = 6;
+    map<int64, PSuccessSlaveTabletNodeIds> success_slave_tablet_node_ids = 7;
 };
 
 // tablet writer cancel
@@ -116,21 +187,23 @@ message PTabletWriterCancelRequest {
 message PTabletWriterCancelResult {
 };
 
+enum PFragmentRequestVersion {
+    VERSION_1 = 1;  // only one TExecPlanFragmentParams in request
+    VERSION_2 = 2;  // multi TExecPlanFragmentParams in request
+};
+
 message PExecPlanFragmentRequest {
     optional bytes request = 1;
     optional bool compact = 2;
+    optional PFragmentRequestVersion version = 3 [default = VERSION_2];
 };
+
+message PExecPlanFragmentStartRequest {
+    optional PUniqueId query_id = 1;
+}
 
 message PExecPlanFragmentResult {
     required PStatus status = 1;
-};
-
-enum PPlanFragmentCancelReason {
-    // 0 is reserved
-    LIMIT_REACH = 1;
-    USER_CANCEL = 2;
-    INTERNAL_ERROR = 3;
-    TIMEOUT = 4;
 };
 
 message PCancelPlanFragmentRequest {
@@ -309,6 +382,8 @@ message PColumnValue {
     optional int64 longVal = 3;
     optional double doubleVal = 4;
     optional bytes stringVal = 5;
+    optional int32 precision = 6;
+    optional int32 scale = 7;
 }
 
 // TODO: CHECK ALL TYPE
@@ -328,6 +403,11 @@ enum PColumnType {
     COLUMN_TYPE_DECIMAL = 12;
     COLUMN_TYPE_DECIMALV2 = 13;
     COLUMN_TYPE_STRING = 14;
+    COLUMN_TYPE_DATEV2 = 15;
+    COLUMN_TYPE_DATETIMEV2 = 16;
+    COLUMN_TYPE_DECIMAL32 = 17;
+    COLUMN_TYPE_DECIMAL64 = 18;
+    COLUMN_TYPE_DECIMAL128 = 19;
 }
 
 message PMinMaxFilter {
@@ -336,10 +416,18 @@ message PMinMaxFilter {
     required PColumnValue max_val = 3;
 };
 
+message PInFilter {
+    required PColumnType column_type = 1;
+    repeated PColumnValue values = 2;
+    optional string ignored_msg = 3;
+}
+
 enum PFilterType {
     UNKNOW_FILTER = 0;
     BLOOM_FILTER = 1;
     MINMAX_FILTER = 2;
+    IN_FILTER = 3;
+    IN_OR_BLOOM_FILTER = 4;
 };
 
 message PMergeFilterRequest {
@@ -349,6 +437,7 @@ message PMergeFilterRequest {
     required PFilterType filter_type = 4;
     optional PMinMaxFilter minmax_filter = 5;
     optional PBloomFilter bloom_filter = 6;
+    optional PInFilter in_filter = 7;
 };
 
 message PMergeFilterResponse {
@@ -362,6 +451,7 @@ message PPublishFilterRequest {
     required PFilterType filter_type = 4;
     optional PMinMaxFilter minmax_filter = 5;
     optional PBloomFilter bloom_filter = 6;
+    optional PInFilter in_filter = 7;
 };
 
 message PPublishFilterResponse {
@@ -407,22 +497,49 @@ message PResetRPCChannelResponse {
     repeated string channels = 2;
 };
 
-message PHandShakeRequest {
-    optional string hello = 1;
-}
+message PEmptyRequest {};
 
-message PHandShakeResponse {
+message PTabletWriteSlaveRequest {
+    optional RowsetMetaPB rowset_meta = 1;
+    optional string rowset_path = 2;
+    map<int64, int64> segments_size = 3;
+    optional string host = 4;
+    optional int32 http_port = 5;
+    optional int32 brpc_port = 6;
+    optional string token = 7;
+    optional int32 node_id = 8;
+};
+
+message PTabletWriteSlaveResult {
     optional PStatus status = 1;
-    optional string hello = 2;
-}
+};
+
+message PTabletWriteSlaveDoneRequest {
+    optional int64 txn_id = 1;
+    optional int64 tablet_id = 2;
+    optional int64 node_id = 3;
+    optional bool is_succeed = 4 [default = false];
+};
+
+message PTabletWriteSlaveDoneResult {
+    optional PStatus status = 1;
+};
 
 service PBackendService {
     rpc transmit_data(PTransmitDataParams) returns (PTransmitDataResult);
+    rpc transmit_data_by_http(PEmptyRequest) returns (PTransmitDataResult);
+    // If #fragments of a query is < 3, use exec_plan_fragment directly.
+    // If #fragments of a query is >=3, use exec_plan_fragment_prepare + exec_plan_fragment_start
     rpc exec_plan_fragment(PExecPlanFragmentRequest) returns (PExecPlanFragmentResult);
+    rpc exec_plan_fragment_prepare(PExecPlanFragmentRequest) returns (PExecPlanFragmentResult);
+    rpc exec_plan_fragment_start(PExecPlanFragmentStartRequest) returns (PExecPlanFragmentResult);
     rpc cancel_plan_fragment(PCancelPlanFragmentRequest) returns (PCancelPlanFragmentResult);
     rpc fetch_data(PFetchDataRequest) returns (PFetchDataResult);
     rpc tablet_writer_open(PTabletWriterOpenRequest) returns (PTabletWriterOpenResult);
     rpc tablet_writer_add_batch(PTabletWriterAddBatchRequest) returns (PTabletWriterAddBatchResult);
+    rpc tablet_writer_add_batch_by_http(PEmptyRequest) returns (PTabletWriterAddBatchResult);
+    rpc tablet_writer_add_block(PTabletWriterAddBlockRequest) returns (PTabletWriterAddBlockResult);
+    rpc tablet_writer_add_block_by_http(PEmptyRequest) returns (PTabletWriterAddBlockResult);
     rpc tablet_writer_cancel(PTabletWriterCancelRequest) returns (PTabletWriterCancelResult);
     rpc get_info(PProxyRequest) returns (PProxyResult); 
     rpc update_cache(PUpdateCacheRequest) returns (PCacheResponse);
@@ -435,8 +552,11 @@ service PBackendService {
     rpc apply_filter(PPublishFilterRequest) returns (PPublishFilterResponse);
     rpc fold_constant_expr(PConstantExprRequest) returns (PConstantExprResult);
     rpc transmit_block(PTransmitDataParams) returns (PTransmitDataResult);
+    rpc transmit_block_by_http(PEmptyRequest) returns (PTransmitDataResult);
     rpc check_rpc_channel(PCheckRPCChannelRequest) returns (PCheckRPCChannelResponse);
     rpc reset_rpc_channel(PResetRPCChannelRequest) returns (PResetRPCChannelResponse);
     rpc hand_shake(PHandShakeRequest) returns (PHandShakeResponse);
+    rpc request_slave_tablet_pull_rowset(PTabletWriteSlaveRequest) returns (PTabletWriteSlaveResult);
+    rpc response_slave_tablet_pull_rowset(PTabletWriteSlaveDoneRequest) returns (PTabletWriteSlaveDoneResult);
 };
 

@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/tuple.h
+// and modified by Doris
 
-#ifndef DORIS_BE_RUNTIME_TUPLE_H
-#define DORIS_BE_RUNTIME_TUPLE_H
+#pragma once
 
 #include <cstring>
 
@@ -27,7 +29,7 @@
 namespace doris {
 
 struct StringValue;
-struct CollectionValue;
+class CollectionValue;
 class TupleDescriptor;
 class DateTimeValue;
 class TupleRow;
@@ -99,8 +101,8 @@ public:
     // If 'convert_ptrs' is true, converts pointers that are part of the tuple
     // into offsets in data, based on the provided offset. Otherwise they will be
     // pointers directly into data.
-    void deep_copy(const TupleDescriptor& desc, char** data, int* offset, bool convert_ptrs);
-    void deep_copy(const TupleDescriptor& desc, char** data, int* offset) {
+    void deep_copy(const TupleDescriptor& desc, char** data, int64_t* offset, bool convert_ptrs);
+    void deep_copy(const TupleDescriptor& desc, char** data, int64_t* offset) {
         deep_copy(desc, data, offset, false);
     }
 
@@ -185,5 +187,3 @@ private:
 };
 
 } // namespace doris
-
-#endif

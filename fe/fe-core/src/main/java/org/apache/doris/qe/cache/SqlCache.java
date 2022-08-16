@@ -22,6 +22,7 @@ import org.apache.doris.common.Status;
 import org.apache.doris.common.util.DebugUtil;
 import org.apache.doris.metric.MetricRepo;
 import org.apache.doris.proto.InternalService;
+import org.apache.doris.proto.Types;
 import org.apache.doris.qe.RowBatch;
 import org.apache.doris.thrift.TUniqueId;
 
@@ -40,10 +41,18 @@ public class SqlCache extends Cache {
         this.allViewExpandStmtListStr = allViewExpandStmtListStr;
     }
 
+    public String getSqlWithViewStmt() {
+        return selectStmt.toSql() + "|" + allViewExpandStmtListStr;
+    }
+
+    // only used for UT
+    public Types.PUniqueId getSqlKey() {
+        return CacheProxy.getMd5(getSqlWithViewStmt());
+    }
+
     public InternalService.PFetchCacheResult getCacheData(Status status) {
-        String originStmtWithViewStmt = selectStmt.getOrigStmt().originStmt + allViewExpandStmtListStr;
         InternalService.PFetchCacheRequest request = InternalService.PFetchCacheRequest.newBuilder()
-                .setSqlKey(CacheProxy.getMd5(originStmtWithViewStmt))
+                .setSqlKey(CacheProxy.getMd5(getSqlWithViewStmt()))
                 .addParams(InternalService.PCacheParam.newBuilder()
                         .setPartitionKey(latestTable.latestPartitionId)
                         .setLastVersion(latestTable.latestVersion)
@@ -75,9 +84,8 @@ public class SqlCache extends Cache {
             return;
         }
 
-        String originStmtWithViewStmt = selectStmt.getOrigStmt().originStmt + allViewExpandStmtListStr;
         InternalService.PUpdateCacheRequest updateRequest =
-                rowBatchBuilder.buildSqlUpdateRequest(originStmtWithViewStmt, latestTable.latestPartitionId,
+                rowBatchBuilder.buildSqlUpdateRequest(getSqlWithViewStmt(), latestTable.latestPartitionId,
                         latestTable.latestVersion, latestTable.latestTime);
         if (updateRequest.getValuesCount() > 0) {
             CacheBeProxy proxy = new CacheBeProxy();
@@ -90,7 +98,8 @@ public class SqlCache extends Cache {
                 dataSize += value.getDataSize();
             }
             LOG.info("update cache model {}, queryid {}, sqlkey {}, value count {}, row count {}, data size {}",
-                    CacheAnalyzer.CacheMode.Sql, DebugUtil.printId(queryId), DebugUtil.printId(updateRequest.getSqlKey()),
+                    CacheAnalyzer.CacheMode.Sql, DebugUtil.printId(queryId),
+                    DebugUtil.printId(updateRequest.getSqlKey()),
                     updateRequest.getValuesCount(), rowCount, dataSize);
         }
     }

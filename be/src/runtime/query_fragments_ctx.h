@@ -56,13 +56,31 @@ public:
         if (cpu_limit > 0) {
             // For now, cpu_limit will be the max concurrency of the scan thread pool token.
             _thread_token = _exec_env->limited_scan_thread_pool()->new_token(
-                    ThreadPool::ExecutionMode::CONCURRENT,
-                    cpu_limit);
+                    ThreadPool::ExecutionMode::CONCURRENT, cpu_limit);
         }
     }
+    void set_serial_thread_token() {
+        _serial_thread_token = _exec_env->limited_scan_thread_pool()->new_token(
+                ThreadPool::ExecutionMode::SERIAL, 1);
+    }
 
-    ThreadPoolToken* get_token() {
-        return _thread_token.get();
+    ThreadPoolToken* get_token() { return _thread_token.get(); }
+
+    ThreadPoolToken* get_serial_token() { return _serial_thread_token.get(); }
+
+    void set_ready_to_execute() {
+        {
+            std::lock_guard<std::mutex> l(_start_lock);
+            _ready_to_execute = true;
+        }
+        _start_cond.notify_all();
+    }
+
+    void wait_for_start() {
+        std::unique_lock<std::mutex> l(_start_lock);
+        while (!_ready_to_execute.load()) {
+            _start_cond.wait(l);
+        }
     }
 
 public:
@@ -84,6 +102,7 @@ public:
     std::atomic<int> fragment_num;
     int timeout_second;
     ObjectPool obj_pool;
+
 private:
     ExecEnv* _exec_env;
     DateTimeValue _start_time;
@@ -94,7 +113,17 @@ private:
     // So that we can control the max thread that a query can be used to execute.
     // If this token is not set, the scanner will be executed in "_scan_thread_pool" in exec env.
     std::unique_ptr<ThreadPoolToken> _thread_token;
+
+    // A token used to submit olap scanner to the "_limited_scan_thread_pool" serially, it used for
+    // query like `select * limit 1`, this query used for limit the max scaner thread to 1 to avoid
+    // this query cost too much resource
+    std::unique_ptr<ThreadPoolToken> _serial_thread_token;
+
+    std::mutex _start_lock;
+    std::condition_variable _start_cond;
+    // Only valid when _need_wait_execution_trigger is set to true in FragmentExecState.
+    // And all fragments of this query will start execution when this is set to true.
+    std::atomic<bool> _ready_to_execute {false};
 };
 
-} // end of namespace
-
+} // namespace doris

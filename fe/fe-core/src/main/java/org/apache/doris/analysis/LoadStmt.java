@@ -17,8 +17,8 @@
 
 package org.apache.doris.analysis;
 
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.common.AnalysisException;
@@ -36,7 +36,6 @@ import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.util.List;
@@ -81,6 +80,7 @@ public class LoadStmt extends DdlStmt {
     public static final String TIMEZONE = "timezone";
     public static final String LOAD_PARALLELISM = "load_parallelism";
     public static final String SEND_BATCH_PARALLELISM = "send_batch_parallelism";
+    public static final String LOAD_TO_SINGLE_TABLET = "load_to_single_tablet";
 
     // for load data from Baidu Object Store(BOS)
     public static final String BOS_ENDPOINT = "bos_endpoint";
@@ -89,8 +89,8 @@ public class LoadStmt extends DdlStmt {
 
     // mini load params
     public static final String KEY_IN_PARAM_COLUMNS = "columns";
-    public static final String KEY_IN_PARAM_SET= "set";
-    public static final String KEY_IN_PARAM_HLL= "hll";
+    public static final String KEY_IN_PARAM_SET = "set";
+    public static final String KEY_IN_PARAM_HLL = "hll";
     public static final String KEY_IN_PARAM_COLUMN_SEPARATOR = "column_separator";
     public static final String KEY_IN_PARAM_LINE_DELIMITER = "line_delimiter";
     public static final String KEY_IN_PARAM_PARTITIONS = "partitions";
@@ -124,7 +124,7 @@ public class LoadStmt extends DdlStmt {
 
     private EtlJobType etlJobType = EtlJobType.UNKNOWN;
 
-    public final static ImmutableMap<String, Function> PROPERTIES_MAP = new ImmutableMap.Builder<String, Function>()
+    public static final ImmutableMap<String, Function> PROPERTIES_MAP = new ImmutableMap.Builder<String, Function>()
             .put(TIMEOUT_PROPERTY, new Function<String, Long>() {
                 @Override
                 public @Nullable Long apply(@Nullable String s) {
@@ -171,6 +171,12 @@ public class LoadStmt extends DdlStmt {
                 @Override
                 public @Nullable String apply(@Nullable String s) {
                     return s;
+                }
+            })
+            .put(LOAD_TO_SINGLE_TABLET, new Function<String, Boolean>() {
+                @Override
+                public @Nullable Boolean apply(@Nullable String s) {
+                    return Boolean.valueOf(s);
                 }
             })
             .build();
@@ -329,9 +335,10 @@ public class LoadStmt extends DdlStmt {
             if (dataDescription.isLoadFromTable()) {
                 isLoadFromTable = true;
             }
-            Database db = Catalog.getCurrentCatalog().getDbOrAnalysisException(label.getDbName());
+            Database db = analyzer.getEnv().getInternalCatalog().getDbOrAnalysisException(label.getDbName());
             OlapTable table = db.getOlapTableOrAnalysisException(dataDescription.getTableName());
-            if (dataDescription.getMergeType() != LoadTask.MergeType.APPEND && table.getKeysType() != KeysType.UNIQUE_KEYS) {
+            if (dataDescription.getMergeType() != LoadTask.MergeType.APPEND
+                    && table.getKeysType() != KeysType.UNIQUE_KEYS) {
                 throw new AnalysisException("load by MERGE or DELETE is only supported in unique tables.");
             }
             if (dataDescription.getMergeType() != LoadTask.MergeType.APPEND && !table.hasDeleteSign()) {
@@ -340,9 +347,9 @@ public class LoadStmt extends DdlStmt {
             if (brokerDesc != null && !brokerDesc.isMultiLoadBroker()) {
                 for (int i = 0; i < dataDescription.getFilePaths().size(); i++) {
                     dataDescription.getFilePaths().set(i,
-                        brokerDesc.convertPathToS3(dataDescription.getFilePaths().get(i)));
+                            brokerDesc.convertPathToS3(dataDescription.getFilePaths().get(i)));
                     dataDescription.getFilePaths().set(i,
-                        ExportStmt.checkPath(dataDescription.getFilePaths().get(i), brokerDesc.getStorageType()));
+                            ExportStmt.checkPath(dataDescription.getFilePaths().get(i), brokerDesc.getStorageType()));
                 }
             }
         }
@@ -363,7 +370,7 @@ public class LoadStmt extends DdlStmt {
                 throw new AnalysisException("Spark Load is coming soon");
             }
             // check resource usage privilege
-            if (!Catalog.getCurrentCatalog().getAuth().checkResourcePriv(ConnectContext.get(),
+            if (!Env.getCurrentEnv().getAuth().checkResourcePriv(ConnectContext.get(),
                                                                          resourceDesc.getName(),
                                                                          PrivPredicate.USAGE)) {
                 throw new AnalysisException("USAGE denied to user '" + ConnectContext.get().getQualifiedUser()

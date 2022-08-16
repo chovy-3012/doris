@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef DORIS_BE_RUNTIME_DATETIME_VALUE_H
-#define DORIS_BE_RUNTIME_DATETIME_VALUE_H
+#pragma once
 
 #include <re2/re2.h>
 #include <stdint.h>
@@ -30,6 +29,7 @@
 #include "udf/udf.h"
 #include "util/hash_util.hpp"
 #include "util/timezone_utils.h"
+#include "vec/runtime/vdatetime_value.h"
 
 namespace doris {
 
@@ -288,11 +288,11 @@ public:
         case YEAR: {
             int year = (ts_value2.year() - ts_value1.year());
             if (year > 0) {
-                year -= (ts_value2.to_int64() % 10000000000 - ts_value1.to_int64() % 10000000000) <
-                        0;
+                year -= (ts_value2.to_datetime_int64() % 10000000000 -
+                         ts_value1.to_datetime_int64() % 10000000000) < 0;
             } else if (year < 0) {
-                year += (ts_value2.to_int64() % 10000000000 - ts_value1.to_int64() % 10000000000) >
-                        0;
+                year += (ts_value2.to_datetime_int64() % 10000000000 -
+                         ts_value1.to_datetime_int64() % 10000000000) > 0;
             }
             return year;
         }
@@ -300,9 +300,11 @@ public:
             int month = (ts_value2.year() - ts_value1.year()) * 12 +
                         (ts_value2.month() - ts_value1.month());
             if (month > 0) {
-                month -= (ts_value2.to_int64() % 100000000 - ts_value1.to_int64() % 100000000) < 0;
+                month -= (ts_value2.to_datetime_int64() % 100000000 -
+                          ts_value1.to_datetime_int64() % 100000000) < 0;
             } else if (month < 0) {
-                month += (ts_value2.to_int64() % 100000000 - ts_value1.to_int64() % 100000000) > 0;
+                month += (ts_value2.to_datetime_int64() % 100000000 -
+                          ts_value1.to_datetime_int64() % 100000000) > 0;
             }
             return month;
         }
@@ -357,7 +359,7 @@ public:
         return true;
     };
 
-    inline uint64_t daynr() const { return calc_daynr(_year, _month, _day); }
+    uint64_t daynr() const { return calc_daynr(_year, _month, _day); }
 
     // Calculate how many days since 0000-01-01
     // 0000-01-01 is 1st B.C.
@@ -399,8 +401,8 @@ public:
     void to_datetime() { _type = TIME_DATETIME; }
 
     // Weekday, from 0(Mon) to 6(Sun)
-    inline uint8_t weekday() const { return calc_weekday(daynr(), false); }
-    inline auto day_of_week() const { return (weekday() + 1) % 7 + 1; }
+    uint8_t weekday() const { return calc_weekday(daynr(), false); }
+    auto day_of_week() const { return (weekday() + 1) % 7 + 1; }
 
     // The bits in week_format has the following meaning:
     // WEEK_MONDAY_FIRST (0)
@@ -412,7 +414,7 @@ public:
     // WEEK_YEAR (1)
     //  If not set:
     //      Week is in range 0-53
-    //      Week 0 is returned for the the last week of the previous year (for
+    //      Week 0 is returned for the last week of the previous year (for
     //      a date at start of january) In this case one can get 53 for the
     //      first week of next year.  This flag ensures that the week is
     //      relevant for the given year. Note that this flag is only
@@ -563,9 +565,36 @@ public:
                _month > 0 && _day > 0;
     }
 
+    template <typename T>
+    void convert_from_date_v2(doris::vectorized::DateV2Value<T>* dt) {
+        if constexpr (doris::vectorized::DateV2Value<T>::is_datetime) {
+            this->_type = TIME_DATETIME;
+            this->_hour = dt->hour();
+            this->_minute = dt->minute();
+            this->_second = dt->second();
+        } else {
+            this->_type = TIME_DATE;
+            this->_hour = 0;
+            this->_minute = 0;
+            this->_second = 0;
+        }
+        this->_neg = 0;
+        this->_year = dt->year();
+        this->_month = dt->month();
+        this->_day = dt->day();
+        this->_microsecond = 0;
+    }
+
+    template <typename T>
+    void convert_to_date_v2(doris::vectorized::DateV2Value<T>* dt) {
+        dt->set_time(dt->year(), dt->month(), dt->_day, dt->hour(), dt->minute(), dt->second(), 0);
+    }
+
 private:
     // Used to make sure sizeof DateTimeValue
     friend class UnusedClass;
+    friend void doris::vectorized::VecDateTimeValue::convert_vec_dt_to_dt(DateTimeValue* dt);
+    friend void doris::vectorized::VecDateTimeValue::convert_dt_to_vec_dt(DateTimeValue* dt);
 
     void from_packed_time(int64_t packed_time) {
         _microsecond = packed_time % (1LL << 24);
@@ -675,5 +704,3 @@ struct hash<doris::DateTimeValue> {
     size_t operator()(const doris::DateTimeValue& v) const { return doris::hash_value(v); }
 };
 } // namespace std
-
-#endif

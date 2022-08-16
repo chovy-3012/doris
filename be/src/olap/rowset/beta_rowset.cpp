@@ -17,155 +17,258 @@
 
 #include "olap/rowset/beta_rowset.h"
 
+#include <fmt/core.h>
+#include <glog/logging.h>
 #include <stdio.h>  // for remove()
 #include <unistd.h> // for link()
 #include <util/file_utils.h>
 
-#include <set>
-
+#include "common/status.h"
 #include "gutil/strings/substitute.h"
+#include "io/fs/s3_file_system.h"
+#include "olap/olap_define.h"
 #include "olap/rowset/beta_rowset_reader.h"
+#include "olap/tablet_schema.h"
 #include "olap/utils.h"
+#include "util/doris_metrics.h"
 
 namespace doris {
 
-std::string BetaRowset::segment_file_path(const std::string& dir, const RowsetId& rowset_id,
-                                          int segment_id) {
-    return strings::Substitute("$0/$1_$2.dat", dir, rowset_id.to_string(), segment_id);
+std::string BetaRowset::segment_file_path(int segment_id) {
+    if (is_local()) {
+        return local_segment_path(_tablet_path, rowset_id(), segment_id);
+    }
+    return remote_segment_path(_rowset_meta->tablet_id(), rowset_id(), segment_id);
 }
 
-BetaRowset::BetaRowset(const TabletSchema* schema, string rowset_path,
+std::string BetaRowset::segment_cache_path(int segment_id) {
+    // {root_path}/data/{shard_id}/{tablet_id}/{schema_hash}/{rowset_id}_{seg_num}
+    return fmt::format("{}/{}_{}", _tablet_path, rowset_id().to_string(), segment_id);
+}
+
+std::string BetaRowset::local_segment_path(const std::string& tablet_path,
+                                           const RowsetId& rowset_id, int segment_id) {
+    // {root_path}/data/{shard_id}/{tablet_id}/{schema_hash}/{rowset_id}_{seg_num}.dat
+    return fmt::format("{}/{}_{}.dat", tablet_path, rowset_id.to_string(), segment_id);
+}
+
+std::string BetaRowset::remote_segment_path(int64_t tablet_id, const std::string& rowset_id,
+                                            int segment_id) {
+    // data/{tablet_id}/{rowset_id}_{seg_num}.dat
+    return fmt::format("{}/{}/{}_{}.dat", DATA_PREFIX, tablet_id, rowset_id, segment_id);
+}
+
+std::string BetaRowset::remote_segment_path(int64_t tablet_id, const RowsetId& rowset_id,
+                                            int segment_id) {
+    // data/{tablet_id}/{rowset_id}_{seg_num}.dat
+    return fmt::format("{}/{}/{}_{}.dat", DATA_PREFIX, tablet_id, rowset_id.to_string(),
+                       segment_id);
+}
+
+BetaRowset::BetaRowset(TabletSchemaSPtr schema, const std::string& tablet_path,
                        RowsetMetaSharedPtr rowset_meta)
-        : Rowset(schema, std::move(rowset_path), std::move(rowset_meta)) {}
+        : Rowset(schema, tablet_path, std::move(rowset_meta)) {}
 
-BetaRowset::~BetaRowset() {}
+BetaRowset::~BetaRowset() = default;
 
-OLAPStatus BetaRowset::init() {
-    return OLAP_SUCCESS; // no op
+Status BetaRowset::init() {
+    return Status::OK(); // no op
 }
 
-OLAPStatus BetaRowset::do_load(bool /*use_cache*/) {
+Status BetaRowset::do_load(bool /*use_cache*/) {
     // do nothing.
     // the segments in this rowset will be loaded by calling load_segments() explicitly.
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus BetaRowset::load_segments(std::vector<segment_v2::SegmentSharedPtr>* segments) {
+Status BetaRowset::load_segments(std::vector<segment_v2::SegmentSharedPtr>* segments) {
+    auto fs = _rowset_meta->fs();
+    if (!fs || _schema == nullptr) {
+        return Status::OLAPInternalError(OLAP_ERR_INIT_FAILED);
+    }
     for (int seg_id = 0; seg_id < num_segments(); ++seg_id) {
-        std::string seg_path = segment_file_path(_rowset_path, rowset_id(), seg_id);
+        auto seg_path = segment_file_path(seg_id);
+        auto cache_path = segment_cache_path(seg_id);
         std::shared_ptr<segment_v2::Segment> segment;
-        auto s = segment_v2::Segment::open(seg_path, seg_id, _schema, &segment);
+        auto s = segment_v2::Segment::open(fs, seg_path, cache_path, seg_id, _schema, &segment);
         if (!s.ok()) {
-            LOG(WARNING) << "failed to open segment " << seg_path << " under rowset " << unique_id()
-                         << " : " << s.to_string();
-            return OLAP_ERR_ROWSET_LOAD_FAILED;
+            LOG(WARNING) << "failed to open segment. " << seg_path << " under rowset "
+                         << unique_id() << " : " << s.to_string();
+            return Status::OLAPInternalError(OLAP_ERR_ROWSET_LOAD_FAILED);
         }
         segments->push_back(std::move(segment));
     }
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus BetaRowset::create_reader(RowsetReaderSharedPtr* result) {
+Status BetaRowset::load_segment(int64_t seg_id, segment_v2::SegmentSharedPtr* segment) {
+    DCHECK(seg_id >= 0);
+    auto fs = _rowset_meta->fs();
+    if (!fs || _schema == nullptr) {
+        return Status::OLAPInternalError(OLAP_ERR_INIT_FAILED);
+    }
+    auto seg_path = segment_file_path(seg_id);
+    auto cache_path = segment_cache_path(seg_id);
+    auto s = segment_v2::Segment::open(fs, seg_path, cache_path, seg_id, _schema, segment);
+    if (!s.ok()) {
+        LOG(WARNING) << "failed to open segment. " << seg_path << " under rowset " << unique_id()
+                     << " : " << s.to_string();
+        return Status::OLAPInternalError(OLAP_ERR_ROWSET_LOAD_FAILED);
+    }
+    return Status::OK();
+}
+
+Status BetaRowset::create_reader(RowsetReaderSharedPtr* result) {
     // NOTE: We use std::static_pointer_cast for performance
     result->reset(new BetaRowsetReader(std::static_pointer_cast<BetaRowset>(shared_from_this())));
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus BetaRowset::create_reader(const std::shared_ptr<MemTracker>& parent_tracker,
-                                     std::shared_ptr<RowsetReader>* result) {
-    // NOTE: We use std::static_pointer_cast for performance
-    result->reset(new BetaRowsetReader(std::static_pointer_cast<BetaRowset>(shared_from_this()),
-                                       parent_tracker));
-    return OLAP_SUCCESS;
-}
-
-OLAPStatus BetaRowset::split_range(const RowCursor& start_key, const RowCursor& end_key,
-                                   uint64_t request_block_row_count, size_t key_num,
-                                   std::vector<OlapTuple>* ranges) {
+Status BetaRowset::split_range(const RowCursor& start_key, const RowCursor& end_key,
+                               uint64_t request_block_row_count, size_t key_num,
+                               std::vector<OlapTuple>* ranges) {
     ranges->emplace_back(start_key.to_tuple());
     ranges->emplace_back(end_key.to_tuple());
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus BetaRowset::remove() {
+Status BetaRowset::remove() {
     // TODO should we close and remove all segment reader first?
-    LOG(INFO) << "begin to remove files in rowset " << unique_id()
-              << ", version:" << start_version() << "-" << end_version()
-              << ", tabletid:" << _rowset_meta->tablet_id();
+    VLOG_NOTICE << "begin to remove files in rowset " << unique_id()
+                << ", version:" << start_version() << "-" << end_version()
+                << ", tabletid:" << _rowset_meta->tablet_id();
+    auto fs = _rowset_meta->fs();
+    if (!fs) {
+        return Status::OLAPInternalError(OLAP_ERR_INIT_FAILED);
+    }
     bool success = true;
+    Status st;
     for (int i = 0; i < num_segments(); ++i) {
-        std::string path = segment_file_path(_rowset_path, rowset_id(), i);
-        LOG(INFO) << "deleting " << path;
-        // TODO(lingbin): use Env API
-        if (::remove(path.c_str()) != 0) {
-            char errmsg[64];
-            LOG(WARNING) << "failed to delete file. err=" << strerror_r(errno, errmsg, 64)
-                         << ", path=" << path;
+        auto seg_path = segment_file_path(i);
+        LOG(INFO) << "deleting " << seg_path;
+        st = fs->delete_file(seg_path);
+        if (!st.ok()) {
+            LOG(WARNING) << st.to_string();
             success = false;
         }
     }
     if (!success) {
         LOG(WARNING) << "failed to remove files in rowset " << unique_id();
-        return OLAP_ERR_ROWSET_DELETE_FILE_FAILED;
+        return Status::OLAPInternalError(OLAP_ERR_ROWSET_DELETE_FILE_FAILED);
     }
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
 void BetaRowset::do_close() {
     // do nothing.
 }
 
-OLAPStatus BetaRowset::link_files_to(const std::string& dir, RowsetId new_rowset_id) {
+Status BetaRowset::link_files_to(const std::string& dir, RowsetId new_rowset_id) {
+    DCHECK(is_local());
+    auto fs = _rowset_meta->fs();
+    if (!fs) {
+        return Status::OLAPInternalError(OLAP_ERR_INIT_FAILED);
+    }
     for (int i = 0; i < num_segments(); ++i) {
-        std::string dst_link_path = segment_file_path(dir, new_rowset_id, i);
+        auto dst_path = local_segment_path(dir, new_rowset_id, i);
         // TODO(lingbin): use Env API? or EnvUtil?
-        if (FileUtils::check_exist(dst_link_path)) {
-            LOG(WARNING) << "failed to create hard link, file already exist: " << dst_link_path;
-            return OLAP_ERR_FILE_ALREADY_EXIST;
+        if (FileUtils::check_exist(dst_path)) {
+            LOG(WARNING) << "failed to create hard link, file already exist: " << dst_path;
+            return Status::OLAPInternalError(OLAP_ERR_FILE_ALREADY_EXIST);
         }
-        std::string src_file_path = segment_file_path(_rowset_path, rowset_id(), i);
+        auto src_path = segment_file_path(i);
         // TODO(lingbin): how external storage support link?
         //     use copy? or keep refcount to avoid being delete?
-        if (link(src_file_path.c_str(), dst_link_path.c_str()) != 0) {
-            LOG(WARNING) << "fail to create hard link. from=" << src_file_path << ", "
-                         << "to=" << dst_link_path << ", "
-                         << "errno=" << Errno::no();
-            return OLAP_ERR_OS_ERROR;
+        if (!fs->link_file(src_path, dst_path).ok()) {
+            LOG(WARNING) << "fail to create hard link. from=" << src_path << ", "
+                         << "to=" << dst_path << ", errno=" << Errno::no();
+            return Status::OLAPInternalError(OLAP_ERR_OS_ERROR);
         }
     }
-    return OLAP_SUCCESS;
+    return Status::OK();
 }
 
-OLAPStatus BetaRowset::copy_files_to(const std::string& dir) {
+Status BetaRowset::copy_files_to(const std::string& dir, const RowsetId& new_rowset_id) {
+    DCHECK(is_local());
     for (int i = 0; i < num_segments(); ++i) {
-        std::string dst_path = segment_file_path(dir, rowset_id(), i);
-        if (FileUtils::check_exist(dst_path)) {
+        auto dst_path = local_segment_path(dir, new_rowset_id, i);
+        Status status = Env::Default()->path_exists(dst_path);
+        if (status.ok()) {
             LOG(WARNING) << "file already exist: " << dst_path;
-            return OLAP_ERR_FILE_ALREADY_EXIST;
+            return Status::OLAPInternalError(OLAP_ERR_FILE_ALREADY_EXIST);
         }
-        std::string src_path = segment_file_path(_rowset_path, rowset_id(), i);
-        if (copy_file(src_path, dst_path) != OLAP_SUCCESS) {
+        if (!status.is_not_found()) {
+            LOG(WARNING) << "file check exist error: " << dst_path;
+            return Status::OLAPInternalError(OLAP_ERR_OS_ERROR);
+        }
+        auto src_path = segment_file_path(i);
+        if (!Env::Default()->copy_path(src_path, dst_path).ok()) {
             LOG(WARNING) << "fail to copy file. from=" << src_path << ", to=" << dst_path
                          << ", errno=" << Errno::no();
-            return OLAP_ERR_OS_ERROR;
+            return Status::OLAPInternalError(OLAP_ERR_OS_ERROR);
         }
     }
-    return OLAP_SUCCESS;
+    return Status::OK();
+}
+
+Status BetaRowset::upload_to(io::RemoteFileSystem* dest_fs, const RowsetId& new_rowset_id) {
+    DCHECK(is_local());
+    if (num_segments() < 1) {
+        return Status::OK();
+    }
+    std::vector<io::Path> local_paths;
+    local_paths.reserve(num_segments());
+    std::vector<io::Path> dest_paths;
+    dest_paths.reserve(num_segments());
+    for (int i = 0; i < num_segments(); ++i) {
+        // Note: Here we use relative path for remote.
+        dest_paths.push_back(remote_segment_path(_rowset_meta->tablet_id(), new_rowset_id, i));
+        local_paths.push_back(segment_file_path(i));
+    }
+    auto st = dest_fs->batch_upload(local_paths, dest_paths);
+    if (st.ok()) {
+        DorisMetrics::instance()->upload_rowset_count->increment(1);
+        DorisMetrics::instance()->upload_total_byte->increment(data_disk_size());
+    } else {
+        DorisMetrics::instance()->upload_fail_count->increment(1);
+    }
+    return st;
 }
 
 bool BetaRowset::check_path(const std::string& path) {
-    std::set<std::string> valid_paths;
     for (int i = 0; i < num_segments(); ++i) {
-        valid_paths.insert(segment_file_path(_rowset_path, rowset_id(), i));
+        auto seg_path = segment_file_path(i);
+        if (seg_path == path) {
+            return true;
+        }
     }
-    return valid_paths.find(path) != valid_paths.end();
+    return false;
 }
 
 bool BetaRowset::check_file_exist() {
     for (int i = 0; i < num_segments(); ++i) {
-        std::string data_file = segment_file_path(_rowset_path, rowset_id(), i);
-        if (!FileUtils::check_exist(data_file)) {
-            LOG(WARNING) << "data file not existed: " << data_file << " for rowset_id: " << rowset_id();
+        auto seg_path = segment_file_path(i);
+        if (!Env::Default()->path_exists(seg_path).ok()) {
+            LOG(WARNING) << "data file not existed: " << seg_path
+                         << " for rowset_id: " << rowset_id();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool BetaRowset::check_current_rowset_segment() {
+    auto fs = _rowset_meta->fs();
+    if (!fs) {
+        return false;
+    }
+    for (int seg_id = 0; seg_id < num_segments(); ++seg_id) {
+        auto seg_path = segment_file_path(seg_id);
+        auto cache_path = segment_cache_path(seg_id);
+        std::shared_ptr<segment_v2::Segment> segment;
+        auto s = segment_v2::Segment::open(fs, seg_path, cache_path, seg_id, _schema, &segment);
+        if (!s.ok()) {
+            LOG(WARNING) << "segment can not be opened. file=" << seg_path;
             return false;
         }
     }

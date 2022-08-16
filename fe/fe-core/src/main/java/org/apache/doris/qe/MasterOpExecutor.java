@@ -60,16 +60,16 @@ public class MasterOpExecutor {
     public void execute() throws Exception {
         forward();
         LOG.info("forwarding to master get result max journal id: {}", result.maxJournalId);
-        ctx.getCatalog().getJournalObservable().waitOn(result.maxJournalId, waitTimeoutMs);
+        ctx.getEnv().getJournalObservable().waitOn(result.maxJournalId, waitTimeoutMs);
     }
-    
+
     // Send request to Master
     private void forward() throws Exception {
-        if (!ctx.getCatalog().isReady()) {
+        if (!ctx.getEnv().isReady()) {
             throw new Exception("Node catalog is not ready, please wait for a while.");
         }
-        String masterHost = ctx.getCatalog().getMasterIp();
-        int masterRpcPort = ctx.getCatalog().getMasterRpcPort();
+        String masterHost = ctx.getEnv().getMasterIp();
+        int masterRpcPort = ctx.getEnv().getMasterRpcPort();
         TNetworkAddress thriftAddress = new TNetworkAddress(masterHost, masterRpcPort);
 
         FrontendService.Client client = null;
@@ -105,7 +105,7 @@ public class MasterOpExecutor {
         try {
             result = client.forward(params);
             isReturnToPool = true;
-        } catch (TTransportException e) { 
+        } catch (TTransportException e) {
             boolean ok = ClientPool.frontendPool.reopen(client, thriftTimeoutMs);
             if (!ok) {
                 throw e;
@@ -113,7 +113,7 @@ public class MasterOpExecutor {
             if (shouldNotRetry || e.getType() == TTransportException.TIMED_OUT) {
                 throw e;
             } else {
-                LOG.warn("Forward statement "+ ctx.getStmtId() +" to Master " + thriftAddress + " twice", e);
+                LOG.warn("Forward statement " + ctx.getStmtId() + " to Master " + thriftAddress + " twice", e);
                 result = client.forward(params);
                 isReturnToPool = true;
             }
@@ -141,7 +141,7 @@ public class MasterOpExecutor {
         }
     }
 
-    
+
     public ShowResultSet getProxyResultSet() {
         if (result == null) {
             return null;
@@ -152,9 +152,8 @@ public class MasterOpExecutor {
             return null;
         }
     }
-    
+
     public void setResult(TMasterOpResult result) {
         this.result = result;
     }
 }
-

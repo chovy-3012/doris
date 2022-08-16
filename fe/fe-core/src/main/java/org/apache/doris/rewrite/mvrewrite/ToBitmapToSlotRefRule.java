@@ -28,9 +28,10 @@ import org.apache.doris.catalog.AggregateType;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.FunctionSet;
 import org.apache.doris.catalog.OlapTable;
-import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.TableIf;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.rewrite.ExprRewriteRule;
+import org.apache.doris.rewrite.ExprRewriter;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -46,7 +47,7 @@ public class ToBitmapToSlotRefRule implements ExprRewriteRule {
     public static final ExprRewriteRule INSTANCE = new ToBitmapToSlotRefRule();
 
     @Override
-    public Expr apply(Expr expr, Analyzer analyzer) throws AnalysisException {
+    public Expr apply(Expr expr, Analyzer analyzer, ExprRewriter.ClauseType clauseType) throws AnalysisException {
         SlotRef queryColumnSlotRef;
         Column mvColumn;
 
@@ -79,7 +80,7 @@ public class ToBitmapToSlotRefRule implements ExprRewriteRule {
             return expr;
         }
         Column column = queryColumnSlotRef.getColumn();
-        Table table = queryColumnSlotRef.getTable();
+        TableIf table = queryColumnSlotRef.getTable();
         if (column == null || table == null || !(table instanceof OlapTable)) {
             return expr;
         }

@@ -14,9 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/sorted-run-merger.h
+// and modified by Doris
 
-#ifndef DORIS_BE_SRC_RUNTIME_SORTED_RUN_MERGER_H
-#define DORIS_BE_SRC_RUNTIME_SORTED_RUN_MERGER_H
+#pragma once
 
 #include <mutex>
 
@@ -109,8 +111,7 @@ protected:
 class ChildSortedRunMerger : public SortedRunMerger {
 public:
     ChildSortedRunMerger(const TupleRowComparator& compare_less_than, RowDescriptor* row_desc,
-                         RuntimeProfile* profile, MemTracker* _parent, uint32_t row_batch_size,
-                         bool deep_copy_input);
+                         RuntimeProfile* profile, uint32_t row_batch_size, bool deep_copy_input);
 
     Status get_batch(RowBatch** output_batch) override;
 
@@ -121,11 +122,7 @@ private:
     // The data in merger is exhaust
     bool _eos = false;
 
-    MemTracker* _parent;
-
     uint32_t _row_batch_size;
 };
 
 } // namespace doris
-
-#endif // DORIS_BE_SRC_RUNTIME_SORTED_RUN_MERGER_H

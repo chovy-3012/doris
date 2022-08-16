@@ -17,25 +17,27 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.ScalarType;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.common.AnalysisException;
 import org.apache.doris.common.jmockit.Deencapsulation;
+import org.apache.doris.datasource.InternalCatalog;
 
 import com.google.common.collect.Maps;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
 import mockit.Expectations;
 import mockit.Injectable;
 import mockit.Mocked;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 public class ExprTest {
+    private static final String internalCtl = InternalCatalog.INTERNAL_CATALOG_NAME;
 
     @Test
     public void testGetTableNameToColumnNames(@Mocked Analyzer analyzer,
@@ -45,8 +47,8 @@ public class ExprTest {
                                               @Injectable TupleDescriptor tupleDescriptor2,
                                               @Injectable Table tableA,
                                               @Injectable Table tableB) throws AnalysisException {
-        TableName tableAName = new TableName("test", "tableA");
-        TableName tableBName = new TableName("test", "tableB");
+        TableName tableAName = new TableName(internalCtl, "test", "tableA");
+        TableName tableBName = new TableName(internalCtl, "test", "tableB");
         SlotRef tableAColumn1 = new SlotRef(tableAName, "c1");
         SlotRef tableBColumn1 = new SlotRef(tableBName, "c1");
         Expr whereExpr = new BinaryPredicate(BinaryPredicate.Operator.EQ, tableAColumn1, tableBColumn1);
@@ -94,7 +96,7 @@ public class ExprTest {
         // uncheckedCastTo should return new object
 
         // date
-        DateLiteral dateLiteral = new DateLiteral(2020, 4, 5, 12, 0, 5);
+        DateLiteral dateLiteral = new DateLiteral(2020, 4, 5, 12, 0, 5, Type.DATETIME);
         Assert.assertTrue(dateLiteral.getType().equals(Type.DATETIME));
         DateLiteral castLiteral = (DateLiteral) dateLiteral.uncheckedCastTo(Type.DATE);
         Assert.assertFalse(dateLiteral == castLiteral);
@@ -109,7 +111,7 @@ public class ExprTest {
         Assert.assertEquals(0, dateLiteral.getMinute());
         Assert.assertEquals(5, dateLiteral.getSecond());
 
-        DateLiteral dateLiteral2 = new DateLiteral(2020, 4, 5);
+        DateLiteral dateLiteral2 = new DateLiteral(2020, 4, 5, Type.DATE);
         Assert.assertTrue(dateLiteral2.getType().equals(Type.DATE));
         castLiteral = (DateLiteral) dateLiteral2.uncheckedCastTo(Type.DATETIME);
         Assert.assertFalse(dateLiteral2 == castLiteral);
@@ -167,6 +169,10 @@ public class ExprTest {
         Expr r2 = new DateLiteral(2020, 10, 21);
         Expr r3 = new DateLiteral(2020, 10, 22);
         Expr r4 = new DateLiteral(2020, 10, 23);
+        Expr r5 = new DateLiteral(2020, 10, 23, Type.DATEV2);
+        Expr r6 = new DateLiteral(2020, 10, 23, 0, 0, 0, Type.DATETIME);
+        Expr r7 = new DateLiteral(2020, 10, 23, 0, 0, 0, Type.DATETIMEV2);
+        Expr r8 = new DateLiteral(2020, 10, 23, 0, 0, 0, ScalarType.createDatetimeV2Type(3));
 
         //list1 equal list2
         List<Expr> list1 = new ArrayList<>();
@@ -174,9 +180,17 @@ public class ExprTest {
         list1.add(r1);
         list1.add(r2);
         list1.add(r3);
+        list1.add(r5);
+        list1.add(r6);
+        list1.add(r7);
+        list1.add(r8);
         list2.add(r1);
         list2.add(r2);
         list2.add(r3);
+        list2.add(r5);
+        list2.add(r6);
+        list2.add(r7);
+        list2.add(r8);
         Assert.assertTrue(Expr.equalSets(list1, list2));
 
         //list3 not equal list4
@@ -186,7 +200,7 @@ public class ExprTest {
 
     @Test
     public void testSrcSlotRef(@Injectable SlotDescriptor slotDescriptor) {
-        TableName tableName = new TableName("db1", "table1");
+        TableName tableName = new TableName(internalCtl, "db1", "table1");
         SlotRef slotRef = new SlotRef(tableName, "c1");
         slotRef.setDesc(slotDescriptor);
         Deencapsulation.setField(slotRef, "isAnalyzed", true);

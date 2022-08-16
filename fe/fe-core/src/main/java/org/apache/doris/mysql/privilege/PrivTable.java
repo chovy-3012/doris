@@ -25,7 +25,6 @@ import org.apache.doris.common.io.Text;
 import org.apache.doris.common.io.Writable;
 
 import com.google.common.collect.Lists;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -45,6 +44,27 @@ public abstract class PrivTable implements Writable {
 
     // see PrivEntry for more detail
     protected boolean isClassNameWrote = false;
+
+    /*
+     * Check if user@host has specified privilege
+     */
+    public boolean hasPriv(String host, String user, PrivPredicate wanted) {
+        for (PrivEntry entry : entries) {
+            // check host
+            if (!entry.isAnyHost() && !entry.getHostPattern().match(host)) {
+                continue;
+            }
+            // check user
+            if (!entry.isAnyUser() && !entry.getUserPattern().match(user)) {
+                continue;
+            }
+            // check priv
+            if (entry.privSet.satisfy(wanted)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /*
      * Add an entry to priv table.

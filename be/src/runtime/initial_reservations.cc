@@ -14,10 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.10.0/be/src/runtime/initial-reservations.cc
+// and modified by Doris
 
 #include "runtime/initial_reservations.h"
-
-#include <gflags/gflags.h>
 
 #include <limits>
 #include <mutex>
@@ -25,7 +26,6 @@
 #include "common/logging.h"
 #include "common/object_pool.h"
 #include "runtime/exec_env.h"
-#include "runtime/mem_tracker.h"
 #include "util/pretty_printer.h"
 #include "util/uid_util.h"
 
@@ -35,13 +35,9 @@ namespace doris {
 
 InitialReservations::InitialReservations(ObjectPool* obj_pool,
                                          ReservationTracker* query_reservation,
-                                         std::shared_ptr<MemTracker> query_mem_tracker,
                                          int64_t initial_reservation_total_claims)
-        : initial_reservation_mem_tracker_(
-                  MemTracker::CreateTracker(-1, "InitialReservations", query_mem_tracker, false)),
-          remaining_initial_reservation_claims_(initial_reservation_total_claims) {
+        : remaining_initial_reservation_claims_(initial_reservation_total_claims) {
     initial_reservations_.InitChildTracker(nullptr, query_reservation,
-                                           initial_reservation_mem_tracker_.get(),
                                            numeric_limits<int64_t>::max());
 }
 
@@ -83,7 +79,5 @@ void InitialReservations::Return(BufferPool::ClientHandle* src, int64_t bytes) {
 
 void InitialReservations::ReleaseResources() {
     initial_reservations_.Close();
-    // TODO(HW): Close() is private. make this tracker shared later
-    // initial_reservation_mem_tracker_->Close();
 }
 } // namespace doris

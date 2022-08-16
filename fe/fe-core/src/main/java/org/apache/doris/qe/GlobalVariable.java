@@ -19,6 +19,7 @@ package org.apache.doris.qe;
 
 import org.apache.doris.common.Version;
 import org.apache.doris.common.util.TimeUtils;
+import org.apache.doris.mysql.MysqlHandshakePacket;
 
 import com.google.common.collect.Lists;
 
@@ -43,11 +44,11 @@ public final class GlobalVariable {
     public static final String PERFORMANCE_SCHEMA = "performance_schema";
 
     @VariableMgr.VarAttr(name = VERSION_COMMENT, flag = VariableMgr.READ_ONLY)
-    public static String versionComment = "Doris version " +
-            Version.DORIS_BUILD_VERSION + "-" + Version.DORIS_BUILD_SHORT_HASH;
+    public static String versionComment = "Doris version "
+            + Version.DORIS_BUILD_VERSION + "-" + Version.DORIS_BUILD_SHORT_HASH;
 
     @VariableMgr.VarAttr(name = VERSION, flag = VariableMgr.READ_ONLY)
-    public static String version = "5.1.0";
+    public static String version = MysqlHandshakePacket.SERVER_VERSION;
 
     // 0: table names are stored as specified and comparisons are case sensitive.
     // 1: table names are stored in lowercase on disk and comparisons are not case sensitive.
@@ -63,7 +64,7 @@ public final class GlobalVariable {
 
     // A string to be executed by the server for each client that connects
     @VariableMgr.VarAttr(name = INIT_CONNECT, flag = VariableMgr.GLOBAL)
-    public volatile static String initConnect = "";
+    public static volatile String initConnect = "";
 
     // A string to be executed by the server for each client that connects
     @VariableMgr.VarAttr(name = SYSTEM_TIME_ZONE, flag = VariableMgr.READ_ONLY)
@@ -71,10 +72,10 @@ public final class GlobalVariable {
 
     // The amount of memory allocated for caching query results
     @VariableMgr.VarAttr(name = QUERY_CACHE_SIZE, flag = VariableMgr.GLOBAL)
-    public volatile static long queryCacheSize = 1048576;
+    public static volatile long queryCacheSize = 1048576;
 
     @VariableMgr.VarAttr(name = DEFAULT_ROWSET_TYPE, flag = VariableMgr.GLOBAL)
-    public volatile static String defaultRowsetType = "beta";
+    public static volatile String defaultRowsetType = "beta";
 
     // add performance schema to support MYSQL JDBC 8.0.16 or later versions.
     @VariableMgr.VarAttr(name = PERFORMANCE_SCHEMA, flag = VariableMgr.READ_ONLY)

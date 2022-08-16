@@ -17,7 +17,6 @@
 
 package org.apache.doris.alter;
 
-import org.apache.doris.alter.AlterJob.JobState;
 import org.apache.doris.analysis.AddRollupClause;
 import org.apache.doris.analysis.AlterClause;
 import org.apache.doris.analysis.CancelAlterTableStmt;
@@ -27,17 +26,19 @@ import org.apache.doris.analysis.DropMaterializedViewStmt;
 import org.apache.doris.analysis.DropRollupClause;
 import org.apache.doris.analysis.MVColumnItem;
 import org.apache.doris.catalog.AggregateType;
-import org.apache.doris.catalog.Catalog;
 import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
+import org.apache.doris.catalog.Env;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.MaterializedIndex.IndexState;
+import org.apache.doris.catalog.MetaIdGenerator.IdGeneratorBuffer;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.OlapTable.OlapTableState;
 import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.PrimitiveType;
 import org.apache.doris.catalog.Replica;
+import org.apache.doris.catalog.Replica.ReplicaState;
 import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.Tablet;
 import org.apache.doris.catalog.TabletInvertedIndex;
@@ -47,6 +48,7 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.MetaNotFoundException;
+import org.apache.doris.common.util.IdGeneratorUtil;
 import org.apache.doris.common.util.ListComparator;
 import org.apache.doris.common.util.PropertyAnalyzer;
 import org.apache.doris.common.util.Util;
@@ -63,7 +65,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-
+import com.google.common.collect.Sets;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -94,7 +96,8 @@ public class MaterializedViewHandler extends AlterHandler {
     }
 
     // for batch submit rollup job, tableId -> jobId
-    // keep table's not final state job size. The job size determine's table's state, = 0 means table is normal, otherwise is rollup
+    // keep table's not final state job size. The job size determine's table's state, = 0 means table is normal,
+    // otherwise is rollup
     private Map<Long, Set<Long>> tableNotFinalStateJobMap = new ConcurrentHashMap<>();
     // keep table's running job,used for concurrency limit
     // table id -> set of running job ids
@@ -174,7 +177,7 @@ public class MaterializedViewHandler extends AlterHandler {
      */
     public void processCreateMaterializedView(CreateMaterializedViewStmt addMVClause, Database db, OlapTable olapTable)
             throws DdlException, AnalysisException {
-        olapTable.writeLock();
+        olapTable.writeLockOrDdlException();
         try {
             olapTable.checkStableAndNormal(db.getClusterName());
             if (olapTable.existTempPartitions()) {
@@ -199,14 +202,15 @@ public class MaterializedViewHandler extends AlterHandler {
             List<Column> mvColumns = checkAndPrepareMaterializedView(addMVClause, olapTable);
 
             // Step2: create mv job
-            RollupJobV2 rollupJobV2 = createMaterializedViewJob(mvIndexName, baseIndexName, mvColumns, addMVClause
-                    .getProperties(), olapTable, db, baseIndexId, addMVClause.getMVKeysType(), addMVClause.getOrigStmt());
+            RollupJobV2 rollupJobV2 = createMaterializedViewJob(mvIndexName, baseIndexName, mvColumns,
+                    addMVClause.getProperties(), olapTable, db, baseIndexId,
+                    addMVClause.getMVKeysType(), addMVClause.getOrigStmt());
 
             addAlterJobV2(rollupJobV2);
 
             olapTable.setState(OlapTableState.ROLLUP);
 
-            Catalog.getCurrentCatalog().getEditLog().logAlterJob(rollupJobV2);
+            Env.getCurrentEnv().getEditLog().logAlterJob(rollupJobV2);
             LOG.info("finished to create materialized view job: {}", rollupJobV2.getJobId());
         } finally {
             olapTable.writeUnlock();
@@ -225,11 +229,12 @@ public class MaterializedViewHandler extends AlterHandler {
      * @throws DdlException
      * @throws AnalysisException
      */
-    public void processBatchAddRollup(List<AlterClause> alterClauses, Database db, OlapTable olapTable) throws DdlException, AnalysisException {
+    public void processBatchAddRollup(List<AlterClause> alterClauses, Database db, OlapTable olapTable)
+            throws DdlException, AnalysisException {
         Map<String, RollupJobV2> rollupNameJobMap = new LinkedHashMap<>();
         // save job id for log
         Set<Long> logJobIdSet = new HashSet<>();
-        olapTable.writeLock();
+        olapTable.writeLockOrDdlException();
         try {
             if (olapTable.existTempPartitions()) {
                 throw new DdlException("Can not alter table when there are temp partitions in table");
@@ -248,8 +253,8 @@ public class MaterializedViewHandler extends AlterHandler {
                     Map<String, String> properties = addRollupClause.getProperties();
                     if (properties == null || !properties.containsKey(PropertyAnalyzer.PROPERTIES_STORAGE_FORMAT)
                             || !properties.get(PropertyAnalyzer.PROPERTIES_STORAGE_FORMAT).equalsIgnoreCase("v2")) {
-                        throw new DdlException("Table[" + olapTable.getName() + "] can not " +
-                                "add segment v2 rollup index without setting storage format to v2.");
+                        throw new DdlException("Table[" + olapTable.getName() + "] can not "
+                                + "add segment v2 rollup index without setting storage format to v2.");
                     }
                     rollupIndexName = NEW_STORAGE_FORMAT_INDEX_NAME_PREFIX + olapTable.getName();
                     changeStorageFormat = true;
@@ -267,11 +272,12 @@ public class MaterializedViewHandler extends AlterHandler {
                 long baseIndexId = checkAndGetBaseIndex(baseIndexName, olapTable);
 
                 // step 2.2  check rollup schema
-                List<Column> rollupSchema = checkAndPrepareMaterializedView(addRollupClause, olapTable, baseIndexId, changeStorageFormat);
+                List<Column> rollupSchema = checkAndPrepareMaterializedView(
+                        addRollupClause, olapTable, baseIndexId, changeStorageFormat);
 
                 // step 3 create rollup job
-                RollupJobV2 alterJobV2 = createMaterializedViewJob(rollupIndexName, baseIndexName, rollupSchema, addRollupClause.getProperties(),
-                        olapTable, db, baseIndexId, olapTable.getKeysType(), null);
+                RollupJobV2 alterJobV2 = createMaterializedViewJob(rollupIndexName, baseIndexName, rollupSchema,
+                        addRollupClause.getProperties(), olapTable, db, baseIndexId, olapTable.getKeysType(), null);
 
                 rollupNameJobMap.put(addRollupClause.getRollupName(), alterJobV2);
                 logJobIdSet.add(alterJobV2.getJobId());
@@ -287,12 +293,12 @@ public class MaterializedViewHandler extends AlterHandler {
             batchAddAlterJobV2(rollupJobV2List);
 
             BatchAlterJobPersistInfo batchAlterJobV2 = new BatchAlterJobPersistInfo(rollupJobV2List);
-            Catalog.getCurrentCatalog().getEditLog().logBatchAlterJob(batchAlterJobV2);
+            Env.getCurrentEnv().getEditLog().logBatchAlterJob(batchAlterJobV2);
             LOG.info("finished to create materialized view job: {}", logJobIdSet);
 
         } catch (Exception e) {
             // remove tablet which has already inserted into TabletInvertedIndex
-            TabletInvertedIndex tabletInvertedIndex = Catalog.getCurrentInvertedIndex();
+            TabletInvertedIndex tabletInvertedIndex = Env.getCurrentInvertedIndex();
             for (RollupJobV2 rollupJobV2 : rollupNameJobMap.values()) {
                 for (MaterializedIndex index : rollupJobV2.getPartitionIdToRollupIndex().values()) {
                     for (Tablet tablet : index.getTablets()) {
@@ -321,10 +327,9 @@ public class MaterializedViewHandler extends AlterHandler {
      * @throws AnalysisException
      */
     private RollupJobV2 createMaterializedViewJob(String mvName, String baseIndexName,
-                                                  List<Column> mvColumns, Map<String, String> properties,
-                                                  OlapTable olapTable, Database db, long baseIndexId, KeysType mvKeysType,
-                                                  OriginStatement origStmt)
-            throws DdlException, AnalysisException {
+            List<Column> mvColumns, Map<String, String> properties,
+            OlapTable olapTable, Database db, long baseIndexId, KeysType mvKeysType,
+            OriginStatement origStmt) throws DdlException, AnalysisException {
         if (mvKeysType == null) {
             // assign rollup index's key type, same as base index's
             mvKeysType = olapTable.getKeysType();
@@ -332,7 +337,7 @@ public class MaterializedViewHandler extends AlterHandler {
         // get rollup schema hash
         int mvSchemaHash = Util.generateSchemaHash();
         // get short key column count
-        short mvShortKeyColumnCount = Catalog.calcShortKeyColumnCount(mvColumns, properties);
+        short mvShortKeyColumnCount = Env.calcShortKeyColumnCount(mvColumns, properties);
         // get timeout
         long timeoutMs = PropertyAnalyzer.analyzeTimeout(properties, Config.alter_table_timeout_second) * 1000;
 
@@ -340,9 +345,11 @@ public class MaterializedViewHandler extends AlterHandler {
         long dbId = db.getId();
         long tableId = olapTable.getId();
         int baseSchemaHash = olapTable.getSchemaHashByIndexId(baseIndexId);
-        Catalog catalog = Catalog.getCurrentCatalog();
-        long jobId = catalog.getNextId();
-        long mvIndexId = catalog.getNextId();
+        Env env = Env.getCurrentEnv();
+        long bufferSize = IdGeneratorUtil.getBufferSizeForAlterTable(olapTable, Sets.newHashSet(baseIndexId));
+        IdGeneratorBuffer idGeneratorBuffer = env.getIdGeneratorBuffer(bufferSize);
+        long jobId = idGeneratorBuffer.getNextId();
+        long mvIndexId = idGeneratorBuffer.getNextId();
         RollupJobV2 mvJob = new RollupJobV2(jobId, dbId, tableId, olapTable.getName(), timeoutMs,
                 baseIndexId, mvIndexId, baseIndexName, mvName,
                 mvColumns, baseSchemaHash, mvSchemaHash,
@@ -370,7 +377,7 @@ public class MaterializedViewHandler extends AlterHandler {
             short replicationNum = olapTable.getPartitionInfo().getReplicaAllocation(partitionId).getTotalReplicaNum();
             for (Tablet baseTablet : baseIndex.getTablets()) {
                 long baseTabletId = baseTablet.getId();
-                long mvTabletId = catalog.getNextId();
+                long mvTabletId = idGeneratorBuffer.getNextId();
 
                 Tablet newTablet = new Tablet(mvTabletId);
                 mvIndex.addTablet(newTablet, mvTabletMeta);
@@ -381,21 +388,22 @@ public class MaterializedViewHandler extends AlterHandler {
 
                 int healthyReplicaNum = 0;
                 for (Replica baseReplica : baseReplicas) {
-                    long mvReplicaId = catalog.getNextId();
+                    long mvReplicaId = idGeneratorBuffer.getNextId();
                     long backendId = baseReplica.getBackendId();
-                    if (baseReplica.getState() == Replica.ReplicaState.CLONE
-                            || baseReplica.getState() == Replica.ReplicaState.DECOMMISSION
+                    if (baseReplica.getState() == ReplicaState.CLONE
+                            || baseReplica.getState() == ReplicaState.DECOMMISSION
+                            || baseReplica.getState() == ReplicaState.COMPACTION_TOO_SLOW
                             || baseReplica.getLastFailedVersion() > 0) {
-                        LOG.info("base replica {} of tablet {} state is {}, and last failed version is {}, skip creating rollup replica",
-                                baseReplica.getId(), baseTabletId, baseReplica.getState(), baseReplica.getLastFailedVersion());
+                        LOG.info("base replica {} of tablet {} state is {}, and last failed version is {},"
+                                        + " skip creating rollup replica", baseReplica.getId(), baseTabletId,
+                                baseReplica.getState(), baseReplica.getLastFailedVersion());
                         continue;
                     }
-                    Preconditions.checkState(baseReplica.getState() == Replica.ReplicaState.NORMAL, baseReplica.getState());
+                    Preconditions.checkState(baseReplica.getState() == ReplicaState.NORMAL,
+                            baseReplica.getState());
                     // replica's init state is ALTER, so that tablet report process will ignore its report
-                    Replica mvReplica = new Replica(mvReplicaId, backendId, Replica.ReplicaState.ALTER,
-                            Partition.PARTITION_INIT_VERSION, Partition
-                            .PARTITION_INIT_VERSION_HASH,
-                            mvSchemaHash);
+                    Replica mvReplica = new Replica(mvReplicaId, backendId, ReplicaState.ALTER,
+                            Partition.PARTITION_INIT_VERSION, mvSchemaHash);
                     newTablet.addReplica(mvReplica);
                     healthyReplicaNum++;
                 } // end for baseReplica
@@ -411,7 +419,7 @@ public class MaterializedViewHandler extends AlterHandler {
                      * if the quorum of replica number is not satisfied.
                      */
                     for (Tablet tablet : addedTablets) {
-                        Catalog.getCurrentInvertedIndex().deleteTablet(tablet.getId());
+                        Env.getCurrentInvertedIndex().deleteTablet(tablet.getId());
                     }
                     throw new DdlException("tablet " + baseTabletId + " has few healthy replica: " + healthyReplicaNum);
                 }
@@ -445,7 +453,8 @@ public class MaterializedViewHandler extends AlterHandler {
         int numOfKeys = 0;
         if (olapTable.getKeysType().isAggregationFamily()) {
             if (addMVClause.getMVKeysType() != KeysType.AGG_KEYS) {
-                throw new DdlException("The materialized view of aggregation or unique table must has grouping columns");
+                throw new DdlException("The materialized view of aggregation"
+                        + " or unique table must has grouping columns");
             }
             for (MVColumnItem mvColumnItem : mvColumnItemList) {
                 String mvColumnName = mvColumnItem.getName();
@@ -465,8 +474,8 @@ public class MaterializedViewHandler extends AlterHandler {
                 }
                 if (baseAggregationType != mvAggregationType) {
                     throw new DdlException(
-                            "The aggregation type of column[" + mvColumnName + "] must be same as the aggregate " +
-                                    "type of base column in aggregate table");
+                            "The aggregation type of column[" + mvColumnName + "] must be same as the aggregate "
+                                    + "type of base column in aggregate table");
                 }
                 if (baseAggregationType != null && baseAggregationType.isReplaceFamily() && olapTable
                         .getKeysNum() != numOfKeys) {
@@ -494,6 +503,19 @@ public class MaterializedViewHandler extends AlterHandler {
         if (KeysType.UNIQUE_KEYS == olapTable.getKeysType() && olapTable.hasSequenceCol()) {
             newMVColumns.add(new Column(olapTable.getSequenceCol()));
         }
+
+        if (olapTable.getEnableLightSchemaChange()) {
+            int nextColUniqueId = Column.COLUMN_UNIQUE_ID_INIT_VALUE + 1;
+            for (Column column : newMVColumns) {
+                column.setUniqueId(nextColUniqueId);
+                nextColUniqueId++;
+            }
+        } else {
+            newMVColumns.stream().forEach(column -> {
+                column.setUniqueId(Column.COLUMN_UNIQUE_ID_INIT_VALUE);
+            });
+        }
+        LOG.debug("lightSchemaChange:{}, newMVColumns:{}", olapTable.getEnableLightSchemaChange(), newMVColumns);
         return newMVColumns;
     }
 
@@ -535,25 +557,27 @@ public class MaterializedViewHandler extends AlterHandler {
         for (Column column : olapTable.getSchemaByIndexId(baseIndexId, true)) {
             baseColumnNameToColumn.put(column.getName(), column);
         }
+        LOG.debug("baseSchema:{}", olapTable.getSchemaByIndexId(baseIndexId, true));
         if (keysType.isAggregationFamily()) {
             int keysNumOfRollup = 0;
             for (String columnName : rollupColumnNames) {
-                Column oneColumn = baseColumnNameToColumn.get(columnName);
-                if (oneColumn == null) {
+                Column baseColumn = baseColumnNameToColumn.get(columnName);
+                if (baseColumn == null) {
                     throw new DdlException("Column[" + columnName + "] does not exist");
                 }
-                if (oneColumn.isKey() && meetValue) {
+                if (baseColumn.isKey() && meetValue) {
                     throw new DdlException("Invalid column order. value should be after key");
                 }
-                if (oneColumn.isKey()) {
+                if (baseColumn.isKey()) {
                     keysNumOfRollup += 1;
                     hasKey = true;
                 } else {
                     meetValue = true;
-                    if (oneColumn.getAggregationType().isReplaceFamily()) {
+                    if (baseColumn.getAggregationType().isReplaceFamily()) {
                         meetReplaceValue = true;
                     }
                 }
+                Column oneColumn = new Column(baseColumn);
                 rollupSchema.add(oneColumn);
             }
 
@@ -682,6 +706,19 @@ public class MaterializedViewHandler extends AlterHandler {
                 }
             }
         }
+        if (olapTable.getEnableLightSchemaChange()) {
+            int nextColUniqueId = Column.COLUMN_UNIQUE_ID_INIT_VALUE + 1;
+            for (Column column : rollupSchema) {
+                column.setUniqueId(nextColUniqueId);
+                nextColUniqueId++;
+            }
+        } else {
+            rollupSchema.stream().forEach(column -> {
+                column.setUniqueId(Column.COLUMN_UNIQUE_ID_INIT_VALUE);
+            });
+        }
+        LOG.debug("lightSchemaChange:{}, rollupSchema:{}, baseSchema:{}",
+                olapTable.getEnableLightSchemaChange(), rollupSchema, olapTable.getSchemaByIndexId(baseIndexId, true));
         return rollupSchema;
     }
 
@@ -711,7 +748,7 @@ public class MaterializedViewHandler extends AlterHandler {
 
     public void processBatchDropRollup(List<AlterClause> dropRollupClauses, Database db, OlapTable olapTable)
             throws DdlException, MetaNotFoundException {
-        olapTable.writeLock();
+        olapTable.writeLockOrDdlException();
         try {
             if (olapTable.existTempPartitions()) {
                 throw new DdlException("Can not alter table when there are temp partitions in table");
@@ -735,11 +772,12 @@ public class MaterializedViewHandler extends AlterHandler {
             }
 
             // batch log drop rollup operation
-            EditLog editLog = Catalog.getCurrentCatalog().getEditLog();
+            EditLog editLog = Env.getCurrentEnv().getEditLog();
             long dbId = db.getId();
             long tableId = olapTable.getId();
             editLog.logBatchDropRollup(new BatchDropInfo(dbId, tableId, indexIdSet));
-            LOG.info("finished drop rollup index[{}] in table[{}]", String.join("", rollupNameSet), olapTable.getName());
+            LOG.info("finished drop rollup index[{}] in table[{}]",
+                    String.join("", rollupNameSet), olapTable.getName());
         } finally {
             olapTable.writeUnlock();
         }
@@ -747,7 +785,7 @@ public class MaterializedViewHandler extends AlterHandler {
 
     public void processDropMaterializedView(DropMaterializedViewStmt dropMaterializedViewStmt, Database db,
                                             OlapTable olapTable) throws DdlException, MetaNotFoundException {
-        olapTable.writeLock();
+        olapTable.writeLockOrDdlException();
         try {
             // check table state
             if (olapTable.getState() != OlapTableState.NORMAL) {
@@ -761,7 +799,7 @@ public class MaterializedViewHandler extends AlterHandler {
             // Step2; drop data in memory
             long mvIndexId = dropMaterializedView(mvName, olapTable);
             // Step3: log drop mv operation
-            EditLog editLog = Catalog.getCurrentCatalog().getEditLog();
+            EditLog editLog = Env.getCurrentEnv().getEditLog();
             editLog.logDropRollup(new DropInfo(db.getId(), olapTable.getId(), mvIndexId, false));
             LOG.info("finished drop materialized view [{}] in table [{}]", mvName, olapTable.getName());
         } catch (MetaNotFoundException e) {
@@ -813,7 +851,7 @@ public class MaterializedViewHandler extends AlterHandler {
      */
     private long dropMaterializedView(String mvName, OlapTable olapTable) {
         long mvIndexId = olapTable.getIndexIdByName(mvName);
-        TabletInvertedIndex invertedIndex = Catalog.getCurrentInvertedIndex();
+        TabletInvertedIndex invertedIndex = Env.getCurrentInvertedIndex();
         for (Partition partition : olapTable.getPartitions()) {
             MaterializedIndex rollupIndex = partition.getIndex(mvIndexId);
             // delete rollup index
@@ -828,20 +866,20 @@ public class MaterializedViewHandler extends AlterHandler {
         return mvIndexId;
     }
 
-    public void replayDropRollup(DropInfo dropInfo, Catalog catalog) throws MetaNotFoundException {
+    public void replayDropRollup(DropInfo dropInfo, Env env) throws MetaNotFoundException {
         long dbId = dropInfo.getDbId();
         long tableId = dropInfo.getTableId();
         long rollupIndexId = dropInfo.getIndexId();
 
-        TabletInvertedIndex invertedIndex = Catalog.getCurrentInvertedIndex();
-        Database db = catalog.getDbOrMetaException(dbId);
-        OlapTable olapTable = db.getTableOrMetaException(tableId, Table.TableType.OLAP);
+        TabletInvertedIndex invertedIndex = Env.getCurrentInvertedIndex();
+        Database db = env.getInternalCatalog().getDbOrMetaException(dbId);
+        OlapTable olapTable = (OlapTable) db.getTableOrMetaException(tableId, Table.TableType.OLAP);
         olapTable.writeLock();
         try {
             for (Partition partition : olapTable.getPartitions()) {
                 MaterializedIndex rollupIndex = partition.deleteRollupIndex(rollupIndexId);
 
-                if (!Catalog.isCheckpointThread()) {
+                if (!Env.isCheckpointThread()) {
                     // remove from inverted index
                     for (Tablet tablet : rollupIndex.getTablets()) {
                         invertedIndex.deleteTablet(tablet.getId());
@@ -860,7 +898,6 @@ public class MaterializedViewHandler extends AlterHandler {
     @Override
     protected void runAfterCatalogReady() {
         super.runAfterCatalogReady();
-        runOldAlterJob();
         runAlterJobV2();
     }
 
@@ -882,9 +919,9 @@ public class MaterializedViewHandler extends AlterHandler {
 
     private void changeTableStatus(long dbId, long tableId, OlapTableState olapTableState) {
         try {
-            Database db = Catalog.getCurrentCatalog().getDbOrMetaException(dbId);
-            OlapTable olapTable = db.getTableOrMetaException(tableId, Table.TableType.OLAP);
-            olapTable.writeLock();
+            Database db = Env.getCurrentInternalCatalog().getDbOrMetaException(dbId);
+            OlapTable olapTable = (OlapTable) db.getTableOrMetaException(tableId, Table.TableType.OLAP);
+            olapTable.writeLockOrMetaException();
             try {
                 if (olapTable.getState() == olapTableState) {
                     return;
@@ -905,8 +942,15 @@ public class MaterializedViewHandler extends AlterHandler {
         if (!alterJob.isDone()) {
             addAlterJobV2ToTableNotFinalStateJobMap(alterJob);
             changeTableStatus(alterJob.getDbId(), alterJob.getTableId(), OlapTableState.ROLLUP);
+            LOG.info("set table's state to ROLLUP, table id: {}, job id: {}", alterJob.getTableId(),
+                    alterJob.getJobId());
         } else if (removeAlterJobV2FromTableNotFinalStateJobMap(alterJob)) {
             changeTableStatus(alterJob.getDbId(), alterJob.getTableId(), OlapTableState.NORMAL);
+            LOG.info("set table's state to NORMAL, table id: {}, job id: {}", alterJob.getTableId(),
+                    alterJob.getJobId());
+        } else {
+            LOG.info("not set table's state, table id: {}, is job done: {}, job id: {}", alterJob.getTableId(),
+                    alterJob.isDone(), alterJob.getJobId());
         }
     }
 
@@ -979,126 +1023,11 @@ public class MaterializedViewHandler extends AlterHandler {
         removeJobFromRunningQueue(alterJob);
         if (removeAlterJobV2FromTableNotFinalStateJobMap(alterJob)) {
             changeTableStatus(alterJob.getDbId(), alterJob.getTableId(), OlapTableState.NORMAL);
-        }
-    }
-
-    @Deprecated
-    private void runOldAlterJob() {
-        List<AlterJob> cancelledJobs = Lists.newArrayList();
-        List<AlterJob> finishedJobs = Lists.newArrayList();
-
-        for (AlterJob alterJob : alterJobs.values()) {
-            RollupJob rollupJob = (RollupJob) alterJob;
-            if (rollupJob.getState() != JobState.FINISHING
-                    && rollupJob.getState() != JobState.FINISHED
-                    && rollupJob.getState() != JobState.CANCELLED) {
-                // cancel the old alter table job
-                cancelledJobs.add(rollupJob);
-                continue;
-            }
-
-            if (rollupJob.getTransactionId() < 0) {
-                // it means this is an old type job and current version is real time load version
-                // then kill this job
-                cancelledJobs.add(rollupJob);
-                continue;
-            }
-            JobState state = rollupJob.getState();
-            switch (state) {
-                case PENDING: {
-                    // if rollup job's status is PENDING, we need to send tasks.
-                    if (!rollupJob.sendTasks()) {
-                        cancelledJobs.add(rollupJob);
-                        LOG.warn("sending rollup job[" + rollupJob.getTableId() + "] tasks failed. cancel it.");
-                    }
-                    break;
-                }
-                case RUNNING: {
-                    if (rollupJob.isTimeout()) {
-                        cancelledJobs.add(rollupJob);
-                    } else {
-                        int res = rollupJob.tryFinishJob();
-                        if (res == -1) {
-                            // cancel rollup
-                            cancelledJobs.add(rollupJob);
-                            LOG.warn("cancel rollup[{}] cause bad rollup job[{}]",
-                                    ((RollupJob) rollupJob).getRollupIndexName(), rollupJob.getTableId());
-                        }
-                    }
-                    break;
-                }
-                case FINISHING: {
-                    // check previous load job finished
-                    if (rollupJob.isPreviousLoadFinished()) {
-                        // if all previous load job finished, then send clear alter tasks to all related be
-                        LOG.info("previous txn finished, try to send clear txn task");
-                        int res = rollupJob.checkOrResendClearTasks();
-                        if (res != 0) {
-                            LOG.info("send clear txn task return {}", res);
-                            if (res == -1) {
-                                LOG.warn("rollup job is in finishing state, but could not finished, "
-                                        + "just finish it, maybe a fatal error {}", rollupJob);
-                            }
-                            finishedJobs.add(rollupJob);
-                        }
-                    } else {
-                        LOG.info("previous load jobs are not finished. can not finish rollup job: {}",
-                                rollupJob.getTableId());
-                    }
-                    break;
-                }
-                case FINISHED: {
-                    break;
-                }
-                case CANCELLED: {
-                    // the alter job could be cancelled in 3 ways
-                    // 1. the table or db is dropped
-                    // 2. user cancels the job
-                    // 3. the job meets errors when running
-                    // for the previous 2 scenarios, user will call jobdone to finish the job and set its state to cancelled
-                    // so that there exists alter job whose state is cancelled
-                    // for the third scenario, the thread will add to cancelled job list and will be dealt by call jobdone
-                    // Preconditions.checkState(false);
-                    break;
-                }
-                default:
-                    Preconditions.checkState(false);
-                    break;
-            }
-        } // end for jobs
-
-        // handle cancelled rollup jobs
-        for (AlterJob rollupJob : cancelledJobs) {
-            Database db = Catalog.getCurrentCatalog().getDbNullable(rollupJob.getDbId());
-            if (db == null) {
-                cancelInternal(rollupJob, null, null);
-                continue;
-            }
-
-            OlapTable olapTable = (OlapTable) db.getTableNullable(rollupJob.getTableId());
-            if (olapTable != null) {
-                olapTable.writeLock();
-            }
-            try {
-                rollupJob.cancel(olapTable, "cancelled");
-            } finally {
-                if (olapTable != null) {
-                    olapTable.writeUnlock();
-                }
-            }
-            jobDone(rollupJob);
-        }
-
-        // handle finished rollup jobs
-        for (AlterJob alterJob : finishedJobs) {
-            alterJob.setState(JobState.FINISHED);
-            // remove from alterJobs.
-            // has to remove here, because the job maybe finished and it still in alter job list,
-            // then user could submit schema change task, and auto load to two table flag will be set false.
-            // then schema change job will be failed.
-            alterJob.finishJob();
-            jobDone(alterJob);
-            Catalog.getCurrentCatalog().getEditLog().logFinishRollup((RollupJob) alterJob);
+            LOG.info("set table's state to NORMAL, table id: {}, job id: {}", alterJob.getTableId(),
+                    alterJob.getJobId());
+        } else {
+            LOG.info("not set table's state, table id: {}, is job done: {}, job id: {}", alterJob.getTableId(),
+                    alterJob.isDone(), alterJob.getJobId());
         }
     }
 
@@ -1106,7 +1035,6 @@ public class MaterializedViewHandler extends AlterHandler {
     public List<List<Comparable>> getAlterJobInfosByDb(Database db) {
         List<List<Comparable>> rollupJobInfos = new LinkedList<List<Comparable>>();
 
-        getOldAlterJobInfos(db, rollupJobInfos);
         getAlterJobV2Infos(db, rollupJobInfos);
 
         // sort by
@@ -1124,48 +1052,12 @@ public class MaterializedViewHandler extends AlterHandler {
                 continue;
             }
             if (ctx != null) {
-                if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ctx, db.getFullName(), alterJob.getTableName(), PrivPredicate.ALTER)) {
+                if (!Env.getCurrentEnv().getAuth().checkTblPriv(ctx, db.getFullName(),
+                        alterJob.getTableName(), PrivPredicate.ALTER)) {
                     continue;
                 }
             }
             alterJob.getInfo(rollupJobInfos);
-        }
-    }
-
-    @Deprecated
-    private void getOldAlterJobInfos(Database db, List<List<Comparable>> rollupJobInfos) {
-        List<AlterJob> jobs = Lists.newArrayList();
-        // lock to perform atomically
-        lock();
-        try {
-            for (AlterJob alterJob : this.alterJobs.values()) {
-                if (alterJob.getDbId() == db.getId()) {
-                    jobs.add(alterJob);
-                }
-            }
-
-            for (AlterJob alterJob : this.finishedOrCancelledAlterJobs) {
-                if (alterJob.getDbId() == db.getId()) {
-                    jobs.add(alterJob);
-                }
-            }
-        } finally {
-            unlock();
-        }
-
-
-        for (AlterJob selectedJob : jobs) {
-            try {
-                OlapTable olapTable = db.getTableOrMetaException(selectedJob.getTableId(), Table.TableType.OLAP);
-                olapTable.readLock();
-                try {
-                    selectedJob.getJobInfo(rollupJobInfos, olapTable);
-                } finally {
-                    olapTable.readUnlock();
-                }
-            } catch (MetaNotFoundException ignored) {
-            }
-
         }
     }
 
@@ -1193,19 +1085,19 @@ public class MaterializedViewHandler extends AlterHandler {
         Preconditions.checkState(!Strings.isNullOrEmpty(dbName));
         Preconditions.checkState(!Strings.isNullOrEmpty(tableName));
 
-        Database db = Catalog.getCurrentCatalog().getDbOrDdlException(dbName);
+        Database db = Env.getCurrentInternalCatalog().getDbOrDdlException(dbName);
 
-        AlterJob rollupJob = null;
         List<AlterJobV2> rollupJobV2List = new ArrayList<>();
         OlapTable olapTable;
         try {
-            olapTable = db.getTableOrMetaException(tableName, Table.TableType.OLAP);
+            olapTable = (OlapTable) db.getTableOrMetaException(tableName, Table.TableType.OLAP);
         } catch (MetaNotFoundException e) {
             throw new DdlException(e.getMessage());
         }
         olapTable.writeLock();
         try {
-            if (olapTable.getState() != OlapTableState.ROLLUP && olapTable.getState() != OlapTableState.WAITING_STABLE) {
+            if (olapTable.getState() != OlapTableState.ROLLUP
+                    && olapTable.getState() != OlapTableState.WAITING_STABLE) {
                 throw new DdlException("Table[" + tableName + "] is not under ROLLUP. "
                         + "Use 'ALTER TABLE DROP ROLLUP' if you want to.");
             }
@@ -1214,22 +1106,17 @@ public class MaterializedViewHandler extends AlterHandler {
             if (cancelAlterTableStmt.getAlterJobIdList() != null) {
                 for (Long jobId : cancelAlterTableStmt.getAlterJobIdList()) {
                     AlterJobV2 alterJobV2 = getUnfinishedAlterJobV2ByJobId(jobId);
-                    if (alterJobV2 == null)
+                    if (alterJobV2 == null) {
                         continue;
+                    }
                     rollupJobV2List.add(getUnfinishedAlterJobV2ByJobId(jobId));
                 }
             } else {
                 rollupJobV2List = getUnfinishedAlterJobV2ByTableId(olapTable.getId());
             }
             if (rollupJobV2List.size() == 0) {
-                rollupJob = getAlterJob(olapTable.getId());
-                Preconditions.checkNotNull(rollupJob, "Table[" + tableName + "] is not under ROLLUP. ");
-                if (rollupJob.getState() == JobState.FINISHED
-                        || rollupJob.getState() == JobState.FINISHING
-                        || rollupJob.getState() == JobState.CANCELLED) {
-                    throw new DdlException("job is already " + rollupJob.getState().name() + ", can not cancel it");
-                }
-                rollupJob.cancel(olapTable, "user cancelled");
+                // Alter job v1 is not supported, delete related code
+                throw new DdlException("Table[" + tableName + "] is not under ROLLUP. Maybe it has old alter job");
             }
         } finally {
             olapTable.writeUnlock();
@@ -1244,11 +1131,6 @@ public class MaterializedViewHandler extends AlterHandler {
                 }
             }
             return;
-        }
-
-        // handle old alter job
-        if (rollupJob != null && rollupJob.getState() == JobState.CANCELLED) {
-            jobDone(rollupJob);
         }
     }
 

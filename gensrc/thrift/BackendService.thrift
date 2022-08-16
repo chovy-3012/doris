@@ -31,12 +31,16 @@ struct TExportTaskRequest {
 
 struct TTabletStat {
     1: required i64 tablet_id
+    // local data size
     2: optional i64 data_size
     3: optional i64 row_num
+    4: optional i64 version_count
+    5: optional i64 remote_data_size 
 }
 
 struct TTabletStatResult {
     1: required map<i64, TTabletStat> tablets_stats
+    2: optional list<TTabletStat> tablet_stat_list
 }
 
 struct TKafkaLoadInfo {
@@ -111,6 +115,11 @@ struct TDiskTrashInfo {
     3: required i64 trash_used_capacity
 }
 
+struct TCheckStorageFormatResult {
+    1: optional list<i64> v1_tablets;
+    2: optional list<i64> v2_tablets;
+}
+
 service BackendService {
     // Called by coord to start asynchronous execution of plan fragment in backend.
     // Returns as soon as all incoming data streams have been set up.
@@ -139,13 +148,6 @@ service BackendService {
 
     AgentService.TAgentResult publish_cluster_state(1:AgentService.TAgentPublishRequest request);
 
-    AgentService.TAgentResult submit_etl_task(1:AgentService.TMiniLoadEtlTaskRequest request);
-
-    AgentService.TMiniLoadEtlStatusResult get_etl_status(
-            1:AgentService.TMiniLoadEtlStatusRequest request);
-
-    AgentService.TAgentResult delete_etl_files(1:AgentService.TDeleteEtlFilesRequest request);
-
     Status.TStatus submit_export_task(1:TExportTaskRequest request);
 
     PaloInternalService.TExportStatusResult get_export_status(1:Types.TUniqueId task_id);
@@ -172,4 +174,7 @@ service BackendService {
     TStreamLoadRecordResult get_stream_load_record(1: i64 last_stream_record_time);
 
     oneway void clean_trash();
+
+    // check tablet rowset type
+    TCheckStorageFormatResult check_storage_format();
 }

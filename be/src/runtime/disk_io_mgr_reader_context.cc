@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/runtime/disk-io-mgr-reader-context.cc
+// and modified by Doris
 
 #include "runtime/disk_io_mgr_internal.h"
 
@@ -151,7 +154,7 @@ DiskIoMgr::RequestContext::RequestContext(DiskIoMgr* parent, int num_disks)
           _disk_states(num_disks) {}
 
 // Resets this object.
-void DiskIoMgr::RequestContext::reset(std::shared_ptr<MemTracker> tracker) {
+void DiskIoMgr::RequestContext::reset() {
     DCHECK_EQ(_state, Inactive);
     _status = Status::OK();
 
@@ -161,7 +164,6 @@ void DiskIoMgr::RequestContext::reset(std::shared_ptr<MemTracker> tracker) {
     _disks_accessed_bitmap = nullptr;
 
     _state = Active;
-    _mem_tracker = std::move(tracker);
 
     _num_unstarted_scan_ranges = 0;
     _num_disks_with_ranges = 0;

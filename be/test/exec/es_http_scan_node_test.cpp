@@ -40,7 +40,7 @@ namespace doris {
 class EsHttpScanNodeTest : public testing::Test {
 public:
     EsHttpScanNodeTest() : _runtime_state(TQueryGlobals()) {
-        _runtime_state._instance_mem_tracker.reset(new MemTracker());
+        _runtime_state.init_instance_mem_tracker();
         TDescriptorTable t_desc_table;
 
         // table descriptors
@@ -107,10 +107,10 @@ protected:
 TEST_F(EsHttpScanNodeTest, normal_use) {
     EsHttpScanNode scan_node(&_obj_pool, _tnode, *_desc_tbl);
     Status status = scan_node.init(_tnode, &_runtime_state);
-    ASSERT_TRUE(status.ok());
+    EXPECT_TRUE(status.ok());
 
     status = scan_node.prepare(&_runtime_state);
-    ASSERT_TRUE(status.ok());
+    EXPECT_TRUE(status.ok());
 
     // scan range
     TEsScanRange es_scan_range;
@@ -131,18 +131,13 @@ TEST_F(EsHttpScanNodeTest, normal_use) {
     scan_ranges.push_back(scan_range_params);
 
     status = scan_node.set_scan_ranges(scan_ranges);
-    ASSERT_TRUE(status.ok());
+    EXPECT_TRUE(status.ok());
 
     status = scan_node.open(&_runtime_state);
-    ASSERT_TRUE(status.ok());
+    EXPECT_TRUE(status.ok());
 
     status = scan_node.close(&_runtime_state);
-    ASSERT_FALSE(status.ok());
+    EXPECT_FALSE(status.ok());
 }
 
 } // namespace doris
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

@@ -14,6 +14,9 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// This file is copied from
+// https://github.com/apache/impala/blob/branch-2.9.0/be/src/exprs/expr.cpp
+// and modified by Doris
 
 #include "exprs/expr.h"
 
@@ -35,19 +38,16 @@
 #include "exprs/expr_context.h"
 #include "exprs/in_predicate.h"
 #include "exprs/info_func.h"
-#include "exprs/is_null_predicate.h"
 #include "exprs/literal.h"
 #include "exprs/null_literal.h"
+#include "exprs/rpc_fn_call.h"
 #include "exprs/scalar_fn_call.h"
 #include "exprs/slot_ref.h"
 #include "exprs/tuple_is_null_predicate.h"
-#include "gen_cpp/Data_types.h"
 #include "gen_cpp/Exprs_types.h"
-#include "gen_cpp/PaloService_types.h"
-#include "runtime/raw_value.h"
+#include "runtime/primitive_type.h"
 #include "runtime/runtime_state.h"
 #include "runtime/user_function_cache.h"
-#include "util/debug_util.h"
 
 using std::vector;
 namespace doris {
@@ -90,8 +90,7 @@ Expr::Expr(const Expr& expr)
           _output_column(expr._output_column),
           _fn(expr._fn),
           _fn_context_index(expr._fn_context_index),
-          _constant_val(expr._constant_val),
-          _vector_compute_fn(expr._vector_compute_fn) {}
+          _constant_val(expr._constant_val) {}
 
 Expr::Expr(const TypeDescriptor& type)
         : _opcode(TExprOpcode::INVALID_OPCODE),
@@ -124,6 +123,7 @@ Expr::Expr(const TypeDescriptor& type)
     case TYPE_FLOAT:
     case TYPE_DOUBLE:
     case TYPE_TIME:
+    case TYPE_TIMEV2:
         _node_type = (TExprNodeType::FLOAT_LITERAL);
         break;
 
@@ -133,6 +133,8 @@ Expr::Expr(const TypeDescriptor& type)
 
     case TYPE_DATE:
     case TYPE_DATETIME:
+    case TYPE_DATEV2:
+    case TYPE_DATETIMEV2:
         _node_type = (TExprNodeType::DATE_LITERAL);
         break;
 
@@ -141,6 +143,7 @@ Expr::Expr(const TypeDescriptor& type)
     case TYPE_HLL:
     case TYPE_OBJECT:
     case TYPE_STRING:
+    case TYPE_QUANTILE_STATE:
         _node_type = (TExprNodeType::STRING_LITERAL);
         break;
 
@@ -183,6 +186,7 @@ Expr::Expr(const TypeDescriptor& type, bool is_slotref)
         case TYPE_FLOAT:
         case TYPE_DOUBLE:
         case TYPE_TIME:
+        case TYPE_TIMEV2:
             _node_type = (TExprNodeType::FLOAT_LITERAL);
             break;
 
@@ -191,6 +195,8 @@ Expr::Expr(const TypeDescriptor& type, bool is_slotref)
             break;
 
         case TYPE_DATETIME:
+        case TYPE_DATEV2:
+        case TYPE_DATETIMEV2:
             _node_type = (TExprNodeType::DATE_LITERAL);
             break;
 
@@ -198,6 +204,7 @@ Expr::Expr(const TypeDescriptor& type, bool is_slotref)
         case TYPE_VARCHAR:
         case TYPE_HLL:
         case TYPE_OBJECT:
+        case TYPE_QUANTILE_STATE:
         case TYPE_STRING:
             _node_type = (TExprNodeType::STRING_LITERAL);
             break;
@@ -353,10 +360,15 @@ Status Expr::create_expr(ObjectPool* pool, const TExprNode& texpr_node, Expr** e
             *expr = pool->add(new IfExpr(texpr_node));
         } else if (texpr_node.fn.name.function_name == "nullif") {
             *expr = pool->add(new NullIfExpr(texpr_node));
-        } else if (texpr_node.fn.name.function_name == "ifnull") {
+        } else if (texpr_node.fn.name.function_name == "ifnull" ||
+                   texpr_node.fn.name.function_name == "nvl") {
             *expr = pool->add(new IfNullExpr(texpr_node));
         } else if (texpr_node.fn.name.function_name == "coalesce") {
             *expr = pool->add(new CoalesceExpr(texpr_node));
+        } else if (texpr_node.fn.binary_type == TFunctionBinaryType::RPC) {
+            *expr = pool->add(new RPCFnCall(texpr_node));
+        } else if (ArithmeticExpr::is_valid(texpr_node.fn.name.function_name)) {
+            *expr = pool->add(ArithmeticExpr::from_fn_name(texpr_node));
         } else {
             *expr = pool->add(new ScalarFnCall(texpr_node));
         }
@@ -401,27 +413,9 @@ Status Expr::create_expr(ObjectPool* pool, const TExprNode& texpr_node, Expr** e
         *expr = pool->add(new InfoFunc(texpr_node));
         return Status::OK();
     }
-#if 0
-    case TExprNodeType::FUNCTION_CALL: {
-        if (!texpr_node.__isset.fn_call_expr) {
-            return Status::InternalError("Udf call not set in thrift node");
-        }
-
-        if (texpr_node.fn_call_expr.fn.binary_type == TFunctionBinaryType::HIVE) {
-            DCHECK(false);  //temp add, can't get here
-            //*expr = pool->Add(new HiveUdfCall(texpr_node));
-        } else {
-            *expr = pool->add(new NativeUdfExpr(texpr_node));
-        }
-
-        return Status::OK();
-    }
-#endif
 
     default:
-        std::stringstream os;
-        os << "Unknown expr node type: " << texpr_node.node_type;
-        return Status::InternalError(os.str());
+        return Status::InternalError("Unknown expr node type: {}", texpr_node.node_type);
     }
 }
 
@@ -518,9 +512,9 @@ int Expr::compute_results_layout(const std::vector<ExprContext*>& ctxs, std::vec
 }
 
 Status Expr::prepare(const std::vector<ExprContext*>& ctxs, RuntimeState* state,
-                     const RowDescriptor& row_desc, const std::shared_ptr<MemTracker>& tracker) {
+                     const RowDescriptor& row_desc) {
     for (int i = 0; i < ctxs.size(); ++i) {
-        RETURN_IF_ERROR(ctxs[i]->prepare(state, row_desc, tracker));
+        RETURN_IF_ERROR(ctxs[i]->prepare(state, row_desc));
     }
     return Status::OK();
 }
@@ -560,16 +554,6 @@ void Expr::close(RuntimeState* state, ExprContext* context,
     for (int i = 0; i < _children.size(); ++i) {
         _children[i]->close(state, context, scope);
     }
-    // TODO(zc)
-#if 0
-    if (scope == FunctionContext::FRAGMENT_LOCAL) {
-        // This is the final, non-cloned context to close. Clean up the whole Expr.
-        if (cache_entry_ != nullptr) {
-            LibCache::instance()->DecrementUseCount(cache_entry_);
-            cache_entry_ = nullptr;
-        }
-    }
-#endif
 }
 
 Status Expr::clone_if_not_exists(const std::vector<ExprContext*>& ctxs, RuntimeState* state,
@@ -700,7 +684,8 @@ doris_udf::AnyVal* Expr::get_const_val(ExprContext* context) {
         break;
     }
     case TYPE_DOUBLE:
-    case TYPE_TIME: {
+    case TYPE_TIME:
+    case TYPE_TIMEV2: {
         _constant_val.reset(new DoubleVal(get_double_val(context, nullptr)));
         break;
     }
@@ -708,6 +693,7 @@ doris_udf::AnyVal* Expr::get_const_val(ExprContext* context) {
     case TYPE_VARCHAR:
     case TYPE_HLL:
     case TYPE_OBJECT:
+    case TYPE_QUANTILE_STATE:
     case TYPE_STRING: {
         _constant_val.reset(new StringVal(get_string_val(context, nullptr)));
         break;
@@ -718,8 +704,30 @@ doris_udf::AnyVal* Expr::get_const_val(ExprContext* context) {
         break;
     }
 
+    case TYPE_DATEV2: {
+        _constant_val.reset(new DateV2Val(get_datev2_val(context, nullptr)));
+        break;
+    }
+
+    case TYPE_DATETIMEV2: {
+        _constant_val.reset(new DateTimeV2Val(get_datetimev2_val(context, nullptr)));
+        break;
+    }
+
     case TYPE_DECIMALV2: {
         _constant_val.reset(new DecimalV2Val(get_decimalv2_val(context, nullptr)));
+        break;
+    }
+    case TYPE_DECIMAL32: {
+        _constant_val.reset(new Decimal32Val(get_decimal32_val(context, nullptr)));
+        break;
+    }
+    case TYPE_DECIMAL64: {
+        _constant_val.reset(new Decimal64Val(get_decimal64_val(context, nullptr)));
+        break;
+    }
+    case TYPE_DECIMAL128: {
+        _constant_val.reset(new Decimal128Val(get_decimal128_val(context, nullptr)));
         break;
     }
     case TYPE_NULL: {
@@ -781,6 +789,18 @@ LargeIntVal Expr::get_large_int_val(ExprContext* context, TupleRow* row) {
     return LargeIntVal::null(); // (*(int64_t*)get_value(row));
 }
 
+Decimal32Val Expr::get_decimal32_val(ExprContext* context, TupleRow* row) {
+    return Decimal32Val::null(); // (*(int32_t*)get_value(row));
+}
+
+Decimal64Val Expr::get_decimal64_val(ExprContext* context, TupleRow* row) {
+    return Decimal64Val::null();
+}
+
+Decimal128Val Expr::get_decimal128_val(ExprContext* context, TupleRow* row) {
+    return Decimal128Val::null();
+}
+
 FloatVal Expr::get_float_val(ExprContext* context, TupleRow* row) {
     return FloatVal::null(); // (*(float*)get_value(row));
 }
@@ -800,6 +820,16 @@ StringVal Expr::get_string_val(ExprContext* context, TupleRow* row) {
 DateTimeVal Expr::get_datetime_val(ExprContext* context, TupleRow* row) {
     DateTimeVal val;
     // ((DateTimeValue*)get_value(row))->to_datetime_val(&val);
+    return val;
+}
+
+DateV2Val Expr::get_datev2_val(ExprContext* context, TupleRow* row) {
+    DateV2Val val;
+    return val;
+}
+
+DateTimeV2Val Expr::get_datetimev2_val(ExprContext* context, TupleRow* row) {
+    DateTimeV2Val val;
     return val;
 }
 
@@ -843,10 +873,9 @@ void Expr::assign_fn_ctx_idx(int* next_fn_ctx_idx) {
 }
 
 Status Expr::create(const TExpr& texpr, const RowDescriptor& row_desc, RuntimeState* state,
-                    ObjectPool* pool, Expr** scalar_expr,
-                    const std::shared_ptr<MemTracker>& tracker) {
+                    ObjectPool* pool, Expr** scalar_expr) {
     *scalar_expr = nullptr;
-    Expr* root;
+    Expr* root = nullptr;
     RETURN_IF_ERROR(create_expr(pool, texpr.nodes[0], &root));
     RETURN_IF_ERROR(create_tree(texpr, pool, root));
     // TODO pengyubing replace by Init()
@@ -867,12 +896,11 @@ Status Expr::create(const TExpr& texpr, const RowDescriptor& row_desc, RuntimeSt
 }
 
 Status Expr::create(const std::vector<TExpr>& texprs, const RowDescriptor& row_desc,
-                    RuntimeState* state, ObjectPool* pool, std::vector<Expr*>* exprs,
-                    const std::shared_ptr<MemTracker>& tracker) {
+                    RuntimeState* state, ObjectPool* pool, std::vector<Expr*>* exprs) {
     exprs->clear();
     for (const TExpr& texpr : texprs) {
-        Expr* expr;
-        RETURN_IF_ERROR(create(texpr, row_desc, state, pool, &expr, tracker));
+        Expr* expr = nullptr;
+        RETURN_IF_ERROR(create(texpr, row_desc, state, pool, &expr));
         DCHECK(expr != nullptr);
         exprs->push_back(expr);
     }
@@ -880,14 +908,13 @@ Status Expr::create(const std::vector<TExpr>& texprs, const RowDescriptor& row_d
 }
 
 Status Expr::create(const TExpr& texpr, const RowDescriptor& row_desc, RuntimeState* state,
-                    Expr** scalar_expr, const std::shared_ptr<MemTracker>& tracker) {
-    return Expr::create(texpr, row_desc, state, state->obj_pool(), scalar_expr, tracker);
+                    Expr** scalar_expr) {
+    return Expr::create(texpr, row_desc, state, state->obj_pool(), scalar_expr);
 }
 
 Status Expr::create(const std::vector<TExpr>& texprs, const RowDescriptor& row_desc,
-                    RuntimeState* state, std::vector<Expr*>* exprs,
-                    const std::shared_ptr<MemTracker>& tracker) {
-    return Expr::create(texprs, row_desc, state, state->obj_pool(), exprs, tracker);
+                    RuntimeState* state, std::vector<Expr*>* exprs) {
+    return Expr::create(texprs, row_desc, state, state->obj_pool(), exprs);
 }
 
 Status Expr::create_tree(const TExpr& texpr, ObjectPool* pool, Expr* root) {
